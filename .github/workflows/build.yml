@@ -16,11 +16,10 @@ jobs:
         include:
           - preset: debug
             config: Debug
+            build_tests: 'ON'
           - preset: release
             config: Release
-
-    env:
-      VCPKG_ROOT: 'C:\vcpkg'
+            build_tests: 'OFF'
 
     steps:
       - name: Checkout
@@ -30,7 +29,23 @@ jobs:
         run: pip install pillow numpy scipy
 
       - name: Configure
-        run: cmake --preset ${{ matrix.preset }}
+        shell: pwsh
+        run: |
+          $vRoot = if ($env:VCPKG_INSTALLATION_ROOT -and (Test-Path "$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake")) {
+            $env:VCPKG_INSTALLATION_ROOT
+          } elseif (Test-Path "C:\vcpkg\scripts\buildsystems\vcpkg.cmake") {
+            "C:\vcpkg"
+          } else {
+            $null
+          }
+          if ($vRoot) {
+            Write-Host "Found vcpkg at: $vRoot"
+            $env:VCPKG_ROOT = $vRoot
+            cmake --preset ${{ matrix.preset }}
+          } else {
+            Write-Host "No vcpkg toolchain found, configuring natively with MSVC"
+            cmake -B build/${{ matrix.preset }} -G "Visual Studio 17 2022" -A x64 -D CMAKE_BUILD_TYPE=${{ matrix.config }} -D DUWN_BUILD_TESTS=${{ matrix.build_tests }}
+          }
 
       - name: Build
         run: cmake --build build/${{ matrix.preset }} --config ${{ matrix.config }}
