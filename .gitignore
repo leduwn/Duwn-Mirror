@@ -1,0 +1,63 @@
+# Build directories
+build/
+build-*/
+build-msvc/
+out/
+bin/
+lib/
+
+# Visual Studio / IDE
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+
+# VS Code
+.vscode/
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+%SystemDrive%/
+
+# WiX / Installer artifacts
+*.wixpdb
+*.wixobj
+*.cab
+test.wixpdb
+installer/*.msi
+installer/DUWN-Mirror-*.exe
+installer/Duwn-Mirror-*.exe
+installer/Duwn-Mirror-Setup-*.exe
+installer/DUWN-Mirror-Setup-*.exe
+
+# Staged distributions and release binaries
+dist/
+release/**/*.exe
+release/**/*.msi
+
+# Test / Benchmark logs and artifacts
+tests/**/*.exe
+logs/
+*.log
+cold_results.xml
+warm_results.xml
+pm_fullscreen.csv
+pm_normal.csv
+pm_output.csv
+artifacts/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/

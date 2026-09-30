@@ -1,0 +1,181 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:firewall="http://wixtoolset.org/schemas/v4/wxs/firewall"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="Duwn Mirror"
+           Manufacturer="Duwn Mirror Contributors"
+           Version="1.0.0"
+           UpgradeCode="A3D1E428-8902-4D9A-90A7-6831F901B94C"
+           Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+                  Schedule="afterInstallInitialize" />
+
+    <!-- Detect and close running application instances before replacing binaries -->
+    <util:CloseApplication Target="duwn-mirror.exe"
+                           CloseMessage="yes"
+                           Description="Duwn Mirror must close before the update can continue."
+                           RebootPrompt="no"
+                           Timeout="5"
+                           TerminateProcess="1" />
+    <util:CloseApplication Target="uxplay.exe"
+                           CloseMessage="yes"
+                           Description="Duwn Mirror AirPlay Engine must close before the update can continue."
+                           RebootPrompt="no"
+                           Timeout="5"
+                           TerminateProcess="1" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="assets\app_icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/duwn/duwn-mirror" />
+    <Property Id="ARPNOMODIFY" Value="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Duwn Mirror">
+        <Directory Id="AirPlayFolder" Name="duwn-airplay">
+          <Directory Id="PluginsFolder" Name="plugins" />
+          <Directory Id="LibexecFolder" Name="libexec" />
+          <Directory Id="AirPlayToolsFolder" Name="tools" />
+        </Directory>
+        <Directory Id="ToolsFolder" Name="tools" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Duwn Mirror" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder" />
+
+    <!-- Components for main executable and docs -->
+    <Component Id="MainExecutable" Directory="INSTALLFOLDER" Guid="6F824A87-3E90-482B-A795-A7B8E85B69F0">
+      <File Id="DuwnMirrorExe" Source="build-msvc\bin\Release\duwn-mirror.exe" KeyPath="yes">
+        <firewall:FirewallException Id="FW_DuwnMirror_TCP_Priv"
+                                    Name="Duwn Mirror Core Application (TCP-In Private)"
+                                    Description="Allow Duwn Mirror Core inbound TCP connections on private networks"
+                                    Protocol="tcp"
+                                    Scope="any"
+                                    Profile="private"
+                                    IgnoreFailure="yes" />
+        <firewall:FirewallException Id="FW_DuwnMirror_TCP_Dom"
+                                    Name="Duwn Mirror Core Application (TCP-In Domain)"
+                                    Description="Allow Duwn Mirror Core inbound TCP connections on domain networks"
+                                    Protocol="tcp"
+                                    Scope="any"
+                                    Profile="domain"
+                                    IgnoreFailure="yes" />
+        <firewall:FirewallException Id="FW_DuwnMirror_UDP_Priv"
+                                    Name="Duwn Mirror Core Application (UDP-In Private)"
+                                    Description="Allow Duwn Mirror Core inbound UDP connections on private networks"
+                                    Protocol="udp"
+                                    Scope="any"
+                                    Profile="private"
+                                    IgnoreFailure="yes" />
+        <firewall:FirewallException Id="FW_DuwnMirror_UDP_Dom"
+                                    Name="Duwn Mirror Core Application (UDP-In Domain)"
+                                    Description="Allow Duwn Mirror Core inbound UDP connections on domain networks"
+                                    Protocol="udp"
+                                    Scope="any"
+                                    Profile="domain"
+                                    IgnoreFailure="yes" />
+      </File>
+      <File Id="LicenseFile" Source="LICENSE" />
+      <File Id="NoticesFile" Source="THIRD_PARTY_NOTICES.txt" />
+      <File Id="UxPlayLicenseFile" Source="UxPlay-GPL-3.0.txt" />
+    </Component>
+
+    <Component Id="UxPlayExecutable" Directory="AirPlayFolder" Guid="8B9A0E31-18F2-4917-A415-3C23D8A95311">
+      <File Id="UxPlayExe" Source="build-msvc\bin\Release\duwn-airplay\uxplay.exe" KeyPath="yes">
+        <firewall:FirewallException Id="FW_UxPlay_TCP_Priv"
+                                    Name="Duwn Mirror AirPlay Engine (TCP-In Private)"
+                                    Description="Allow Duwn Mirror AirPlay sidecar inbound TCP connections on private networks"
+                                    Protocol="tcp"
+                                    Scope="any"
+                                    Profile="private"
+                                    IgnoreFailure="yes" />
+        <firewall:FirewallException Id="FW_UxPlay_TCP_Dom"
+                                    Name="Duwn Mirror AirPlay Engine (TCP-In Domain)"
+                                    Description="Allow Duwn Mirror AirPlay sidecar inbound TCP connections on domain networks"
+                                    Protocol="tcp"
+                                    Scope="any"
+                                    Profile="domain"
+                                    IgnoreFailure="yes" />
+        <firewall:FirewallException Id="FW_UxPlay_UDP_Priv"
+                                    Name="Duwn Mirror AirPlay Engine (UDP-In Private)"
+                                    Description="Allow Duwn Mirror AirPlay sidecar inbound UDP connections on private networks"
+                                    Protocol="udp"
+                                    Scope="any"
+                                    Profile="private"
+                                    IgnoreFailure="yes" />
+        <firewall:FirewallException Id="FW_UxPlay_UDP_Dom"
+                                    Name="Duwn Mirror AirPlay Engine (UDP-In Domain)"
+                                    Description="Allow Duwn Mirror AirPlay sidecar inbound UDP connections on domain networks"
+                                    Protocol="udp"
+                                    Scope="any"
+                                    Profile="domain"
+                                    IgnoreFailure="yes" />
+      </File>
+    </Component>
+
+    <Component Id="AppShortcut" Directory="ApplicationProgramsFolder" Guid="D2387B41-C684-4821-825B-88390D8F7B5E">
+      <Shortcut Id="ApplicationStartMenuShortcut"
+                Name="Duwn Mirror"
+                Description="Low-latency AirPlay Mirroring for Windows"
+                Target="[!DuwnMirrorExe]"
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="AppIcon" />
+      <RemoveFile Id="RemoveLegacyStartShortcut" Name="DUWN Mirror.lnk" On="install" />
+      <RemoveFolder Id="CleanUpShortCut" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\DUWN\DUWNMirror" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <Component Id="DesktopShortcut" Directory="DesktopFolder" Guid="E89C19B4-1234-4C3D-8822-6F7A9B0C1D2E">
+      <Shortcut Id="ApplicationDesktopShortcut"
+                Name="Duwn Mirror"
+                Description="Low-latency AirPlay Mirroring for Windows"
+                Target="[!DuwnMirrorExe]"
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="AppIcon" />
+      <RemoveFile Id="RemoveLegacyDesktopShortcut" Name="DUWN Mirror.lnk" On="install" />
+      <RegistryValue Root="HKCU" Key="Software\DUWN\DUWNMirror" Name="desktop_shortcut" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <!-- Full, self-contained GStreamer & UxPlay AirPlay runtime -->
+    <ComponentGroup Id="AirPlayRuntime">
+      <Files Include="..\build-msvc\bin\Release\duwn-airplay\*.dll" Directory="AirPlayFolder" />
+      <Files Include="..\build-msvc\bin\Release\duwn-airplay\plugins\*.dll" Directory="PluginsFolder" />
+      <Files Include="..\build-msvc\bin\Release\duwn-airplay\libexec\*.exe" Directory="LibexecFolder" />
+      <Files Include="..\build-msvc\bin\Release\duwn-airplay\tools\*.exe" Directory="AirPlayToolsFolder" />
+    </ComponentGroup>
+
+    <!-- Firewall tools -->
+    <Component Id="FirewallScripts" Directory="ToolsFolder" Guid="72E4C93B-B03F-4AA6-9C49-65A6836965F2">
+      <File Source="tools\configure-firewall.ps1" KeyPath="yes" />
+      <File Source="tools\configure-firewall.cmd" />
+    </Component>
+
+    <!-- Cleanup any dynamic Public firewall rules on uninstall -->
+    <CustomAction Id="CleanupPublicFirewallRules"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="&quot;[INSTALLFOLDER]duwn-mirror.exe&quot; --firewall disable-public"
+                  Execute="deferred"
+                  Return="check"
+                  Impersonate="no" />
+
+    <InstallExecuteSequence>
+      <Custom Action="CleanupPublicFirewallRules" Before="RemoveFiles" Condition='REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE' />
+    </InstallExecuteSequence>
+
+    <Feature Id="MainFeature" Title="Duwn Mirror" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="UxPlayExecutable" />
+      <ComponentRef Id="AppShortcut" />
+      <ComponentGroupRef Id="AirPlayRuntime" />
+      <ComponentRef Id="FirewallScripts" />
+      <Feature Id="DesktopShortcutFeature" Title="Create Desktop Shortcut" Level="1">
+        <ComponentRef Id="DesktopShortcut" />
+      </Feature>
+    </Feature>
+  </Package>
+</Wix>

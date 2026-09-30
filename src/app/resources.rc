@@ -1,0 +1,11 @@
+#include "../ui/resource.h"
+
+// Application Icon (multi-resolution ICO)
+IDI_APP_ICON        ICON    "../../assets/app_icon.ico"
+
+// High-DPI Brand Logo PNG Derivatives
+IDR_PNG_LOGO_256    RCDATA  "../../assets/logo_256x256.png"
+IDR_PNG_LOGO_128    RCDATA  "../../assets/logo_128x128.png"
+IDR_PNG_LOGO_64     RCDATA  "../../assets/logo_64x64.png"
+IDR_PNG_LOGO_32     RCDATA  "../../assets/logo_32x32.png"
+IDR_PNG_LOGO_16     RCDATA  "../../assets/logo_16x16.png"

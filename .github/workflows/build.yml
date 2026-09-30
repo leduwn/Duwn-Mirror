@@ -1,0 +1,49 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        preset: [debug, release]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: 'bf90ce49b7bb4b1fd12d21edd9c77d7cf73c2dbe'
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.VCPKG_ROOT }}/installed
+            ${{ env.VCPKG_ROOT }}/packages
+          key: vcpkg-${{ hashFiles('vcpkg.json') }}-${{ matrix.preset }}
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build build/${{ matrix.preset }} --config ${{ matrix.preset }}
+
+      - name: Test (debug only)
+        if: matrix.preset == 'debug'
+        working-directory: build/debug
+        run: ctest --output-on-failure -C Debug
+
+      - name: Upload build artifacts
+        if: matrix.preset == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: duwn-mirror-release
+          path: build/release/bin/

@@ -1,0 +1,23 @@
+{
+  "product": "Duwn Mirror",
+  "version": "1.0.0",
+  "file_version": "1.0.0.0",
+  "architecture": "x64",
+  "upgrade_code": "A3D1E428-8902-4D9A-90A7-6831F901B94C",
+  "bundle_upgrade_code": "B7E5C381-64D9-4FE2-9E92-351E842D5A10",
+  "installer": {
+    "filename": "Duwn-Mirror-Setup-1.0.0-x64.exe",
+    "sha256": "7C72C7926430F5AE2D274D2C70D9DD1C5D03264B0CEF73C1D5A95998D5733D1D",
+    "size": 82938344
+  },
+  "msi": {
+    "filename": "Duwn-Mirror-1.0.0-x64.msi",
+    "sha256": "8F40E67A4421EB73FB61F96CE5EAEA4CBF8F5E689122A7BF191885FF3318581B",
+    "size": 63819776
+  },
+  "binary": {
+    "filename": "duwn-mirror.exe",
+    "sha256": "A9C02603DB897043CF38095DFF61D7397449B7DD4931EC5D42E577E4AB4F2F5B",
+    "size": 1449472
+  }
+}

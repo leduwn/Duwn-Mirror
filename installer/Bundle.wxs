@@ -1,0 +1,60 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Bundle Name="Duwn Mirror"
+          Manufacturer="Duwn Mirror Contributors"
+          Version="1.0.0"
+          UpgradeCode="B7E5C381-64D9-4FE2-9E92-351E842D5A10"
+          IconSourceFile="assets\app_icon.ico">
+
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication
+        Theme="hyperlinkLicense"
+        LicenseUrl=""
+        LogoFile="assets\logo_64x64.png"
+        SuppressOptionsUI="yes" />
+    </BootstrapperApplication>
+
+    <!-- Visual C++ 2015-2026 Redistributable (x64) detection -->
+    <util:RegistrySearch
+      Id="SearchVCRedistInstalled"
+      Root="HKLM"
+      Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+      Value="Installed"
+      Variable="VCRedistInstalled"
+      Result="value"
+      Bitness="always64" />
+
+    <util:RegistrySearch
+      Id="SearchVCRedistBld"
+      Root="HKLM"
+      Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+      Value="Bld"
+      Variable="VCRedistBld"
+      Result="value"
+      Bitness="always64" />
+
+    <Chain>
+      <!-- Microsoft Visual C++ Redistributable Package -->
+      <ExePackage
+        Id="VCRedistX64"
+        DisplayName="Microsoft Visual C++ 2015-2026 Redistributable (x64)"
+        SourceFile="installer\vc_redist.x64.exe"
+        InstallArguments="/quiet /norestart"
+        RepairArguments="/repair /quiet /norestart"
+        UninstallArguments="/uninstall /quiet /norestart"
+        DetectCondition="VCRedistInstalled = 1"
+        InstallCondition="NOT (VCRedistInstalled = 1)"
+        Permanent="yes"
+        PerMachine="yes"
+        Vital="yes" />
+
+      <!-- Duwn Mirror Core Application MSI -->
+      <MsiPackage
+        Id="DuwnMirrorMsi"
+        DisplayName="Duwn Mirror"
+        SourceFile="installer\Duwn-Mirror-1.0.0-x64.msi"
+        Vital="yes" />
+    </Chain>
+  </Bundle>
+</Wix>
