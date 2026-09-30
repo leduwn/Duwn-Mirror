@@ -40,14 +40,12 @@ jobs:
           Write-Host "VCPKG_ROOT is: $env:VCPKG_ROOT"
 
           $res = cmake --preset ${{ matrix.preset }} 2>&1
-          $res | ForEach-Object { Write-Host $_ }
           if ($LASTEXITCODE -ne 0) {
+            $res | ForEach-Object { Write-Host "::error title=PresetFailed::$_" }
             Write-Warning "Preset failed (exit code $LASTEXITCODE). Retrying without preset..."
             $res2 = cmake -B build/${{ matrix.preset }} -A x64 -D CMAKE_BUILD_TYPE=${{ matrix.config }} -D DUWN_BUILD_TESTS=${{ matrix.build_tests }} 2>&1
-            $res2 | ForEach-Object { Write-Host $_ }
             if ($LASTEXITCODE -ne 0) {
-              $res | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-              $res2 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              $res2 | ForEach-Object { Write-Host "::error title=DirectFailed::$_" }
               exit 1
             }
           }
