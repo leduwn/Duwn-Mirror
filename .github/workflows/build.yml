@@ -10,31 +10,30 @@ jobs:
   build-windows:
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
         preset: [debug, release]
+        include:
+          - preset: debug
+            config: Debug
+          - preset: release
+            config: Release
+
+    env:
+      VCPKG_ROOT: ${{ env.VCPKG_INSTALLATION_ROOT || 'C:\vcpkg' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgGitCommitId: 'bf90ce49b7bb4b1fd12d21edd9c77d7cf73c2dbe'
-
-      - name: Cache vcpkg
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.VCPKG_ROOT }}/installed
-            ${{ env.VCPKG_ROOT }}/packages
-          key: vcpkg-${{ hashFiles('vcpkg.json') }}-${{ matrix.preset }}
+      - name: Install Python dependencies for asset generation
+        run: pip install pillow numpy scipy
 
       - name: Configure
         run: cmake --preset ${{ matrix.preset }}
 
       - name: Build
-        run: cmake --build build/${{ matrix.preset }} --config ${{ matrix.preset }}
+        run: cmake --build build/${{ matrix.preset }} --config ${{ matrix.config }}
 
       - name: Test (debug only)
         if: matrix.preset == 'debug'
