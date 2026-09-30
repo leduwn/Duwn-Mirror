@@ -1048,9 +1048,12 @@ bool App::Init() noexcept {
 
     video::SchedulerConfig sched_cfg;
 
+    sched_cfg.streaming_policy = ResolveStreamingPolicy(m_settings.streaming_mode,
+        m_settings.custom_video_freshness_ms, m_settings.custom_video_queue_frames);
+
     sched_cfg.frame_duration_ns  = 16'666'667LL; // 60fps (~16.67ms)
 
-    sched_cfg.max_queue_depth    = 2;            // 0-1 queue target, max 2 for interactive gaming
+    sched_cfg.max_queue_depth    = 2;            // Experimental PresentationClock mode only
 
     sched_cfg.late_threshold_ns  = 25'000'000LL; // 25ms cap
 
@@ -1507,6 +1510,10 @@ void App::SyncUiVideoSettings() noexcept {
     s.renderer_mode = static_cast<int>(m_settings.renderer_mode);
 
     s.performance_profile = static_cast<int>(m_settings.performance_profile);
+
+    s.streaming_mode = static_cast<int>(m_settings.streaming_mode);
+    s.custom_video_freshness_ms = m_settings.custom_video_freshness_ms;
+    s.custom_video_queue_frames = m_settings.custom_video_queue_frames;
 
     s.receiver_quality = static_cast<int>(m_settings.receiver_quality);
 
@@ -2545,6 +2552,22 @@ void App::ApplySettingChange(int id, int value) noexcept {
 
     switch (id) {
 
+    case Control_Set_StreamingMode:
+        m_settings.streaming_mode = static_cast<StreamingMode>(std::clamp(value, 0, 3));
+        break;
+
+    case Control_Set_VideoFreshness:
+        if (value >= 0 && value < static_cast<int>(std::size(kCustomFreshnessChoicesMs))) {
+            m_settings.custom_video_freshness_ms = kCustomFreshnessChoicesMs[value];
+            m_settings.streaming_mode = StreamingMode::Custom;
+        }
+        break;
+
+    case Control_Set_VideoQueueFrames:
+        m_settings.custom_video_queue_frames = static_cast<uint32_t>(std::clamp(value + 1, 1, 3));
+        m_settings.streaming_mode = StreamingMode::Custom;
+        break;
+
     case Control_Set_Renderer:
 
         if (value >= 0 && value <= 3) {
@@ -3523,6 +3546,17 @@ void App::ApplySettingChange(int id, int value) noexcept {
 
     }
 
+    if (m_scheduler) {
+        const StreamingPolicy policy = ResolveStreamingPolicy(m_settings.streaming_mode,
+            m_settings.custom_video_freshness_ms, m_settings.custom_video_queue_frames);
+        m_scheduler->SetStreamingPolicy(policy);
+        if (id == Control_Set_StreamingMode || id == Control_Set_VideoFreshness ||
+            id == Control_Set_VideoQueueFrames) {
+            DUWN_LOG_INFOF("App", "[ReceiverDelivery] mode={} decoded_frames={} freshness_ms={} cadence_percent={} latest={} (source quality unchanged)",
+                static_cast<int>(m_settings.streaming_mode), policy.max_decoded_frames,
+                policy.max_residence_ms, policy.cadence_percent, policy.always_latest);
+        }
+    }
     SyncUiVideoSettings();
 
     if (id < Control_Set_Brightness || id > Control_Set_Sharpness)
@@ -5496,4 +5530,3 @@ void App::LogCapabilityReport() const noexcept {
 
 
 } // namespace duwn::app
-

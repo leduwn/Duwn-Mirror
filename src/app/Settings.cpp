@@ -90,6 +90,12 @@ bool Settings::ValidateSettings(const Settings& s, std::string* out_reason) noex
         if (out_reason) *out_reason = "schema_version is 0";
         return false;
     }
+    if (static_cast<int>(s.streaming_mode) < 0 || static_cast<int>(s.streaming_mode) > 3 ||
+        s.custom_video_freshness_ms < 5 || s.custom_video_freshness_ms > 100 ||
+        s.custom_video_queue_frames < 1 || s.custom_video_queue_frames > 3) {
+        if (out_reason) *out_reason = "invalid receiver streaming policy";
+        return false;
+    }
     if (s.window_preferences.width <= 0 || s.window_preferences.height <= 0) {
         if (out_reason) *out_reason = "window_preferences dimensions non-positive";
         return false;
@@ -220,6 +226,12 @@ Settings Settings::Load() noexcept {
     s.gpu_decode = ParseBool(FindJsonKeyValue(json, "gpu_decode"), s.gpu_decode);
     s.vsync      = ParseBool(FindJsonKeyValue(json, "vsync"), s.vsync);
     s.debug_log  = ParseBool(FindJsonKeyValue(json, "debug_log"), s.debug_log);
+    s.streaming_mode = static_cast<StreamingMode>(std::clamp(
+        ParseInt(FindJsonKeyValue(json, "streaming_mode"), 0), 0, 3));
+    s.custom_video_freshness_ms = static_cast<uint32_t>(std::clamp(
+        ParseInt(FindJsonKeyValue(json, "custom_video_freshness_ms"), 25), 5, 100));
+    s.custom_video_queue_frames = static_cast<uint32_t>(std::clamp(
+        ParseInt(FindJsonKeyValue(json, "custom_video_queue_frames"), 2), 1, 3));
     s.connection_mode = static_cast<ConnectionMode>(
         std::clamp(ParseInt(FindJsonKeyValue(json, "connection_mode"), 0), 0, 1));
     s.remember_selected_mode = ParseBool(FindJsonKeyValue(json, "remember_selected_mode"), true);
@@ -424,6 +436,9 @@ void Settings::Save() const noexcept {
         "  \"gpu_decode\": {},\n"
         "  \"vsync\": {},\n"
         "  \"debug_log\": {},\n"
+        "  \"streaming_mode\": {},\n"
+        "  \"custom_video_freshness_ms\": {},\n"
+        "  \"custom_video_queue_frames\": {},\n"
         "  \"connection_mode\": {},\n"
         "  \"remember_selected_mode\": {},\n"
         "  \"default_connection_mode\": {},\n"
@@ -485,6 +500,7 @@ void Settings::Save() const noexcept {
         gpu_decode ? "true" : "false",
         vsync ? "true" : "false",
         debug_log ? "true" : "false",
+        static_cast<int>(streaming_mode), custom_video_freshness_ms, custom_video_queue_frames,
         static_cast<int>(connection_mode),
         remember_selected_mode ? "true" : "false",
         static_cast<int>(default_connection_mode),

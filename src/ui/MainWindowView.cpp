@@ -1,6 +1,7 @@
 #include "MainWindowView.h"
 #include "Loc.h"
 #include "common/Version.h"
+#include "common/streaming/StreamingPolicy.h"
 #include <algorithm>
 #include <format>
 #include <cmath>
@@ -245,6 +246,8 @@ bool MainWindowView::OnMouseDown(int x, int y, UiState& state) noexcept {
             state.pressed_control = Control_None;
             // If another trigger was clicked, switch to it
             if (hit == Control_Set_Profile || hit == Control_Set_Receiver ||
+                hit == Control_Set_StreamingMode || hit == Control_Set_VideoFreshness ||
+                hit == Control_Set_VideoQueueFrames ||
                 hit == Control_Set_Output || hit == Control_Set_CaptureCanvas || hit == Control_Set_AspectMode ||
                 hit == Control_Set_Scaling || hit == Control_Set_PixelPerfect ||
                 hit == Control_Set_Renderer || hit == Control_Set_ColorPreset ||
@@ -516,6 +519,9 @@ bool MainWindowView::OnMouseUp(int x, int y, UiState& state) noexcept {
 
         case Control_Set_Profile:
         case Control_Set_Receiver:
+        case Control_Set_StreamingMode:
+        case Control_Set_VideoFreshness:
+        case Control_Set_VideoQueueFrames:
         case Control_Set_Output:
         case Control_Set_CaptureCanvas:
         case Control_Set_AspectMode:
@@ -713,7 +719,8 @@ void MainWindowView::Render(const UiState& state) noexcept {
     if (state.active_tab == NavTab::Video) {
         float content_w = total_w - sidebar_w - 40.0f;
         bool two_col = (content_w >= 700.0f);
-        float col1_h = 78.0f + (state.receiver_quality_pending ? 162.0f : 140.0f) + 216.0f + 140.0f;
+        float delivery_h = state.streaming_mode == 3 ? 188.0f : 108.0f;
+        float col1_h = 78.0f + (state.receiver_quality_pending ? 162.0f : 140.0f) + delivery_h + 216.0f + 140.0f;
         float col2_h = 364.0f + (state.advanced_color_expanded ? 186.0f : 40.0f);
         content_h = 62.0f + (two_col ? std::max(col1_h, col2_h) : (col1_h + col2_h)) + 32.0f;
     } else if (state.active_tab == NavTab::Audio) {
@@ -2561,6 +2568,35 @@ void MainWindowView::RenderVideoView(const UiState& state, const D2D1_RECT_F& ar
 
     col1_y += in_card_h + 8.0f;
 
+    // Receiver delivery policy applies live and is independent of source quality.
+    const bool custom_delivery = state.streaming_mode == 3;
+    const float delivery_h = custom_delivery ? 180.0f : 100.0f;
+    const D2D1_RECT_F delivery_card = D2D1::RectF(col1_x, col1_y, col1_x + col_w, col1_y + delivery_h);
+    m_renderer.DrawCard(delivery_card, false, metrics::CardRadius);
+    m_renderer.DrawTextSimple(loc::Get(loc::S::Video_Delivery), m_renderer.FontSmallBold(),
+        D2D1::RectF(delivery_card.left + 14.0f, delivery_card.top + 7.0f, delivery_card.right - 14.0f, delivery_card.top + 22.0f),
+        m_renderer.BrushBrandCyan());
+    const std::wstring_view delivery_names[] = {
+        loc::Get(loc::S::Opt_Delivery_Balanced), loc::Get(loc::S::Opt_Delivery_Fastest),
+        loc::Get(loc::S::Opt_Delivery_Smooth), loc::Get(loc::S::Opt_Delivery_Custom)
+    };
+    draw_selector_row(delivery_card.left + 14.0f, delivery_card.top + 25.0f, col_w - 28.0f,
+        Control_Set_StreamingMode, loc::Get(loc::S::Video_DeliveryMode),
+        delivery_names[std::clamp(state.streaming_mode, 0, 3)]);
+    if (custom_delivery) {
+        draw_selector_row(delivery_card.left + 14.0f, delivery_card.top + 65.0f, col_w - 28.0f,
+            Control_Set_VideoFreshness, loc::Get(loc::S::Video_Freshness),
+            std::format(L"{} ms", state.custom_video_freshness_ms));
+        draw_selector_row(delivery_card.left + 14.0f, delivery_card.top + 105.0f, col_w - 28.0f,
+            Control_Set_VideoQueueFrames, loc::Get(loc::S::Video_QueueFrames),
+            std::format(L"{}", state.custom_video_queue_frames));
+    }
+    m_renderer.DrawTextSimple(loc::Get(loc::S::Video_DeliveryHint), m_renderer.FontSmall(),
+        D2D1::RectF(delivery_card.left + 14.0f, delivery_card.bottom - 32.0f,
+                    delivery_card.right - 14.0f, delivery_card.bottom - 7.0f),
+        m_renderer.BrushTextMuted());
+    col1_y += delivery_h + 8.0f;
+
     // -------------------------------------------------------------
     // Section 2: OUTPUT
     // -------------------------------------------------------------
@@ -2900,6 +2936,34 @@ void MainWindowView::RenderDropdownOverlay(const UiState& state) noexcept {
     int selected_idx = 0;
 
     switch (state.open_dropdown) {
+    case Control_Set_StreamingMode:
+        items = {
+            { loc::Get(loc::S::Opt_Delivery_Balanced), loc::Get(loc::S::Opt_Delivery_Balanced_Desc) },
+            { loc::Get(loc::S::Opt_Delivery_Fastest), loc::Get(loc::S::Opt_Delivery_Fastest_Desc) },
+            { loc::Get(loc::S::Opt_Delivery_Smooth), loc::Get(loc::S::Opt_Delivery_Smooth_Desc) },
+            { loc::Get(loc::S::Opt_Delivery_Custom), loc::Get(loc::S::Opt_Delivery_Custom_Desc) }
+        };
+        selected_idx = std::clamp(state.streaming_mode, 0, 3);
+        break;
+    case Control_Set_VideoFreshness: {
+        items = {{L"5 ms", L""}, {L"10 ms", L""}, {L"16 ms", L""},
+                 {L"25 ms", L""}, {L"40 ms", L""}, {L"60 ms", L""}, {L"100 ms", L""}};
+        uint32_t nearest_distance = 1000;
+        for (size_t i = 0; i < std::size(kCustomFreshnessChoicesMs); ++i) {
+            const uint32_t choice = kCustomFreshnessChoicesMs[i];
+            const uint32_t distance = choice > state.custom_video_freshness_ms
+                ? choice - state.custom_video_freshness_ms : state.custom_video_freshness_ms - choice;
+            if (distance < nearest_distance) {
+                nearest_distance = distance;
+                selected_idx = static_cast<int>(i);
+            }
+        }
+        break;
+    }
+    case Control_Set_VideoQueueFrames:
+        items = {{L"1", loc::Get(loc::S::Opt_Delivery_Fastest_Desc)}, {L"2", L""}, {L"3", L""}};
+        selected_idx = static_cast<int>(std::clamp(state.custom_video_queue_frames, 1u, 3u)) - 1;
+        break;
     case Control_Set_Profile:
         items = {
             { loc::Get(loc::S::Opt_Profile_Auto),        loc::Get(loc::S::Opt_Profile_Auto_Desc) },

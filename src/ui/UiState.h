@@ -126,6 +126,9 @@ struct UiState {
     std::wstring color_processing_name{L"—"};
     int renderer_mode{0};
     int performance_profile{0};
+    int streaming_mode{0};
+    uint32_t custom_video_freshness_ms{25};
+    uint32_t custom_video_queue_frames{2};
     int receiver_quality{0};
     int output_quality{0};
     int capture_canvas{0};
@@ -278,6 +281,9 @@ enum ControlId : int {
     Control_Reset_Saturation,
     Control_Reset_Hue,
     Control_Reset_Sharpness,
+    Control_Set_StreamingMode,
+    Control_Set_VideoFreshness,
+    Control_Set_VideoQueueFrames,
 
     // Settings sub-tabs
     Control_SubTab_General = 200,

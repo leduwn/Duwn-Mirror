@@ -3,17 +3,15 @@
 // Serialised to/from JSON in %LOCALAPPDATA%\Duwn Mirror\settings.json.
 
 #include <string>
+#include <string_view>
 #include <cstdint>
+#include "common/streaming/StreamingPolicy.h"
 
 namespace duwn::app {
 
 enum class ConnectionMode { WirelessAirPlay = 0, WiredUsb = 1 };
 
-enum class StreamingMode {
-    SmoothLive   = 0, // default — stable 60fps for PUBG livestream
-    LowLatency   = 1,
-    Compatibility = 2,
-};
+using StreamingMode = duwn::StreamingMode;
 
 enum class ReceiverQuality {
     Auto = 0,
@@ -139,6 +137,8 @@ struct Settings {
 
     // Streaming
     StreamingMode streaming_mode{StreamingMode::SmoothLive};
+    uint32_t custom_video_freshness_ms{25};
+    uint32_t custom_video_queue_frames{2};
     TransportMode transport_mode{TransportMode::RtpUdpLegacy};
 
     // Video

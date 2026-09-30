@@ -26,6 +26,8 @@ FrameScheduler::FrameScheduler(SchedulerConfig cfg, FramePresentCallback on_pres
 
     : m_cfg(cfg)
 
+    , m_streaming_policy(cfg.streaming_policy)
+
     , m_on_present(std::move(on_present)) {
 
     m_frame_available_event = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -216,13 +218,13 @@ bool FrameScheduler::PopLatestValidFrame(VideoFrame& out_frame, uint64_t& out_su
 
 
 
-    // 3. If depth > 1: evaluate cadence-aware staleness threshold (1.0-1.25x cadence)
+    // 3. Select by the live receiver policy; never wait to fill the queue.
 
     using clock = duwn::clock::MonotonicClock;
 
     const double cadence_ms = GetEstimatedCadenceMs();
 
-    const double freshness_threshold_ms = 1.25 * cadence_ms;
+    const StreamingPolicy policy = m_streaming_policy.load(std::memory_order_acquire);
 
     const int64_t now_qpc = clock::NowQpcTicks();
 
@@ -244,7 +246,7 @@ bool FrameScheduler::PopLatestValidFrame(VideoFrame& out_frame, uint64_t& out_su
 
 
 
-    if (oldest_age_ms <= freshness_threshold_ms) {
+    if (!ShouldPresentNewest(policy, m_decoded_queue.size(), oldest_age_ms, cadence_ms)) {
 
         // Oldest valid frame is still within freshness budget: present normally without drop
 
@@ -256,11 +258,15 @@ bool FrameScheduler::PopLatestValidFrame(VideoFrame& out_frame, uint64_t& out_su
 
     } else {
 
-        // Oldest valid frame exceeds freshness budget: discard stale history, return newest valid frame
+        // Catch up (or Fastest policy): discard pending history, return newest.
 
         out_superseded_drops = m_decoded_queue.size() - 1;
 
-        GlobalMetrics().video_stale_age_drops.fetch_add(out_superseded_drops, std::memory_order_relaxed);
+        if (policy.always_latest) {
+            GlobalMetrics().video_superseded_before_present.fetch_add(out_superseded_drops, std::memory_order_relaxed);
+        } else {
+            GlobalMetrics().video_stale_age_drops.fetch_add(out_superseded_drops, std::memory_order_relaxed);
+        }
 
         GlobalMetrics().video_latency_catchup_drops.fetch_add(out_superseded_drops, std::memory_order_relaxed);
 
@@ -454,7 +460,8 @@ void FrameScheduler::PushFrame(VideoFrame frame) noexcept {
 
     if (m_cfg.mode == SchedulerMode::GameLowLatency) {
 
-        // Elastic 3-frame DecodedFrameQueue (Phase 5)
+        // Bounded decoded queue. Only decoded images are discarded here;
+        // compressed reference frames still pass through the decoder in order.
 
         std::lock_guard lock{m_decoded_queue_mutex};
 
@@ -468,9 +475,11 @@ void FrameScheduler::PushFrame(VideoFrame frame) noexcept {
 
 
 
-        // Check if queue is at capacity (3)
+        const StreamingPolicy policy = m_streaming_policy.load(std::memory_order_acquire);
+        const size_t capacity = std::clamp<size_t>(policy.max_decoded_frames, 1, 3);
 
-        if (m_decoded_queue.size() >= kDecodedQueueCapacity) {
+        // A live change from three frames to one may need more than one drop.
+        while (m_decoded_queue.size() >= capacity) {
 
             // Evaluate staleness: staleness threshold ~1.5 - 2x observed display refresh interval
 
@@ -482,13 +491,18 @@ void FrameScheduler::PushFrame(VideoFrame frame) noexcept {
 
 
 
-            if (oldest_age_ms > staleness_threshold_ms) {
+            if (policy.always_latest || oldest_age_ms > staleness_threshold_ms) {
 
-                // Oldest frame IS stale: drop oldest frame (latency catchup drop)
+                // Discard a superseded or stale decoded image, then accept the new one.
 
                 m_decoded_queue.pop_front();
 
-                GlobalMetrics().video_stale_age_drops.fetch_add(1, std::memory_order_relaxed);
+                if (policy.always_latest) {
+                    GlobalMetrics().video_superseded_before_present.fetch_add(1, std::memory_order_relaxed);
+                    GlobalMetrics().mailbox_replacements.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    GlobalMetrics().video_stale_age_drops.fetch_add(1, std::memory_order_relaxed);
+                }
 
                 GlobalMetrics().video_latency_catchup_drops.fetch_add(1, std::memory_order_relaxed);
 
@@ -850,6 +864,8 @@ void FrameScheduler::Flush() noexcept {
 
 void FrameScheduler::UpdateConfig(const SchedulerConfig& cfg) noexcept {
 
+    SetStreamingPolicy(cfg.streaming_policy);
+
     std::lock_guard lock{m_queue_mutex};
 
     m_cfg = cfg;
@@ -1032,13 +1048,11 @@ void FrameScheduler::SchedulerLoopGameLowLatency(std::stop_token stop) noexcept 
 
             }
 
-        } else {
-
-            ::WaitForSingleObject(event_handle, 16);
-
-            if (stop.stop_requested()) break;
-
         }
+
+        // Without a DXGI waitable object, the source arrival event already
+        // paced us above. Waiting again after consuming that event adds 16 ms
+        // to an available frame (notably on the software renderer).
 
 
 
@@ -1665,4 +1679,3 @@ void FrameScheduler::SchedulerLoopPresentationClock(std::stop_token stop) noexce
 
 
 } // namespace duwn::video
-

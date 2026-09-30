@@ -104,3 +104,24 @@ DUWN_TEST(Settings_SequentialMigrationV0ToV2) {
     // Validated
     DUWN_ASSERT(Settings::ValidateSettings(s) == true);
 }
+
+DUWN_TEST(Settings_ValidatesStreamingPolicyBounds) {
+    Settings s{};
+    s.streaming_mode = StreamingMode::Custom;
+    s.custom_video_freshness_ms = 5;
+    s.custom_video_queue_frames = 1;
+    DUWN_ASSERT(Settings::ValidateSettings(s));
+    s.custom_video_freshness_ms = 100;
+    s.custom_video_queue_frames = 3;
+    DUWN_ASSERT(Settings::ValidateSettings(s));
+    s.custom_video_queue_frames = 0;
+    DUWN_ASSERT(!Settings::ValidateSettings(s));
+    s.custom_video_queue_frames = 4;
+    DUWN_ASSERT(!Settings::ValidateSettings(s));
+    s.custom_video_queue_frames = 2;
+    s.custom_video_freshness_ms = 101;
+    DUWN_ASSERT(!Settings::ValidateSettings(s));
+    s.custom_video_freshness_ms = 25;
+    s.streaming_mode = static_cast<StreamingMode>(99);
+    DUWN_ASSERT(!Settings::ValidateSettings(s));
+}

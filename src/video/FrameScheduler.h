@@ -9,6 +9,7 @@
 
 #include "VideoFrame.h"
 #include "common/clock/MonotonicClock.h"
+#include "common/streaming/StreamingPolicy.h"
 #include <functional>
 #include <deque>
 #include <mutex>
@@ -28,12 +29,13 @@ using FramePresentCallback = std::function<void(VideoFrame&)>;
 using DxgiWaitableProvider = std::function<void*()>; // Returns Win32 HANDLE
 
 enum class SchedulerMode {
-    GameLowLatency,      // Default: 3-frame DecodedFrameQueue + DXGI frame latency waitable clock
+    GameLowLatency,      // Bounded decoded queue + DXGI frame latency waitable clock
     PresentationClock    // Experimental: synthetic presentation clock with de-jitter queue
 };
 
 struct SchedulerConfig {
     SchedulerMode mode{SchedulerMode::GameLowLatency};
+    StreamingPolicy streaming_policy{};
 
     // Expected inter-frame duration in nanoseconds. Derived from source FPS.
     // Default 16.67ms (~60fps for gaming).
@@ -65,6 +67,11 @@ public:
     void Flush() noexcept;
     void UpdateConfig(const SchedulerConfig& cfg) noexcept;
 
+    // Thread-safe, live receiver delivery change; preserves source quality.
+    void SetStreamingPolicy(StreamingPolicy policy) noexcept {
+        m_streaming_policy.store(policy, std::memory_order_release);
+    }
+
     // Set provider for DXGI frame-latency waitable object (Phase 6)
     void SetDxgiWaitableProvider(DxgiWaitableProvider provider) noexcept {
         m_dxgi_waitable_provider = std::move(provider);
@@ -78,9 +85,9 @@ public:
     bool HasMailboxFrame() noexcept;
     bool PopDecodedFrameForTest(VideoFrame& out_frame) noexcept;
 
-    // Pop latest valid frame under low-latency policy (GameLowLatency mode).
-    // Cadence-aware freshness evaluation: drops older frames if oldest exceeds freshness budget
-    // (1.25x cadence). Retains fresh frames (even if depth == 2 during bursts) and single frames.
+    // GameLowLatency mode: select FIFO or newest using the live delivery policy.
+    // Balanced uses 1.25x source cadence; Custom uses a receiver queue age.
+    // Fastest supersedes pending images; every mode displays a lone frame.
     bool PopLatestValidFrame(VideoFrame& out_frame, uint64_t& out_superseded_drops) noexcept;
 
     // Helper to obtain estimated source cadence in milliseconds
@@ -98,11 +105,11 @@ private:
     void UpdateCadenceEstimate(int64_t pts_ns) noexcept;
 
     SchedulerConfig         m_cfg;
+    std::atomic<StreamingPolicy> m_streaming_policy{};
     FramePresentCallback    m_on_present;
     DxgiWaitableProvider    m_dxgi_waitable_provider;
 
-    // GameLowLatency mode: 3-frame DecodedFrameQueue (Phases 4 & 5)
-    static constexpr size_t   kDecodedQueueCapacity = 3;
+    // GameLowLatency mode: 1-3 decoded frames, independently configurable.
     std::mutex                m_decoded_queue_mutex;
     std::deque<VideoFrame>    m_decoded_queue;
     void*                     m_frame_available_event{nullptr}; // Win32 auto-reset event

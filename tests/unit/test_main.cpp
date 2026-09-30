@@ -57,6 +57,8 @@ void AssertTrue(bool cond, const char* expr, const char* file, int line);
 #include "test_wired_device.cpp"
 #include "test_dual_mode_localization.cpp"
 #include "test_frame_scheduler.cpp"
+#include "test_streaming_policy.cpp"
+#include "test_streaming_scheduler.cpp"
 #include "test_pipeline_tier.cpp"
 #include "test_video_ipc_ring.cpp"
 #include "test_ui_state.cpp"

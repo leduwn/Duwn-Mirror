@@ -33,6 +33,16 @@ cmake --preset debug
 cmake --build build/debug
 ```
 
+## Receiver latency controls
+
+Video → Display Latency provides Balanced, Fastest, Prefer smoothness, and
+Custom delivery modes. Custom controls the pending decoded frames (1–3) and
+catch-up threshold (5–100 ms). Changes apply live without changing the selected
+source resolution/FPS. Fastest can skip decoded frames during bursts.
+
+These controls do not specify phone-to-display latency or control the iPhone
+encoder bitrate. See [implementation and validation](docs/receiver-latency-controls.md).
+
 ## Architecture
 
 See [`docs/architecture.md`](docs/architecture.md).
