@@ -168,6 +168,7 @@ void RtpReceiver::RecvLoop() noexcept {
         if (!RtpPacket::Parse(std::span{buf.data(), static_cast<size_t>(n)},
                                now_ns, pkt)) {
             m_stats.malformed.fetch_add(1, std::memory_order_relaxed);
+            GlobalMetrics().network_malformed_packets.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
 

@@ -883,11 +883,17 @@ void MainWindowView::RenderHeader(const UiState& state, float width) noexcept {
     D2D1_RECT_F status_pill = D2D1::RectF(right_margin - 250.0f, 17.0f, right_margin - 96.0f, 43.0f);
     D2D1_COLOR_F status_color = colors::StatusBlue;
     std::wstring_view status_text = loc::Get(loc::S::Status_Ready);
+    const bool has_video_evidence = (state.total_frames_presented > 0 || state.render_fps > 0.0 || state.decoded_fps > 0.0);
 
     if (state.connection_mode == 1) {
         if (state.status == ConnectionStatus::Streaming) {
-            status_color = colors::StatusGreen;
-            status_text  = loc::Get(loc::S::Status_Streaming);
+            if (has_video_evidence) {
+                status_color = colors::StatusGreen;
+                status_text  = loc::Get(loc::S::Status_Streaming);
+            } else {
+                status_color = colors::StatusAmber;
+                status_text  = loc::Get(loc::S::Status_ConnectedWaitingVideo);
+            }
         } else if (state.status == ConnectionStatus::Connecting) {
             status_color = colors::StatusAmber;
             status_text  = loc::Get(loc::S::Status_Connecting);
@@ -914,8 +920,13 @@ void MainWindowView::RenderHeader(const UiState& state, float width) noexcept {
                            : loc::Get(loc::S::Status_StartingAirPlay);
             break;
         case ConnectionStatus::Streaming:
-            status_color = colors::StatusGreen;
-            status_text  = loc::Get(loc::S::Status_Streaming);
+            if (has_video_evidence) {
+                status_color = colors::StatusGreen;
+                status_text  = loc::Get(loc::S::Status_Streaming);
+            } else {
+                status_color = colors::StatusAmber;
+                status_text  = loc::Get(loc::S::Status_ConnectedWaitingVideo);
+            }
             break;
         case ConnectionStatus::Paused:
             status_color = colors::StatusAmber;
@@ -2005,12 +2016,14 @@ void MainWindowView::RenderStatusBar(const UiState& state, float bottom_y, float
         D2D1::Point2F(width, bottom_y),
         m_renderer.BrushCardBorder(), 1.0f
     );
+    const bool has_video_evidence = (state.total_frames_presented > 0 || state.render_fps > 0.0 || state.decoded_fps > 0.0);
     if (state.connection_mode == 1) {
         const std::wstring phase = !state.wired.usb_interface_count ? loc::Get(loc::S::Wired_NoCable)
             : !state.wired.network_up ? loc::Get(loc::S::Wired_PreparingUsbNetwork)
             : std::format(L"{}: {}", loc::Get(loc::S::Wired_ScreenMirroring),
                 loc::Get(state.status == ConnectionStatus::Streaming
-                    ? loc::S::Status_Streaming : loc::S::Status_Ready));
+                    ? (has_video_evidence ? loc::S::Status_Streaming : loc::S::Status_ConnectedWaitingVideo)
+                    : loc::S::Status_Ready));
         m_renderer.DrawStatusDot(D2D1::Point2F(20.0f, bottom_y + h * 0.5f), 3.5f,
             state.wired.network_up ? colors::StatusGreen
                 : state.wired.usb_interface_count ? colors::StatusAmber : colors::StatusBlue, false);

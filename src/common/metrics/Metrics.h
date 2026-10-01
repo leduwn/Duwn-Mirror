@@ -16,10 +16,15 @@ struct alignas(64) Metrics {
     std::atomic<uint64_t> network_received_packets{0};
     std::atomic<uint64_t> network_lost_packets{0};
     std::atomic<uint64_t> network_reordered_packets{0};
+    std::atomic<uint64_t> network_malformed_packets{0};
     std::atomic<double>   network_jitter_ms{0.0};
 
     std::atomic<uint64_t> video_rtp_packets{0};
     std::atomic<uint64_t> video_rtp_bytes{0};
+    std::atomic<uint64_t> video_dropped_min_ready{0};
+    std::atomic<uint64_t> video_dropped_ipc_active{0};
+    std::atomic<uint64_t> video_dropped_decoder_not_ready{0};
+    std::atomic<uint64_t> video_scheduler_rejected_frames{0};
     std::atomic<uint64_t> video_access_units{0};
     std::atomic<uint64_t> video_access_units_submitted{0};
 

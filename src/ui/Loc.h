@@ -45,6 +45,7 @@ enum class S {
     Status_Ready,
     Status_Connecting,
     Status_Connected,
+    Status_ConnectedWaitingVideo,
     Status_Streaming,
     Status_Paused,
     Status_Reconnecting,

@@ -428,6 +428,10 @@ int App::Run() noexcept {
 
             if (msg.message == WM_DUWN_FIRST_FRAME) {
 
+                if (m_window) {
+                    m_window->SetStatusText(ui::loc::Get(ui::loc::S::Status_Streaming));
+                }
+
                 uint32_t fw = static_cast<uint32_t>(msg.wParam);
 
                 uint32_t fh = static_cast<uint32_t>(msg.lParam);
@@ -3781,22 +3785,29 @@ void App::OnVideoData(const uint8_t* data, size_t size,
     }
 
     if (!m_video_min_ready.load(std::memory_order_acquire)) {
+        GlobalMetrics().video_dropped_min_ready.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
     // If Direct IPC is active and receiving frames, avoid decoding redundant legacy RTP
     if (m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WirelessAirPlay &&
         m_direct_ipc_active.load(std::memory_order_acquire)) {
+        GlobalMetrics().video_dropped_ipc_active.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
-    // Decoder auto-recovery on incoming RTP when decoder is not yet ready (e.g. after reconnect or late metadata)
-    if (!m_decoder_ready.load(std::memory_order_acquire)) {
-        auto classification = video::ClassifyRtpPayload(std::span<const uint8_t>(data, size));
-        if (classification.codec != video::DetectedCodec::Unknown) {
-            const auto codec_type = (classification.codec == video::DetectedCodec::H265)
-                ? video::VideoCodecType::H265
-                : video::VideoCodecType::H264;
+    // Decoder auto-recovery and dynamic codec adaptation on incoming unambiguous RTP parameter sets / keyframes
+    auto classification = video::ClassifyRtpPayload(std::span<const uint8_t>(data, size));
+    if (classification.codec != video::DetectedCodec::Unknown) {
+        const auto codec_type = (classification.codec == video::DetectedCodec::H265)
+            ? video::VideoCodecType::H265
+            : video::VideoCodecType::H264;
+
+        const bool decoder_ready = m_decoder_ready.load(std::memory_order_acquire);
+        const bool codec_mismatch = !decoder_ready ||
+            (m_video_decoder && m_video_decoder->GetActiveCodec() != codec_type);
+
+        if (codec_mismatch) {
             const uint32_t init_w = (m_stream_width.load(std::memory_order_relaxed) > 0)
                 ? m_stream_width.load(std::memory_order_relaxed)
                 : (m_settings.receiver_width > 0 ? m_settings.receiver_width : 1920);
@@ -3805,17 +3816,23 @@ void App::OnVideoData(const uint8_t* data, size_t size,
                 : (m_settings.receiver_height > 0 ? m_settings.receiver_height : 1080);
 
             std::lock_guard<std::mutex> lock(m_decoder_mutex);
-            if (m_video_decoder && m_video_decoder->Init(init_w, init_h, codec_type)) {
-                m_stream_width.store(init_w, std::memory_order_relaxed);
-                m_stream_height.store(init_h, std::memory_order_relaxed);
-                m_decoder_ready.store(true, std::memory_order_release);
-                DUWN_LOG_INFOF("App", "Video decoder ready for {}x{} ({}) via RTP payload classification",
-                    init_w, init_h, codec_type == video::VideoCodecType::H265 ? "HEVC" : "H.264");
+            if (m_video_decoder) {
+                m_video_decoder->Flush();
+                m_video_decoder->ResetCodecState();
+                if (m_video_decoder->Init(init_w, init_h, codec_type)) {
+                    m_stream_width.store(init_w, std::memory_order_relaxed);
+                    m_stream_height.store(init_h, std::memory_order_relaxed);
+                    m_decoder_ready.store(true, std::memory_order_release);
+                    DUWN_LOG_INFOF("App", "Video decoder configured for {}x{} ({}) via {}",
+                        init_w, init_h, codec_type == video::VideoCodecType::H265 ? "HEVC" : "H.264",
+                        classification.evidence);
+                }
             }
         }
     }
 
     if (!m_decoder_ready.load(std::memory_order_acquire)) {
+        GlobalMetrics().video_dropped_decoder_not_ready.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
@@ -3974,7 +3991,8 @@ void App::HandleSessionPhaseOnMainThread(const SessionPhaseEvent& ev, bool quali
 
     case P::Streaming:
         if (m_window) {
-            m_window->SetStatusText(L"Streaming");
+            bool has_frame = m_first_output_present_recorded.load(std::memory_order_relaxed);
+            m_window->SetStatusText(has_frame ? ui::loc::Get(ui::loc::S::Status_Streaming) : ui::loc::Get(ui::loc::S::Status_ConnectedWaitingVideo));
         }
         DUWN_LOG_INFO("App", "AirPlay streaming session active — media pipeline configuration:");
         LogCapabilityReport();
@@ -4749,18 +4767,16 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
 
         uint64_t cur_trans_drop = m.video_format_transition_drops.load(std::memory_order_relaxed);
-
         uint64_t cur_q_full_drop = m.video_queue_full_drops.load(std::memory_order_relaxed);
-
         uint64_t cur_gen         = m.video_format_generation.load(std::memory_order_relaxed);
-
-
-
         uint64_t cur_pres_late   = m.video_presentation_late_drops.load(std::memory_order_relaxed);
-
         uint64_t cur_q_overflow  = m.video_queue_overflow_drops.load(std::memory_order_relaxed);
-
         uint64_t cur_sess_q_full = m.session_q_full.load(std::memory_order_relaxed);
+        uint64_t cur_malf        = m.network_malformed_packets.load(std::memory_order_relaxed);
+        uint64_t cur_drop_min_rdy = m.video_dropped_min_ready.load(std::memory_order_relaxed);
+        uint64_t cur_drop_ipc    = m.video_dropped_ipc_active.load(std::memory_order_relaxed);
+        uint64_t cur_drop_dec_unrdy = m.video_dropped_decoder_not_ready.load(std::memory_order_relaxed);
+        uint64_t cur_sched_rej   = m.video_scheduler_rejected_frames.load(std::memory_order_relaxed);
 
         static uint64_t s_metrics_cycle = 0;
         ++s_metrics_cycle;
@@ -4815,9 +4831,9 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
             m.source_nominal_fps.load(std::memory_order_relaxed));
 
         DUWN_LOG_INFOF("Diagnostics",
-            "[STATS] VIDEO: rtp={}/s ({:.1f} KB/s) | au={}/s | dec={} fps | rend={} fps (unique={}, opp={}/s) | ticks={}/s (hold={}/s) | drop={}/s (superseded={}/s, late={}/s, late_drop={}, trans_drop={}, q_overflow={}, sess_q_full={}, life_q_full={}) | q={} | gen={} | coded={}x{} vis={}x{}",
-            v_rtp_rate, v_kb_rate, v_au_rate, v_dec_fps, v_rend_fps, unique_pres_fps, disp_opp_rate, ticks_rate, rep_ticks_rate,
-            v_drop_rate, superseded_rate, v_late_rate, cur_pres_late, cur_trans_drop, cur_q_overflow, cur_sess_q_full, cur_q_full_drop, q_depth, cur_gen, coded_w, coded_h, vis_w, vis_h);
+            "[STATS] VIDEO: rtp={}/s ({:.1f} KB/s, malf={}) | au={}/s | dec={} fps | rend={} fps (unique={}, opp={}/s) | ticks={}/s (hold={}/s) | drop={}/s (superseded={}/s, late={}/s, min_rdy={}, ipc={}, dec_unrdy={}, late_drop={}, trans_drop={}, q_overflow={}, sess_q_full={}, life_q_full={}) | q={} | gen={} | coded={}x{} vis={}x{}",
+            v_rtp_rate, v_kb_rate, cur_malf, v_au_rate, v_dec_fps, v_rend_fps, unique_pres_fps, disp_opp_rate, ticks_rate, rep_ticks_rate,
+            v_drop_rate, superseded_rate, v_late_rate, cur_drop_min_rdy, cur_drop_ipc, cur_drop_dec_unrdy, cur_pres_late, cur_trans_drop, cur_q_overflow, cur_sess_q_full, cur_q_full_drop, q_depth, cur_gen, coded_w, coded_h, vis_w, vis_h);
 
         if (phase_str == "Streaming" || vis_w > 0) {
             DUWN_LOG_INFO("Diagnostics", m_source_quality_tracker.FormatTelemetryBlock());
@@ -4846,18 +4862,13 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
 
         DUWN_LOG_INFOF("Diagnostics",
-
-            "[STATS] SCHEDULER: wake_error_avg={:.2f}ms p95={:.2f}ms | lateness_avg={:.2f}ms | dec_to_pres={:.2f}ms | q_age={:.2f}ms",
-
+            "[STATS] SCHEDULER: wake_error_avg={:.2f}ms p95={:.2f}ms | lateness_avg={:.2f}ms | dec_to_pres={:.2f}ms | q_age={:.2f}ms | rej_frames={}",
             m.video_wake_error_avg_ms.load(std::memory_order_relaxed),
-
             m.video_wake_error_p95_ms.load(std::memory_order_relaxed),
-
             m.video_schedule_lateness_avg_ms.load(std::memory_order_relaxed),
-
             m.video_decode_to_present_avg_ms.load(std::memory_order_relaxed),
-
-            m.video_queue_age_avg_ms.load(std::memory_order_relaxed));
+            m.video_queue_age_avg_ms.load(std::memory_order_relaxed),
+            cur_sched_rej);
 
 
 

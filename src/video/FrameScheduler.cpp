@@ -445,6 +445,8 @@ void FrameScheduler::PushFrame(VideoFrame frame) noexcept {
         GlobalMetrics().video_stale_generation_drops.fetch_add(1, std::memory_order_relaxed);
 
         GlobalMetrics().video_dropped_frames.fetch_add(1, std::memory_order_relaxed);
+        GlobalMetrics().video_scheduler_rejected_frames.fetch_add(1, std::memory_order_relaxed);
+
 
         GlobalMetrics().duwn_dropped_frames.fetch_add(1, std::memory_order_relaxed);
 
@@ -511,6 +513,8 @@ void FrameScheduler::PushFrame(VideoFrame frame) noexcept {
                 GlobalMetrics().video_latency_catchup_drops.fetch_add(1, std::memory_order_relaxed);
 
                 GlobalMetrics().video_dropped_frames.fetch_add(1, std::memory_order_relaxed);
+                GlobalMetrics().video_scheduler_rejected_frames.fetch_add(1, std::memory_order_relaxed);
+
 
                 GlobalMetrics().duwn_dropped_frames.fetch_add(1, std::memory_order_relaxed);
 
@@ -529,6 +533,8 @@ void FrameScheduler::PushFrame(VideoFrame frame) noexcept {
                 GlobalMetrics().video_queue_full_drops.fetch_add(1, std::memory_order_relaxed);
 
                 GlobalMetrics().video_dropped_frames.fetch_add(1, std::memory_order_relaxed);
+
+                GlobalMetrics().video_scheduler_rejected_frames.fetch_add(1, std::memory_order_relaxed);
 
                 GlobalMetrics().duwn_dropped_frames.fetch_add(1, std::memory_order_relaxed);
 
@@ -587,6 +593,8 @@ void FrameScheduler::PushFrame(VideoFrame frame) noexcept {
             GlobalMetrics().video_dropped_frames.fetch_add(1, std::memory_order_relaxed);
 
             GlobalMetrics().session_drops.fetch_add(1, std::memory_order_relaxed);
+            GlobalMetrics().video_scheduler_rejected_frames.fetch_add(1, std::memory_order_relaxed);
+
 
             return;
 

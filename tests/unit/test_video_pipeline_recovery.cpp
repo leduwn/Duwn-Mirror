@@ -173,3 +173,62 @@ DUWN_TEST(VideoPipeline_PreviewOff_OutputPresents_PreviewReopenable) {
     DUWN_ASSERT(output_present_count.load() == 3);
     DUWN_ASSERT(preview_present_count.load() == 1);
 }
+
+// 6. HEVC 28 01 payload must classify as HEVC IDR-20, never H.264 PPS-8.
+// Ambiguous slice packets must return Unknown.
+DUWN_TEST(VideoPipeline_Hevc2801_ClassifiedAsHevcIdr_NotH264Pps) {
+    using namespace duwn::video;
+
+    // HEVC IDR_N_LP (type 20): byte 0 = 0x28 (type=20, layer_id=0), byte 1 = 0x01 (layer_id=0, tid=1)
+    const uint8_t hevc_idr_2801[] = {0x28, 0x01, 0xAF, 0x00, 0x55};
+    auto c1 = ClassifyRtpPayload(hevc_idr_2801);
+    DUWN_ASSERT(c1.codec == DetectedCodec::H265);
+    DUWN_ASSERT(std::string_view(c1.evidence) == "RtpPayload (HEVC IDR-20)");
+
+    // HEVC IDR_W_RADL (type 19): byte 0 = 0x26, byte 1 = 0x01
+    const uint8_t hevc_idr_2601[] = {0x26, 0x01, 0x88, 0x20};
+    auto c2 = ClassifyRtpPayload(hevc_idr_2601);
+    DUWN_ASSERT(c2.codec == DetectedCodec::H265);
+    DUWN_ASSERT(std::string_view(c2.evidence) == "RtpPayload (HEVC IDR-19)");
+
+    // Ambiguous packet without parameter set or unique header must NOT lock codec
+    const uint8_t ambiguous_slice[] = {0x01, 0x00, 0x00, 0x50};
+    auto c3 = ClassifyRtpPayload(ambiguous_slice);
+    DUWN_ASSERT(c3.codec == DetectedCodec::Unknown);
+}
+
+// 7. Dynamic codec adaptation: decoder running in H.264 automatically switches on incoming codec change
+DUWN_TEST(VideoPipeline_DynamicCodecSwitching_H264ToHevc) {
+    using namespace duwn::video;
+    D3D11Device d3d;
+    if (!d3d.Create(true, false)) return;
+
+    VideoDecoder decoder(d3d, [](VideoFrame) {});
+    DUWN_ASSERT(decoder.Init(1920, 1080, VideoCodecType::H264));
+    DUWN_ASSERT(decoder.GetActiveCodec() == VideoCodecType::H264);
+
+    const uint8_t hevc_idr[] = {0x28, 0x01, 0xAF, 0x00, 0x55};
+    auto classification = ClassifyRtpPayload(hevc_idr);
+    DUWN_ASSERT(classification.codec == DetectedCodec::H265);
+
+    const auto target_codec = (classification.codec == DetectedCodec::H265)
+        ? VideoCodecType::H265 : VideoCodecType::H264;
+    bool codec_mismatch = (decoder.GetActiveCodec() != target_codec);
+    DUWN_ASSERT(codec_mismatch);
+
+    decoder.Flush();
+    decoder.ResetCodecState();
+    bool hevc_init_ok = decoder.Init(1920, 1080, target_codec);
+    if (hevc_init_ok) {
+        DUWN_ASSERT(decoder.GetActiveCodec() == VideoCodecType::H265);
+    } else {
+        // Host has no working HEVC MFT; verify reverse dynamic adaptation (Unknown/HEVC -> H.264)
+        decoder.ResetCodecState();
+        const uint8_t h264_sps[] = {0x67, 0x42, 0x00, 0x1e, 0x9a, 0x74, 0x05, 0x81};
+        auto c_h264 = ClassifyRtpPayload(h264_sps);
+        DUWN_ASSERT(c_h264.codec == DetectedCodec::H264);
+        DUWN_ASSERT(decoder.Init(1920, 1080, VideoCodecType::H264));
+        DUWN_ASSERT(decoder.GetActiveCodec() == VideoCodecType::H264);
+    }
+}
+
