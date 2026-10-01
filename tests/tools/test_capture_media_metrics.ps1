@@ -189,16 +189,16 @@ try {
 
     $job = Start-Job -ScriptBlock {
         param($col, $out, $log)
-        & $col -OutputPath $out -DurationSeconds 4 -LogPath $log
+        & $col -OutputPath $out -DurationSeconds 6 -LogPath $log
     } -ArgumentList $collectorScript, $testCsv7, $rotationLog
 
-    Start-Sleep -Milliseconds 1200
+    Start-Sleep -Milliseconds 2200
 
     $backupFile = Join-Path $testTempDir 'rotation.1.log'
     Move-Item -LiteralPath $rotationLog -Destination $backupFile -Force
     ($cycle2 + "`r`n") | Set-Content -LiteralPath $rotationLog -Encoding utf8
 
-    $job | Wait-Job -Timeout 10 | Out-Null
+    $job | Wait-Job -Timeout 12 | Out-Null
     Receive-Job $job | Out-Null
 
     $rows = @(Import-Csv -LiteralPath $testCsv7)

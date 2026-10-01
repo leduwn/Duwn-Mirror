@@ -310,3 +310,33 @@ DUWN_TEST(hevc_zero_copy_release_invariant_contract) {
     DUWN_ASSERT(!MFVideoDecoder::IsCodecSupported(VideoCodecType::Unknown, false));
     (void)hevc_hw_supported;
 }
+DUWN_TEST(video_decoder_h264_rtp_and_unknown_codec_recovery) {
+    using namespace duwn::video;
+    D3D11Device dev;
+    DUWN_ASSERT(dev.Create(false, true));
+
+    std::vector<VideoFrame> frames;
+    VideoDecoder decoder(dev, [&](VideoFrame f) {
+        frames.push_back(std::move(f));
+    });
+
+    DUWN_ASSERT(decoder.Init(1920, 1080, VideoCodecType::H264));
+
+    // Test 1: FeedAccessUnit with Unknown codec must not be dropped
+    uint64_t before_sub = duwn::GlobalMetrics().video_access_units_submitted.load(std::memory_order_relaxed);
+    EncodedAccessUnit au;
+    au.data = {0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1E}; // Annex-B SPS
+    au.pts_ns = 1000000;
+    au.codec = VideoCodecType::Unknown; // Caller left Unknown
+    decoder.FeedAccessUnit(std::move(au));
+    uint64_t after_sub = duwn::GlobalMetrics().video_access_units_submitted.load(std::memory_order_relaxed);
+    DUWN_ASSERT(after_sub > before_sub);
+
+    // Test 2: FeedRtp for H.264 single NAL must emit AU and submit to decoder
+    before_sub = duwn::GlobalMetrics().video_access_units_submitted.load(std::memory_order_relaxed);
+    uint8_t nalu[] = {0x67, 0x42, 0x00, 0x1E}; // SPS
+    decoder.FeedRtp(nalu, sizeof(nalu), 90000, 2000000, true, 201);
+    after_sub = duwn::GlobalMetrics().video_access_units_submitted.load(std::memory_order_relaxed);
+    DUWN_ASSERT(after_sub > before_sub);
+}
+

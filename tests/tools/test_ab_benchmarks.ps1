@@ -116,7 +116,7 @@ try {
 
     $prodReportMd = Join-Path $testTempDir 'prod_report.md'
     $prodReportJson = Join-Path $testTempDir 'prod_report.json'
-    & powershell -ExecutionPolicy Bypass -File $analyzerScript -RunsDir $prodRunsDir -OutputMarkdown $prodReportMd
+    & "$PSHOME\powershell.exe" -ExecutionPolicy Bypass -File $analyzerScript -RunsDir $prodRunsDir -OutputMarkdown $prodReportMd
     $prodJson = Get-Content -LiteralPath $prodReportJson -Raw -Encoding utf8 | ConvertFrom-Json
 
     # Assert 1: B_OFF is VALID
@@ -270,7 +270,7 @@ try {
     $emptyRunsDir = Join-Path $testTempDir 'empty_runs'
     New-Item -ItemType Directory -Path $emptyRunsDir -Force | Out-Null
     $reportMd = Join-Path $testTempDir 'report.md'
-    & powershell -ExecutionPolicy Bypass -File $analyzerScript -RunsDir $emptyRunsDir -OutputMarkdown $reportMd
+    & "$PSHOME\powershell.exe" -ExecutionPolicy Bypass -File $analyzerScript -RunsDir $emptyRunsDir -OutputMarkdown $reportMd
     $reportContent = Get-Content -LiteralPath $reportMd -Raw -Encoding utf8
     $prohibited = @('< 5 ms', '0 frame drop', 'T2-T3 (Demux/NAL)', 'T3-T4 (HW Decode)')
     foreach ($p in $prohibited) {

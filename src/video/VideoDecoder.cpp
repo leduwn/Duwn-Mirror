@@ -103,6 +103,9 @@ bool VideoDecoder::Init(uint32_t width, uint32_t height, VideoCodecType codec) n
 
 void VideoDecoder::FeedAccessUnit(EncodedAccessUnit au) noexcept {
     if (au.data.empty()) return;
+    if (au.codec == VideoCodecType::Unknown) {
+        au.codec = (m_active_codec != VideoCodecType::Unknown) ? m_active_codec : VideoCodecType::H264;
+    }
     if (au.codec != VideoCodecType::H264 && au.codec != VideoCodecType::H265) return;
     if (au.codec == VideoCodecType::H265 &&
         !(au.data.size() >= 4 && au.data[0] == 0 && au.data[1] == 0 &&
@@ -116,9 +119,9 @@ void VideoDecoder::FeedAccessUnit(EncodedAccessUnit au) noexcept {
          (au.format_generation != 0 && au.format_generation != m_source_generation));
     if (!m_initialized || au.codec != m_active_codec || hevc_format_changed) {
         const uint32_t width = (au.width_hint != 0) ? au.width_hint :
-            (au.codec == VideoCodecType::H264 ? m_last_h264_width : m_width);
+            (au.codec == VideoCodecType::H264 ? (m_last_h264_width != 0 ? m_last_h264_width : 1920) : (m_width != 0 ? m_width : 1920));
         const uint32_t height = (au.height_hint != 0) ? au.height_hint :
-            (au.codec == VideoCodecType::H264 ? m_last_h264_height : m_height);
+            (au.codec == VideoCodecType::H264 ? (m_last_h264_height != 0 ? m_last_h264_height : 1080) : (m_height != 0 ? m_height : 1080));
         if (width == 0 || height == 0 || !Init(width, height, au.codec)) {
             DUWN_LOG_ERROR("VideoDecoder", "Codec route unavailable or missing stream dimensions");
             return;
@@ -184,6 +187,7 @@ void VideoDecoder::EmitAccessUnit(int64_t pts_ns, uint16_t seq) noexcept {
     au.data = std::move(m_au_buf);
     au.pts_ns = pts_ns;
     au.sequence_number = ++m_au_sequence;
+    au.codec = (m_active_codec != VideoCodecType::Unknown) ? m_active_codec : VideoCodecType::H264;
     au.au_received_qpc = duwn::clock::MonotonicClock::NowQpcTicks();
     au.rtp_arrival_qpc = m_first_packet_qpc > 0 ? m_first_packet_qpc : au.au_received_qpc;
     m_first_packet_qpc = 0;
@@ -214,8 +218,11 @@ void VideoDecoder::FeedRtp(const uint8_t* payload, size_t size,
 
     // Detect timestamp boundary: if RTP timestamp changed and buffer is non-empty,
     // emit prior access unit before beginning new one (RFC 6184 §5.1)
-    if (m_has_last_rtp_ts && rtp_ts != m_last_rtp_ts && !m_au_buf.empty()) {
-        EmitAccessUnit(m_last_pts_ns, m_last_seq);
+    if (m_has_last_rtp_ts && rtp_ts != m_last_rtp_ts) {
+        if (!m_au_buf.empty()) {
+            EmitAccessUnit(m_last_pts_ns, m_last_seq);
+        }
+        m_fu_a_started = false;
     }
     m_last_rtp_ts     = rtp_ts;
     m_last_pts_ns     = pts_ns;

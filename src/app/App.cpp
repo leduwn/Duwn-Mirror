@@ -3723,6 +3723,9 @@ void App::TryStartIpcConsumer() noexcept {
             au.dts_ns = hdr.dts_ns;
             au.sequence_number = hdr.sequence_number;
             au.format_generation = hdr.format_generation;
+            au.codec = (m_video_decoder && m_video_decoder->GetActiveCodec() != video::VideoCodecType::Unknown)
+                ? m_video_decoder->GetActiveCodec()
+                : video::VideoCodecType::H264;
             au.has_idr = (hdr.flags & ipc::IpcVideoFlags::Keyframe) != 0;
             au.has_sps = (hdr.flags & ipc::IpcVideoFlags::HasSps) != 0;
             au.has_pps = (hdr.flags & ipc::IpcVideoFlags::HasPps) != 0;

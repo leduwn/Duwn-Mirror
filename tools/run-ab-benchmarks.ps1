@@ -237,7 +237,7 @@ foreach ($currentRunId in $runsToExecute) {
     $collectorScript = Join-Path $scriptDir "capture-media-metrics.ps1"
 
     # Step 3: Run collector with offset isolation, raw log recording, and strict cycle boundaries
-    & powershell -ExecutionPolicy Bypass -File $collectorScript `
+    & "$PSHOME\powershell.exe" -ExecutionPolicy Bypass -File $collectorScript `
         -OutputPath $csvPath `
         -DurationSeconds $DurationSeconds `
         -LogPath $LogPath `
