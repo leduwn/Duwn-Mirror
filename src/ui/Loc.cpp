@@ -530,6 +530,11 @@ static constexpr const wchar_t* kEn[static_cast<size_t>(S::_COUNT)] = {
     /* Video_HevcUnavailable        */ L"Windows HEVC Video Extension is not installed. Install HEVC Video Extensions from Microsoft Store for H.265 support.",
     /* Wired_RoutingFailure         */ L"Wired connection lost or USB tethering disconnected. Check USB cable and Personal Hotspot.",
     /* Video_DecoderInitFailure     */ L"Hardware video decoder failed to initialize for stream format.",
+    /* Nav_Color                    */ L"Color",
+    /* Nav_Diagnostics              */ L"Diagnostics",
+    /* Common_ScreenOnly            */ L"Screen Only",
+    /* Common_BackToWorkspace       */ L"Back to Workspace",
+    /* Common_QuickVolume           */ L"Quick Volume",
 };
 
 // ---------------------------------------------------------------------------
@@ -1058,6 +1063,11 @@ static constexpr const wchar_t* kVi[static_cast<size_t>(S::_COUNT)] = {
     /* Video_HevcUnavailable        */ L"Chưa cài đặt tiện ích mở rộng HEVC Video trên Windows. Vui lòng cài đặt HEVC Video Extensions từ Microsoft Store để hỗ trợ H.265.",
     /* Wired_RoutingFailure         */ L"Mất kết nối có dây hoặc ngắt chia sẻ mạng USB. Vui lòng kiểm tra cáp USB và Điểm truy cập cá nhân.",
     /* Video_DecoderInitFailure     */ L"Không thể khởi tạo bộ giải mã video phần cứng cho định dạng luồng.",
+    /* Nav_Color                    */ L"Màu sắc",
+    /* Nav_Diagnostics              */ L"Chẩn đoán",
+    /* Common_ScreenOnly            */ L"Chỉ màn hình",
+    /* Common_BackToWorkspace       */ L"Về Workspace",
+    /* Common_QuickVolume           */ L"Âm lượng nhanh",
 };
 
 static_assert(static_cast<size_t>(S::_COUNT) == std::size(kEn),

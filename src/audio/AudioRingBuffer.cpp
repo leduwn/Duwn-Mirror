@@ -72,4 +72,12 @@ void AudioRingBuffer::Flush() noexcept {
     m_read_idx.store(w, std::memory_order_release);
 }
 
+void AudioRingBuffer::DiscardOldest(uint32_t keep_frames) noexcept {
+    uint32_t avail = Available();
+    if (avail > keep_frames) {
+        uint32_t discard = avail - keep_frames;
+        m_read_idx.fetch_add(discard, std::memory_order_release);
+    }
+}
+
 } // namespace duwn::audio

@@ -62,15 +62,19 @@ public:
     bool OnMouseWheel(int x, int y, int delta, UiState& state) noexcept;
     bool OnKeyDown(WPARAM vk, UiState& state) noexcept;
 
+    using VolumeCallback = std::function<void(float)>;
+
     // Callbacks binding
     void SetOnToggleOutputWindow(ActionCallback cb) noexcept { m_on_toggle_output = std::move(cb); }
     void SetOnToggleFullscreen(ActionCallback cb) noexcept { m_on_toggle_fullscreen = std::move(cb); }
     void SetOnToggleAspectLock(ActionCallback cb) noexcept { m_on_toggle_aspect_lock = std::move(cb); }
     void SetOnToggleAlwaysOnTop(ActionCallback cb) noexcept { m_on_toggle_always_on_top = std::move(cb); }
+    void SetOnToggleScreenOnly(ActionCallback cb) noexcept { m_on_toggle_screen_only = std::move(cb); }
     void SetOnTogglePreview(ActionCallback cb) noexcept { m_on_toggle_preview = std::move(cb); }
     void SetOnFullscreenPreview(ActionCallback cb) noexcept { m_on_fullscreen_preview = std::move(cb); }
     void SetOnTogglePreviewAlwaysOnTop(ActionCallback cb) noexcept { m_on_toggle_preview_always_on_top = std::move(cb); }
     void SetOnToggleMute(ActionCallback cb) noexcept { m_on_toggle_mute = std::move(cb); }
+    void SetOnVolumeChanged(VolumeCallback cb) noexcept { m_on_volume_changed = std::move(cb); }
     void SetOnDisconnect(ActionCallback cb) noexcept { m_on_disconnect = std::move(cb); }
     void SetOnFlushPipeline(ActionCallback cb) noexcept { m_on_flush_pipeline = std::move(cb); }
     void SetOnTabChanged(TabCallback cb) noexcept { m_on_tab_changed = std::move(cb); }
@@ -96,8 +100,11 @@ private:
     // Sub-views for Navigation Tabs
     void RenderPerformanceView(const UiState& state, const D2D1_RECT_F& area) noexcept;
     void RenderVideoView(const UiState& state, const D2D1_RECT_F& area) noexcept;
+    void RenderColorView(const UiState& state, const D2D1_RECT_F& area) noexcept;
     void RenderSettingsView(const UiState& state, const D2D1_RECT_F& area) noexcept;
+    void RenderDiagnosticsView(const UiState& state, const D2D1_RECT_F& area) noexcept;
     void RenderAboutView(const UiState& state, const D2D1_RECT_F& area) noexcept;
+    void RenderScreenOnlyView(const UiState& state, const D2D1_RECT_F& area) noexcept;
     void RenderDropdownOverlay(const UiState& state) noexcept;
 
     // Settings sub-pages
@@ -140,7 +147,9 @@ private:
     float                           m_scroll_y_performance{0.0f};
     float                           m_scroll_y_video{0.0f};
     float                           m_scroll_y_audio{0.0f};
+    float                           m_scroll_y_color{0.0f};
     float                           m_scroll_y_settings{0.0f};
+    float                           m_scroll_y_diagnostics{0.0f};
     float                           m_scroll_y_about{0.0f};
     float                           m_content_height{0.0f};
     float                           m_viewport_height{0.0f};
@@ -157,10 +166,12 @@ private:
     ActionCallback                  m_on_toggle_fullscreen;
     ActionCallback                  m_on_toggle_aspect_lock;
     ActionCallback                  m_on_toggle_always_on_top;
+    ActionCallback                  m_on_toggle_screen_only;
     ActionCallback                  m_on_toggle_preview;
     ActionCallback                  m_on_fullscreen_preview;
     ActionCallback                  m_on_toggle_preview_always_on_top;
     ActionCallback                  m_on_toggle_mute;
+    VolumeCallback                  m_on_volume_changed;
     ActionCallback                  m_on_disconnect;
     ActionCallback                  m_on_flush_pipeline;
     ActionCallback                  m_on_test_audio;
@@ -174,6 +185,7 @@ private:
     float                           m_touch_start_x{0.0f};
     float                           m_touch_start_y{0.0f};
     int ColorValueAt(int control_id, float x) const noexcept;
+    float VolumeValueAt(int control_id, float x) const noexcept;
 };
 
 } // namespace duwn::ui

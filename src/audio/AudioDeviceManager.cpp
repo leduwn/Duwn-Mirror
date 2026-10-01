@@ -104,6 +104,16 @@ std::wstring AudioDeviceManager::DefaultDeviceId() noexcept {
     return id;
 }
 
+bool AudioDeviceManager::IsDeviceActive(const std::wstring& id) noexcept {
+    if (id.empty() || !m_enumerator) return false;
+    ComPtr<IMMDevice> device;
+    HRESULT hr = m_enumerator->GetDevice(id.c_str(), &device);
+    if (FAILED(hr) || !device) return false;
+    DWORD state = 0;
+    hr = device->GetState(&state);
+    return SUCCEEDED(hr) && (state == DEVICE_STATE_ACTIVE);
+}
+
 void AudioDeviceManager::SetWatchedDeviceId(const std::wstring& id) noexcept {
     ::AcquireSRWLockExclusive(&m_watched_lock);
     m_watched_device_id = id;
@@ -146,8 +156,18 @@ HRESULT STDMETHODCALLTYPE AudioDeviceManager::OnDefaultDeviceChanged(
     return S_OK;
 }
 
-HRESULT STDMETHODCALLTYPE AudioDeviceManager::OnDeviceAdded(LPCWSTR /*pwstrDeviceId*/) {
+HRESULT STDMETHODCALLTYPE AudioDeviceManager::OnDeviceAdded(LPCWSTR pwstrDeviceId) {
     if (m_hwnd) ::PostMessageW(m_hwnd, WM_APP_AUDIO_DEVICE_LIST_CHANGED, 0, 0);
+
+    // If the added device matches our watched (pinned) device, trigger reconnect
+    ::AcquireSRWLockShared(&m_watched_lock);
+    bool matches_watched = (!m_watched_device_id.empty() && pwstrDeviceId &&
+                            m_watched_device_id == pwstrDeviceId);
+    ::ReleaseSRWLockShared(&m_watched_lock);
+
+    if (matches_watched && m_hwnd) {
+        ::PostMessageW(m_hwnd, WM_APP_AUDIO_DEVICE_CHANGED, 0, 0);
+    }
     return S_OK;
 }
 
@@ -156,7 +176,7 @@ HRESULT STDMETHODCALLTYPE AudioDeviceManager::OnDeviceRemoved(LPCWSTR pwstrDevic
 
     // If the removed device is the one we're actively using — trigger handoff
     ::AcquireSRWLockShared(&m_watched_lock);
-    bool is_active = (!m_watched_device_id.empty() &&
+    bool is_active = (!m_watched_device_id.empty() && pwstrDeviceId &&
                       m_watched_device_id == pwstrDeviceId);
     ::ReleaseSRWLockShared(&m_watched_lock);
 
@@ -170,15 +190,17 @@ HRESULT STDMETHODCALLTYPE AudioDeviceManager::OnDeviceStateChanged(
     LPCWSTR pwstrDeviceId, DWORD dwNewState) {
     if (m_hwnd) ::PostMessageW(m_hwnd, WM_APP_AUDIO_DEVICE_LIST_CHANGED, 0, 0);
 
-    // If our pinned device goes inactive — trigger fallback
-    if (dwNewState == DEVICE_STATE_NOTPRESENT ||
-        dwNewState == DEVICE_STATE_DISABLED ||
-        dwNewState == DEVICE_STATE_UNPLUGGED) {
-        ::AcquireSRWLockShared(&m_watched_lock);
-        bool is_active = (!m_watched_device_id.empty() &&
-                          m_watched_device_id == pwstrDeviceId);
-        ::ReleaseSRWLockShared(&m_watched_lock);
-        if (is_active && m_hwnd) {
+    ::AcquireSRWLockShared(&m_watched_lock);
+    bool is_watched = (!m_watched_device_id.empty() && pwstrDeviceId &&
+                       m_watched_device_id == pwstrDeviceId);
+    ::ReleaseSRWLockShared(&m_watched_lock);
+
+    if (is_watched && m_hwnd) {
+        // Trigger on both unplug/disable and reconnect/active
+        if (dwNewState == DEVICE_STATE_ACTIVE ||
+            dwNewState == DEVICE_STATE_NOTPRESENT ||
+            dwNewState == DEVICE_STATE_DISABLED ||
+            dwNewState == DEVICE_STATE_UNPLUGGED) {
             ::PostMessageW(m_hwnd, WM_APP_AUDIO_DEVICE_CHANGED, 0, 0);
         }
     }

@@ -287,6 +287,10 @@ void MainWindow::SetOnToggleAlwaysOnTop(std::function<void()> cb) noexcept {
     m_view.SetOnToggleAlwaysOnTop(std::move(cb));
 }
 
+void MainWindow::SetOnToggleScreenOnly(std::function<void()> cb) noexcept {
+    m_view.SetOnToggleScreenOnly(std::move(cb));
+}
+
 void MainWindow::SetOnTogglePreview(std::function<void()> cb) noexcept {
     m_view.SetOnTogglePreview(std::move(cb));
 }
@@ -301,6 +305,10 @@ void MainWindow::SetOnTogglePreviewAlwaysOnTop(std::function<void()> cb) noexcep
 
 void MainWindow::SetOnToggleMute(std::function<void()> cb) noexcept {
     m_view.SetOnToggleMute(std::move(cb));
+}
+
+void MainWindow::SetOnVolumeChanged(std::function<void(float)> cb) noexcept {
+    m_view.SetOnVolumeChanged(std::move(cb));
 }
 
 void MainWindow::SetOnDisconnect(std::function<void()> cb) noexcept {

@@ -35,6 +35,9 @@ public:
     // Clear all buffered data.
     void Flush() noexcept;
 
+    // Discard oldest frames if available exceeds keep_frames (caps buffer queue).
+    void DiscardOldest(uint32_t keep_frames) noexcept;
+
     uint32_t Capacity() const noexcept { return m_capacity; }
     uint32_t Channels() const noexcept { return m_channels; }
 

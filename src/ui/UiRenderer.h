@@ -28,7 +28,8 @@ enum class IconType {
     Chip,
     CheckCircle,
     Power,
-    Refresh
+    Refresh,
+    Palette
 };
 
 class UiRenderer {

@@ -595,6 +595,13 @@ enum class S {
     Wired_RoutingFailure,
     Video_DecoderInitFailure,
 
+    // Workspace & Audio overhaul additions
+    Nav_Color,
+    Nav_Diagnostics,
+    Common_ScreenOnly,
+    Common_BackToWorkspace,
+    Common_QuickVolume,
+
     _COUNT
 };
 

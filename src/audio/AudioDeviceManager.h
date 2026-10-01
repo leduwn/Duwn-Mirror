@@ -68,6 +68,9 @@ public:
     HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(
         LPCWSTR pwstrDeviceId, const PROPERTYKEY key) override { return S_OK; }
 
+    // Check if a specific endpoint ID is currently active and usable.
+    bool IsDeviceActive(const std::wstring& id) noexcept;
+
     // Current active device ID being monitored (set by App when user selects a device).
     // Used to determine if OnDeviceStateChanged should post DEVICE_CHANGED.
     void SetWatchedDeviceId(const std::wstring& id) noexcept;

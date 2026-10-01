@@ -57,11 +57,11 @@ int MainWindowView::HitTest(float fx, float fy, float scroll_y) const noexcept {
 float MainWindowView::GetCurrentScrollY(NavTab tab) const noexcept {
     switch (tab) {
     case NavTab::Mirror:      return m_scroll_y_mirror;
-    case NavTab::Performance: return m_scroll_y_performance;
     case NavTab::Video:       return m_scroll_y_video;
     case NavTab::Audio:       return m_scroll_y_audio;
+    case NavTab::Color:       return m_scroll_y_color;
     case NavTab::Settings:    return m_scroll_y_settings;
-    case NavTab::About:       return m_scroll_y_about;
+    case NavTab::Diagnostics: return m_scroll_y_diagnostics;
     default:                  return 0.0f;
     }
 }
@@ -69,11 +69,11 @@ float MainWindowView::GetCurrentScrollY(NavTab tab) const noexcept {
 void MainWindowView::SetCurrentScrollY(NavTab tab, float y) noexcept {
     switch (tab) {
     case NavTab::Mirror:      m_scroll_y_mirror = y; break;
-    case NavTab::Performance: m_scroll_y_performance = y; break;
     case NavTab::Video:       m_scroll_y_video = y; break;
     case NavTab::Audio:       m_scroll_y_audio = y; break;
+    case NavTab::Color:       m_scroll_y_color = y; break;
     case NavTab::Settings:    m_scroll_y_settings = y; break;
-    case NavTab::About:       m_scroll_y_about = y; break;
+    case NavTab::Diagnostics: m_scroll_y_diagnostics = y; break;
     }
 }
 
@@ -121,6 +121,18 @@ int MainWindowView::ColorValueAt(int control_id, float x) const noexcept {
     return 0;
 }
 
+float MainWindowView::VolumeValueAt(int control_id, float x) const noexcept {
+    for (const auto& item : m_clickables) {
+        if (item.control_id == control_id) {
+            const float left = item.rect.left;
+            const float right = item.rect.right;
+            if (right <= left) return 1.0f;
+            return std::clamp((x - left) / (right - left), 0.0f, 1.0f);
+        }
+    }
+    return 1.0f;
+}
+
 bool MainWindowView::OnMouseMove(int x, int y, UiState& state) noexcept {
     m_renderer.GetDpi(&m_dpi_x, &m_dpi_y);
     float dip_x = static_cast<float>(x) * 96.0f / (m_dpi_x > 0.0f ? m_dpi_x : 96.0f);
@@ -150,6 +162,14 @@ bool MainWindowView::OnMouseMove(int x, int y, UiState& state) noexcept {
     if (state.pressed_control >= Control_Set_Brightness &&
         state.pressed_control <= Control_Set_Sharpness && m_on_setting_changed) {
         m_on_setting_changed(state.pressed_control, ColorValueAt(state.pressed_control, dip_x));
+        return true;
+    }
+
+    if ((state.pressed_control == Control_Slider_QuickVolume ||
+         state.pressed_control == Control_Slider_AudioVolume) && m_on_volume_changed) {
+        float vol = VolumeValueAt(state.pressed_control, dip_x);
+        state.audio_volume = vol;
+        m_on_volume_changed(vol);
         return true;
     }
 
@@ -266,6 +286,11 @@ bool MainWindowView::OnMouseDown(int x, int y, UiState& state) noexcept {
             state.active_color_slider = hit - Control_Set_Brightness;
             m_on_setting_changed(hit, ColorValueAt(hit, dip_x));
         }
+        if ((hit == Control_Slider_QuickVolume || hit == Control_Slider_AudioVolume) && m_on_volume_changed) {
+            float vol = VolumeValueAt(hit, dip_x);
+            state.audio_volume = vol;
+            m_on_volume_changed(vol);
+        }
         return true;
     }
 
@@ -349,10 +374,6 @@ bool MainWindowView::OnMouseUp(int x, int y, UiState& state) noexcept {
             state.active_tab = NavTab::Mirror;
             if (m_on_tab_changed) m_on_tab_changed(NavTab::Mirror);
             break;
-        case Control_Nav_Performance:
-            state.active_tab = NavTab::Performance;
-            if (m_on_tab_changed) m_on_tab_changed(NavTab::Performance);
-            break;
         case Control_Nav_Video:
             state.active_tab = NavTab::Video;
             if (m_on_tab_changed) m_on_tab_changed(NavTab::Video);
@@ -361,14 +382,23 @@ bool MainWindowView::OnMouseUp(int x, int y, UiState& state) noexcept {
             state.active_tab = NavTab::Audio;
             if (m_on_tab_changed) m_on_tab_changed(NavTab::Audio);
             break;
+        case Control_Nav_Color:
+            state.active_tab = NavTab::Color;
+            if (m_on_tab_changed) m_on_tab_changed(NavTab::Color);
+            break;
         case Control_Nav_Settings:
             state.active_tab = NavTab::Settings;
             if (m_on_tab_changed) m_on_tab_changed(NavTab::Settings);
             break;
-        case Control_Nav_About:
+        case Control_Nav_Diagnostics:
         case Control_Btn_HeaderAbout:
-            state.active_tab = NavTab::About;
-            if (m_on_tab_changed) m_on_tab_changed(NavTab::About);
+            state.active_tab = NavTab::Diagnostics;
+            if (m_on_tab_changed) m_on_tab_changed(NavTab::Diagnostics);
+            break;
+
+        case Control_Btn_ToggleScreenOnly:
+            state.is_screen_only = !state.is_screen_only;
+            if (m_on_toggle_screen_only) m_on_toggle_screen_only();
             break;
 
         case Control_Btn_TogglePreview:
@@ -684,6 +714,12 @@ void MainWindowView::Render(const UiState& state) noexcept {
     float total_w = m_renderer.WidthDip();
     float total_h = m_renderer.HeightDip();
 
+    if (state.is_screen_only) {
+        RenderScreenOnlyView(state, D2D1::RectF(0.0f, 0.0f, total_w, total_h));
+        m_renderer.EndDraw();
+        return;
+    }
+
     m_tier = CalculateTier(total_w);
 
     float header_h = metrics::HeaderHeight;
@@ -725,12 +761,12 @@ void MainWindowView::Render(const UiState& state) noexcept {
         content_h = 62.0f + (two_col ? std::max(col1_h, col2_h) : (col1_h + col2_h)) + 32.0f;
     } else if (state.active_tab == NavTab::Audio) {
         content_h = std::max(body_h, 560.0f);
+    } else if (state.active_tab == NavTab::Color) {
+        content_h = std::max(body_h, 560.0f);
     } else if (state.active_tab == NavTab::Settings) {
         content_h = std::max(body_h, 520.0f);
-    } else if (state.active_tab == NavTab::Performance) {
-        content_h = 560.0f;
-    } else if (state.active_tab == NavTab::About) {
-        content_h = std::max(body_h, 480.0f);
+    } else if (state.active_tab == NavTab::Diagnostics) {
+        content_h = std::max(body_h, 560.0f);
     } else if (state.active_tab == NavTab::Mirror) {
         content_h = std::max(body_h, state.connection_mode == 1 ? 870.0f : 710.0f);
     }
@@ -803,16 +839,16 @@ void MainWindowView::Render(const UiState& state) noexcept {
         }
     } else {
         D2D1_RECT_F full_content_rc = D2D1::RectF(sidebar_w, content_y, total_w, content_y + body_h);
-        if (state.active_tab == NavTab::Performance) {
-            RenderPerformanceView(state, full_content_rc);
-        } else if (state.active_tab == NavTab::Video) {
+        if (state.active_tab == NavTab::Video) {
             RenderVideoView(state, full_content_rc);
         } else if (state.active_tab == NavTab::Audio) {
             RenderAudioPage(state, full_content_rc);
+        } else if (state.active_tab == NavTab::Color) {
+            RenderColorView(state, full_content_rc);
         } else if (state.active_tab == NavTab::Settings) {
             RenderSettingsView(state, full_content_rc);
-        } else if (state.active_tab == NavTab::About) {
-            RenderAboutView(state, full_content_rc);
+        } else if (state.active_tab == NavTab::Diagnostics) {
+            RenderDiagnosticsView(state, full_content_rc);
         }
     }
 
@@ -983,7 +1019,7 @@ void MainWindowView::RenderSidebar(const UiState& state, float top, float height
         m_renderer.BrushCardBorder(), 1.0f
     );
 
-    // Navigation Menu Items
+    // Navigation Menu Items (Approved Workspace: Mirror, Video, Audio, Color, Settings; Diagnostics at bottom)
     struct NavItem {
         NavTab tab;
         ControlId ctrl_id;
@@ -991,25 +1027,23 @@ void MainWindowView::RenderSidebar(const UiState& state, float top, float height
         IconType icon;
     };
 
-    const NavItem nav_items[] = {
-        { NavTab::Mirror,      Control_Nav_Mirror,      loc::Get(loc::S::Nav_Mirror),      IconType::Phone },
-        { NavTab::Performance, Control_Nav_Performance, loc::Get(loc::S::Nav_Performance), IconType::Performance },
-        { NavTab::Video,       Control_Nav_Video,       loc::Get(loc::S::Nav_Video),       IconType::Monitor },
-        { NavTab::Audio,       Control_Nav_Audio,       loc::Get(loc::S::Nav_Audio),       IconType::Speaker },
-        { NavTab::Settings,    Control_Nav_Settings,    loc::Get(loc::S::Nav_Settings),    IconType::Settings },
-        { NavTab::About,       Control_Nav_About,       loc::Get(loc::S::Nav_About),       IconType::Chip },
+    const NavItem top_nav_items[] = {
+        { NavTab::Mirror,   Control_Nav_Mirror,   loc::Get(loc::S::Nav_Mirror),   IconType::Phone },
+        { NavTab::Video,    Control_Nav_Video,    loc::Get(loc::S::Nav_Video),    IconType::Monitor },
+        { NavTab::Audio,    Control_Nav_Audio,    loc::Get(loc::S::Nav_Audio),    IconType::Speaker },
+        { NavTab::Color,    Control_Nav_Color,    loc::Get(loc::S::Nav_Color),    IconType::Palette },
+        { NavTab::Settings, Control_Nav_Settings, loc::Get(loc::S::Nav_Settings), IconType::Settings },
     };
 
-    float nav_y = top + 16.0f;
     float item_h = 40.0f;
 
-    for (const auto& item : nav_items) {
+    auto RenderItem = [&](const NavItem& item, float cur_y) {
         bool is_active = (state.active_tab == item.tab);
         bool is_hovered = (state.hovered_control == item.ctrl_id);
 
         if (m_tier == LayoutTier::Large) {
             float item_margin = 12.0f;
-            D2D1_RECT_F item_rc = D2D1::RectF(item_margin, nav_y, w - item_margin, nav_y + item_h);
+            D2D1_RECT_F item_rc = D2D1::RectF(item_margin, cur_y, w - item_margin, cur_y + item_h);
             RegisterClickable(item_rc, item.ctrl_id, item.label);
 
             if (is_active) {
@@ -1020,8 +1054,7 @@ void MainWindowView::RenderSidebar(const UiState& state, float top, float height
                     m_renderer.DrawRoundedRect(item_rc, metrics::ButtonRadius, m_renderer.BrushBrandBlue(), 1.2f);
                 }
 
-                // Left indicator bar
-                D2D1_RECT_F indicator = D2D1::RectF(item_margin + 2.0f, nav_y + 8.0f, item_margin + 5.0f, nav_y + item_h - 8.0f);
+                D2D1_RECT_F indicator = D2D1::RectF(item_margin + 2.0f, cur_y + 8.0f, item_margin + 5.0f, cur_y + item_h - 8.0f);
                 m_renderer.FillRoundedRect(indicator, 1.5f, m_renderer.BrushBrandBlue());
             } else if (is_hovered) {
                 Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover_brush;
@@ -1031,13 +1064,11 @@ void MainWindowView::RenderSidebar(const UiState& state, float top, float height
                 }
             }
 
-            // Icon
-            D2D1_RECT_F icon_rc = D2D1::RectF(item_margin + 12.0f, nav_y + 11.0f, item_margin + 30.0f, nav_y + item_h - 11.0f);
+            D2D1_RECT_F icon_rc = D2D1::RectF(item_margin + 12.0f, cur_y + 11.0f, item_margin + 30.0f, cur_y + item_h - 11.0f);
             D2D1_COLOR_F icon_color = is_active ? colors::BrandBlue : (is_hovered ? colors::TextPrimary : colors::TextSecondary);
             m_renderer.DrawIcon(item.icon, icon_rc, icon_color, 1.6f);
 
-            // Label
-            D2D1_RECT_F text_rc = D2D1::RectF(item_margin + 40.0f, nav_y, w - item_margin, nav_y + item_h);
+            D2D1_RECT_F text_rc = D2D1::RectF(item_margin + 40.0f, cur_y, w - item_margin, cur_y + item_h);
             IDWriteTextFormat* fmt = is_active ? m_renderer.FontBodyBold() : m_renderer.FontBody();
             ID2D1Brush* text_brush = is_active ? m_renderer.BrushTextPrimary() :
                                      (is_hovered ? m_renderer.BrushTextPrimary() : m_renderer.BrushTextSecondary());
@@ -1045,10 +1076,9 @@ void MainWindowView::RenderSidebar(const UiState& state, float top, float height
             m_renderer.DrawTextSimple(item.label, fmt, text_rc, text_brush,
                                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         } else {
-            // Compact icon rail (Medium / Small)
             float item_sz = 38.0f;
             float item_x = (w - item_sz) * 0.5f;
-            D2D1_RECT_F item_rc = D2D1::RectF(item_x, nav_y, item_x + item_sz, nav_y + item_sz);
+            D2D1_RECT_F item_rc = D2D1::RectF(item_x, cur_y, item_x + item_sz, cur_y + item_sz);
             RegisterClickable(item_rc, item.ctrl_id, item.label);
 
             if (is_active) {
@@ -1059,7 +1089,7 @@ void MainWindowView::RenderSidebar(const UiState& state, float top, float height
                     m_renderer.DrawRoundedRect(item_rc, metrics::ButtonRadius, m_renderer.BrushBrandBlue(), 1.2f);
                 }
 
-                D2D1_RECT_F indicator = D2D1::RectF(2.0f, nav_y + 8.0f, 5.0f, nav_y + item_sz - 8.0f);
+                D2D1_RECT_F indicator = D2D1::RectF(2.0f, cur_y + 8.0f, 5.0f, cur_y + item_sz - 8.0f);
                 m_renderer.FillRoundedRect(indicator, 1.5f, m_renderer.BrushBrandBlue());
             } else if (is_hovered) {
                 Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover_brush;
@@ -1069,12 +1099,31 @@ void MainWindowView::RenderSidebar(const UiState& state, float top, float height
                 }
             }
 
-            D2D1_RECT_F icon_rc = D2D1::RectF(item_x + 9.0f, nav_y + 9.0f, item_x + 29.0f, nav_y + 29.0f);
+            D2D1_RECT_F icon_rc = D2D1::RectF(item_x + 9.0f, cur_y + 9.0f, item_x + 29.0f, cur_y + 29.0f);
             D2D1_COLOR_F icon_color = is_active ? colors::BrandBlue : (is_hovered ? colors::TextPrimary : colors::TextSecondary);
             m_renderer.DrawIcon(item.icon, icon_rc, icon_color, 1.6f);
         }
+    };
 
+    float nav_y = top + 16.0f;
+
+    for (const auto& item : top_nav_items) {
+        RenderItem(item, nav_y);
         nav_y += item_h + 6.0f;
+    }
+
+    // Bottom section: Chẩn đoán (Diagnostics at bottom)
+    float diag_y = top + height - item_h - 16.0f;
+    if (diag_y > nav_y + 10.0f) {
+        m_renderer.DrawLine(
+            D2D1::Point2F(14.0f, diag_y - 8.0f),
+            D2D1::Point2F(w - 14.0f, diag_y - 8.0f),
+            m_renderer.BrushCardBorder(), 1.0f
+        );
+        const NavItem bottom_item = {
+            NavTab::Diagnostics, Control_Nav_Diagnostics, loc::Get(loc::S::Nav_Diagnostics), IconType::Performance
+        };
+        RenderItem(bottom_item, diag_y);
     }
 
     m_renderer.PopClip();
@@ -1740,8 +1789,8 @@ void MainWindowView::RenderRightStack(const UiState& state, const D2D1_RECT_F& a
     RenderPerformanceCard(state, card2_rc);
     cur_y += card2_h + 10.0f;
 
-    // Card 3: Quick Controls Card (streamlined 110 DIP)
-    float card3_h = 110.0f;
+    // Card 3: Quick Controls Card (streamlined 145 DIP)
+    float card3_h = 145.0f;
     D2D1_RECT_F card3_rc = D2D1::RectF(card_x, cur_y, card_x + card_w, cur_y + card3_h);
     RenderControlsCard(state, card3_rc);
     cur_y += card3_h + 10.0f;
@@ -1920,67 +1969,82 @@ void MainWindowView::RenderControlsCard(const UiState& state, const D2D1_RECT_F&
     m_renderer.DrawCard(card_rc, false, metrics::CardRadius);
 
     // Header
-    D2D1_RECT_F header_rc = D2D1::RectF(card_rc.left + 14.0f, card_rc.top + 8.0f, card_rc.right - 14.0f, card_rc.top + 26.0f);
+    D2D1_RECT_F header_rc = D2D1::RectF(card_rc.left + 14.0f, card_rc.top + 7.0f, card_rc.right - 14.0f, card_rc.top + 23.0f);
     m_renderer.DrawTextSimple(
         loc::Get(loc::S::Mirror_WindowsTitle), m_renderer.FontSmallBold(), header_rc,
         m_renderer.BrushTextMuted(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER
     );
 
-    // Primary Action Buttons Row (Show/Hide Preview, Show/Hide Output)
-    float pri_top = card_rc.top + 28.0f;
-    float pri_h = 36.0f;
+    // Row 1: Primary Action Buttons (Screen Only / Fullscreen)
+    float pri_top = card_rc.top + 25.0f;
+    float pri_h = 32.0f;
     float btn_w = (card_rc.right - card_rc.left - 28.0f - 8.0f) * 0.5f;
 
-    // 1. Preview Window Button
-    D2D1_RECT_F prev_btn_rc = D2D1::RectF(card_rc.left + 14.0f, pri_top, card_rc.left + 14.0f + btn_w, pri_top + pri_h);
-    RegisterClickable(prev_btn_rc, Control_Btn_TogglePreview);
-    bool prev_h = (state.hovered_control == Control_Btn_TogglePreview);
-    bool prev_p = (state.pressed_control == Control_Btn_TogglePreview);
-    std::wstring_view prev_lbl = state.preview_visible
-        ? loc::Get(loc::S::Mirror_Btn_HidePreview)
-        : loc::Get(loc::S::Mirror_Btn_ShowPreview);
-    m_renderer.DrawButton(prev_btn_rc, prev_lbl, state.preview_visible, prev_h, prev_p, IconType::Monitor);
+    // 1. Chỉ màn hình (Screen Only) button
+    D2D1_RECT_F screen_btn_rc = D2D1::RectF(card_rc.left + 14.0f, pri_top, card_rc.left + 14.0f + btn_w, pri_top + pri_h);
+    RegisterClickable(screen_btn_rc, Control_Btn_ToggleScreenOnly, loc::Get(loc::S::Common_ScreenOnly));
+    bool scr_h = (state.hovered_control == Control_Btn_ToggleScreenOnly);
+    bool scr_p = (state.pressed_control == Control_Btn_ToggleScreenOnly);
+    m_renderer.DrawButton(screen_btn_rc, loc::Get(loc::S::Common_ScreenOnly), true, scr_h, scr_p, IconType::Maximize);
 
-    // 2. Output Window Button
-    D2D1_RECT_F out_btn_rc = D2D1::RectF(card_rc.left + 14.0f + btn_w + 8.0f, pri_top, card_rc.right - 14.0f, pri_top + pri_h);
-    RegisterClickable(out_btn_rc, Control_Btn_ToggleOutput);
-    bool out_h = (state.hovered_control == Control_Btn_ToggleOutput);
-    bool out_p = (state.pressed_control == Control_Btn_ToggleOutput);
-    std::wstring_view out_lbl = state.output_window_visible
-        ? loc::Get(loc::S::Mirror_Btn_HideOutput)
-        : loc::Get(loc::S::Mirror_Btn_ShowOutput);
-    m_renderer.DrawButton(out_btn_rc, out_lbl, false, out_h, out_p, IconType::Monitor);
+    // 2. Toàn màn hình (Fullscreen) button
+    D2D1_RECT_F full_btn_rc = D2D1::RectF(card_rc.left + 14.0f + btn_w + 8.0f, pri_top, card_rc.right - 14.0f, pri_top + pri_h);
+    RegisterClickable(full_btn_rc, Control_Btn_Fullscreen);
+    bool full_h = (state.hovered_control == Control_Btn_Fullscreen);
+    bool full_p = (state.pressed_control == Control_Btn_Fullscreen);
+    std::wstring_view full_lbl = state.output_fullscreen ? L"Windowed" : loc::Get(loc::S::Right_Btn_Full);
+    m_renderer.DrawButton(full_btn_rc, full_lbl, state.output_fullscreen, full_h, full_p, IconType::Maximize);
 
-    // Secondary Action Row: Fullscreen Preview, Preview Always on Top, Audio Mute
-    float sub_y = card_rc.top + 70.0f;
-    float sub_h = 30.0f;
-    float gap = 6.0f;
-    float total_sub_w = card_rc.right - card_rc.left - 28.0f;
-    float sub_w = (total_sub_w - gap * 2.0f) / 3.0f;
+    // Row 2: Secondary Toggles (Always on Top, Aspect Ratio Lock)
+    float row2_y = pri_top + pri_h + 6.0f;
+    float row2_h = 28.0f;
+    float row2_btn_w = (card_rc.right - card_rc.left - 28.0f - 8.0f) * 0.5f;
 
-    struct ActionBtn {
-        ControlId id;
-        std::wstring_view label;
-        bool active;
-        IconType icon;
-    };
+    D2D1_RECT_F top_btn_rc = D2D1::RectF(card_rc.left + 14.0f, row2_y, card_rc.left + 14.0f + row2_btn_w, row2_y + row2_h);
+    RegisterClickable(top_btn_rc, Control_Btn_AlwaysOnTop, loc::Get(loc::S::Right_Btn_Pin));
+    m_renderer.DrawButton(top_btn_rc, loc::Get(loc::S::Right_Btn_Pin), state.always_on_top,
+        state.hovered_control == Control_Btn_AlwaysOnTop, state.pressed_control == Control_Btn_AlwaysOnTop, IconType::Pin);
 
-    ActionBtn btns[3] = {
-        { Control_Btn_FullscreenPreview,     loc::Get(loc::S::Right_Btn_Full), false, IconType::Maximize },
-        { Control_Toggle_PreviewAlwaysOnTop, loc::Get(loc::S::Mirror_Toggle_AlwaysOnTop), state.preview_always_on_top, IconType::Pin },
-        { Control_Btn_Mute,                  state.audio_muted ? loc::Get(loc::S::Right_Btn_Unmute) : loc::Get(loc::S::Right_Btn_Mute), state.audio_muted, IconType::Speaker }
-    };
+    D2D1_RECT_F aspect_btn_rc = D2D1::RectF(card_rc.left + 14.0f + row2_btn_w + 8.0f, row2_y, card_rc.right - 14.0f, row2_y + row2_h);
+    RegisterClickable(aspect_btn_rc, Control_Btn_AspectLock, loc::Get(loc::S::Right_Btn_Aspect));
+    m_renderer.DrawButton(aspect_btn_rc, loc::Get(loc::S::Right_Btn_Aspect), state.aspect_locked,
+        state.hovered_control == Control_Btn_AspectLock, state.pressed_control == Control_Btn_AspectLock, IconType::Lock);
 
-    for (int i = 0; i < 3; ++i) {
-        float bx = card_rc.left + 14.0f + i * (sub_w + gap);
-        D2D1_RECT_F b_rc = D2D1::RectF(bx, sub_y, bx + sub_w, sub_y + sub_h);
-        RegisterClickable(b_rc, btns[i].id);
+    // Row 3: Quick Volume Bar (Shared state with Audio tab)
+    float vol_y = row2_y + row2_h + 8.0f;
+    float vol_h = 28.0f;
+    float mute_btn_w = 60.0f;
+    float pct_w = 40.0f;
 
-        bool h = (state.hovered_control == btns[i].id);
-        bool p = (state.pressed_control == btns[i].id);
+    D2D1_RECT_F mute_rc = D2D1::RectF(card_rc.left + 14.0f, vol_y, card_rc.left + 14.0f + mute_btn_w, vol_y + vol_h);
+    RegisterClickable(mute_rc, Control_Btn_Mute, loc::Get(loc::S::Audio_Mute));
+    m_renderer.DrawButton(mute_rc, state.audio_muted ? loc::Get(loc::S::Right_Btn_Unmute) : loc::Get(loc::S::Right_Btn_Mute),
+        state.audio_muted, state.hovered_control == Control_Btn_Mute, state.pressed_control == Control_Btn_Mute, IconType::Speaker);
 
-        m_renderer.DrawButton(b_rc, btns[i].label, btns[i].active, h, p, btns[i].icon);
+    // Interactive slider track
+    float track_x0 = card_rc.left + 14.0f + mute_btn_w + 8.0f;
+    float track_x1 = card_rc.right - 14.0f - pct_w - 4.0f;
+    D2D1_RECT_F slider_area_rc = D2D1::RectF(track_x0, vol_y, track_x1, vol_y + vol_h);
+    RegisterClickable(slider_area_rc, Control_Slider_QuickVolume, loc::Get(loc::S::Common_QuickVolume));
+
+    float track_cy = vol_y + vol_h * 0.5f;
+    D2D1_RECT_F track_bg = D2D1::RectF(track_x0, track_cy - 3.0f, track_x1, track_cy + 3.0f);
+    m_renderer.FillRoundedRect(track_bg, 3.0f, m_renderer.BrushCardBorder());
+
+    float vol_frac = std::clamp(state.audio_volume, 0.0f, 1.0f);
+    float fill_x1 = track_x0 + (track_x1 - track_x0) * vol_frac;
+    if (fill_x1 > track_x0) {
+        D2D1_RECT_F track_fill = D2D1::RectF(track_x0, track_cy - 3.0f, fill_x1, track_cy + 3.0f);
+        m_renderer.FillRoundedRect(track_fill, 3.0f, m_renderer.BrushBrandBlue());
     }
+
+    D2D1_ELLIPSE thumb = D2D1::Ellipse(D2D1::Point2F(fill_x1, track_cy), 6.0f, 6.0f);
+    m_renderer.Target()->FillEllipse(thumb, m_renderer.BrushTextPrimary());
+
+    D2D1_RECT_F pct_rc = D2D1::RectF(track_x1 + 4.0f, vol_y, card_rc.right - 14.0f, vol_y + vol_h);
+    std::wstring pct_str = state.audio_muted ? L"0%" : std::format(L"{}%", static_cast<int>(std::round(vol_frac * 100.0f)));
+    m_renderer.DrawTextSimple(pct_str, m_renderer.FontSmallBold(), pct_rc,
+        m_renderer.BrushTextSecondary(), DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
     m_renderer.PopClip();
 }
@@ -2372,6 +2436,38 @@ void MainWindowView::RenderPerformanceView(const UiState& state, const D2D1_RECT
             loc::Get(loc::S::Perf_ResolutionWarning),
             m_renderer.FontSmall(), warning, m_renderer.BrushBrandBlue());
     }
+}
+
+void MainWindowView::RenderDiagnosticsView(const UiState& state, const D2D1_RECT_F& area) noexcept {
+    RenderPerformanceView(state, area);
+}
+
+void MainWindowView::RenderScreenOnlyView(const UiState& state, const D2D1_RECT_F& area) noexcept {
+    m_renderer.Clear(colors::Background);
+
+    float pill_w = 260.0f;
+    float pill_h = 36.0f;
+    float pill_x = area.right - pill_w - 24.0f;
+    float pill_y = area.top + 24.0f;
+    D2D1_RECT_F pill_rc = D2D1::RectF(pill_x, pill_y, pill_x + pill_w, pill_y + pill_h);
+
+    m_renderer.DrawCard(pill_rc, false, 6.0f);
+
+    float btn_w = 120.0f;
+    D2D1_RECT_F back_btn = D2D1::RectF(pill_rc.left + 4.0f, pill_rc.top + 4.0f, pill_rc.left + 4.0f + btn_w, pill_rc.bottom - 4.0f);
+    RegisterClickable(back_btn, Control_Btn_ToggleScreenOnly, loc::Get(loc::S::Common_BackToWorkspace));
+    m_renderer.DrawButton(back_btn, loc::Get(loc::S::Common_BackToWorkspace), true,
+        state.hovered_control == Control_Btn_ToggleScreenOnly, state.pressed_control == Control_Btn_ToggleScreenOnly, IconType::Monitor);
+
+    D2D1_RECT_F full_btn = D2D1::RectF(back_btn.right + 6.0f, pill_rc.top + 4.0f, back_btn.right + 6.0f + 56.0f, pill_rc.bottom - 4.0f);
+    RegisterClickable(full_btn, Control_Btn_Fullscreen);
+    m_renderer.DrawButton(full_btn, state.output_fullscreen ? L"Windowed" : loc::Get(loc::S::Right_Btn_Full),
+        state.output_fullscreen, state.hovered_control == Control_Btn_Fullscreen, state.pressed_control == Control_Btn_Fullscreen, IconType::Maximize);
+
+    D2D1_RECT_F mute_btn = D2D1::RectF(full_btn.right + 6.0f, pill_rc.top + 4.0f, pill_rc.right - 4.0f, pill_rc.bottom - 4.0f);
+    RegisterClickable(mute_btn, Control_Btn_Mute);
+    m_renderer.DrawButton(mute_btn, state.audio_muted ? loc::Get(loc::S::Right_Btn_Unmute) : loc::Get(loc::S::Right_Btn_Mute),
+        state.audio_muted, state.hovered_control == Control_Btn_Mute, state.pressed_control == Control_Btn_Mute, IconType::Speaker);
 }
 
 void MainWindowView::RenderSettingsView(const UiState& state, const D2D1_RECT_F& area) noexcept {
@@ -3696,6 +3792,48 @@ void MainWindowView::RenderAudioPage(const UiState& state, const D2D1_RECT_F& ar
             m_renderer.BrushTextSecondary(), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         RegisterClickable(dd_rc, Control_Set_AudioDevice, loc::Get(loc::S::Audio_OutputDevice), true);
         y += 32.0f;
+
+        if (state.audio_fallback_active) {
+            std::wstring fallback_note = std::format(L"Đã chọn: {}  •  Đang phát tạm: {}",
+                state.audio_device_name, state.resolved_audio_device_name);
+            D2D1_RECT_F note_rc = D2D1::RectF(content_left + 150.0f, y, content_right, y + 20.0f);
+            m_renderer.DrawTextSimple(fallback_note, m_renderer.FontSmall(), note_rc,
+                m_renderer.BrushBrandBlue(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            y += 24.0f;
+        }
+    }
+
+    // Volume Slider (shared state with quick volume bar)
+    {
+        D2D1_RECT_F lbl_rc = D2D1::RectF(content_left, y, content_left + 140.0f, y + 24.0f);
+        m_renderer.DrawTextSimple(loc::Get(loc::S::Audio_Volume), m_renderer.FontBody(), lbl_rc,
+            m_renderer.BrushTextPrimary(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        float track_x0 = content_left + 150.0f;
+        float track_x1 = content_right - 60.0f;
+        D2D1_RECT_F slider_rc = D2D1::RectF(track_x0, y, track_x1, y + 24.0f);
+        RegisterClickable(slider_rc, Control_Slider_AudioVolume, loc::Get(loc::S::Audio_Volume), true);
+
+        float track_cy = y + 12.0f;
+        D2D1_RECT_F track_bg = D2D1::RectF(track_x0, track_cy - 3.0f, track_x1, track_cy + 3.0f);
+        m_renderer.FillRoundedRect(track_bg, 3.0f, m_renderer.BrushCardBorder());
+
+        float vol_frac = std::clamp(state.audio_volume, 0.0f, 1.0f);
+        float fill_x1 = track_x0 + (track_x1 - track_x0) * vol_frac;
+        if (fill_x1 > track_x0) {
+            D2D1_RECT_F track_fill = D2D1::RectF(track_x0, track_cy - 3.0f, fill_x1, track_cy + 3.0f);
+            m_renderer.FillRoundedRect(track_fill, 3.0f, m_renderer.BrushBrandBlue());
+        }
+
+        D2D1_ELLIPSE thumb = D2D1::Ellipse(D2D1::Point2F(fill_x1, track_cy), 6.5f, 6.5f);
+        m_renderer.Target()->FillEllipse(thumb, m_renderer.BrushTextPrimary());
+
+        D2D1_RECT_F pct_rc = D2D1::RectF(track_x1 + 6.0f, y, content_right, y + 24.0f);
+        std::wstring pct_str = state.audio_muted ? L"0%" : std::format(L"{}%", static_cast<int>(std::round(vol_frac * 100.0f)));
+        m_renderer.DrawTextSimple(pct_str, m_renderer.FontSmallBold(), pct_rc,
+            m_renderer.BrushTextSecondary(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        y += 32.0f;
     }
 
     // Mute toggle
@@ -3849,6 +3987,162 @@ void MainWindowView::RenderAdvancedPage(const UiState& state, const D2D1_RECT_F&
         y += 38.0f;
     }
 
+    m_content_height = y - area.top;
+}
+
+void MainWindowView::RenderColorView(const UiState& state, const D2D1_RECT_F& area) noexcept {
+    const float pad = 20.0f;
+    const float content_left = area.left + pad;
+    float content_right = area.right - pad;
+    if (m_content_height > m_viewport_height) content_right -= 12.0f;
+    float y = area.top + 14.0f;
+
+    D2D1_RECT_F title_rc = D2D1::RectF(content_left, y, content_right, y + 26.0f);
+    m_renderer.DrawTextSimple(loc::Get(loc::S::Nav_Color), m_renderer.FontTitle(), title_rc,
+        m_renderer.BrushTextPrimary(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    y += 38.0f;
+
+    // Card 1: COLOR PRESETS & SLIDERS
+    float clr_card_h = 356.0f;
+    D2D1_RECT_F clr_card = D2D1::RectF(content_left, y, content_right, y + clr_card_h);
+    m_renderer.DrawCard(clr_card, false, metrics::CardRadius);
+
+    D2D1_RECT_F clr_header = D2D1::RectF(clr_card.left + 14.0f, clr_card.top + 7.0f, clr_card.left + 120.0f, clr_card.top + 24.0f);
+    m_renderer.DrawTextSimple(loc::Get(loc::S::Video_Color), m_renderer.FontSmallBold(), clr_header, m_renderer.BrushBrandBlue(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+    const std::wstring_view preset_names[] = {
+        loc::Get(loc::S::Opt_Color_Neutral),
+        loc::Get(loc::S::Opt_Color_Vivid),
+        loc::Get(loc::S::Opt_Color_Soft),
+        loc::Get(loc::S::Opt_Color_Custom)
+    };
+    float preset_btn_w = 110.0f;
+    D2D1_RECT_F preset_rc = D2D1::RectF(clr_card.right - 14.0f - 66.0f - 8.0f - preset_btn_w, clr_card.top + 5.0f,
+                                       clr_card.right - 14.0f - 66.0f - 8.0f, clr_card.top + 27.0f);
+    m_renderer.DrawInset(preset_rc, 5.0f);
+    RegisterClickable(preset_rc, Control_Set_ColorPreset, L"", true);
+    if (state.open_dropdown == Control_Set_ColorPreset) {
+        m_dropdown_anchor_rc = preset_rc;
+        m_renderer.DrawRoundedRect(preset_rc, 5.0f, m_renderer.BrushBrandBlue(), 1.2f);
+    }
+    std::wstring preset_str = std::format(L"{}  ▼", preset_names[std::clamp(state.color_preset, 0, 3)]);
+    m_renderer.DrawTextSimple(preset_str, m_renderer.FontSmall(), preset_rc,
+                              m_renderer.BrushBrandBlue(), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+    D2D1_RECT_F reset_rc = D2D1::RectF(clr_card.right - 14.0f - 66.0f, clr_card.top + 5.0f, clr_card.right - 14.0f, clr_card.top + 27.0f);
+    RegisterClickable(reset_rc, Control_Set_ResetColor, loc::Get(loc::S::Video_ResetTooltip), true);
+    m_renderer.DrawButton(reset_rc, loc::Get(loc::S::Common_Reset), false,
+                          state.hovered_control == Control_Set_ResetColor,
+                          state.pressed_control == Control_Set_ResetColor);
+
+    const std::wstring_view slider_names[5] = {
+        loc::Get(loc::S::Output_Brightness),
+        loc::Get(loc::S::Output_Contrast),
+        loc::Get(loc::S::Output_Saturation),
+        loc::Get(loc::S::Output_Hue),
+        loc::Get(loc::S::Output_Sharpness)
+    };
+    const int values[5] = { state.brightness, state.contrast, state.saturation, state.hue, state.sharpness };
+
+    float sy = clr_card.top + 34.0f;
+    const float srow_h = 42.0f;
+    for (int i = 0; i < 5; ++i) {
+        D2D1_RECT_F row_rc = D2D1::RectF(clr_card.left + 14.0f, sy, clr_card.right - 14.0f, sy + srow_h);
+        m_renderer.DrawInset(row_rc, 7.0f);
+
+        const int id = Control_Set_Brightness + i;
+        if (state.filter_supported[i]) {
+            RegisterClickable(row_rc, id, loc::Get(loc::S::Video_ResetToZeroTooltip), true);
+        }
+
+        D2D1_RECT_F name_rc = D2D1::RectF(row_rc.left + 10.0f, sy + 4.0f, row_rc.left + 90.0f, sy + srow_h - 4.0f);
+        m_renderer.DrawTextSimple(slider_names[i], m_renderer.FontSmallBold(), name_rc,
+                                  state.filter_supported[i] ? m_renderer.BrushTextPrimary() : m_renderer.BrushTextMuted(),
+                                  DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        if (state.filter_supported[i]) {
+            const float x0 = row_rc.left + 95.0f;
+            const float x1 = row_rc.right - 95.0f;
+            const float y_mid = sy + srow_h * 0.5f;
+
+            m_renderer.DrawLine(D2D1::Point2F(x0, y_mid), D2D1::Point2F(x1, y_mid), m_renderer.BrushCardBorder(), 3.0f);
+
+            if (i == 4) {
+                m_renderer.DrawLine(D2D1::Point2F(x0, y_mid - 6.0f), D2D1::Point2F(x0, y_mid + 6.0f), m_renderer.BrushTextMuted(), 2.0f);
+            } else {
+                const float x_center = (x0 + x1) * 0.5f;
+                m_renderer.DrawLine(D2D1::Point2F(x_center, y_mid - 6.0f), D2D1::Point2F(x_center, y_mid + 6.0f), m_renderer.BrushTextMuted(), 2.0f);
+            }
+
+            float knob_x = 0.0f;
+            if (i == 4) {
+                knob_x = x0 + (x1 - x0) * (std::clamp(values[i], 0, 100) / 100.0f);
+            } else {
+                knob_x = x0 + (x1 - x0) * ((std::clamp(values[i], -100, 100) + 100) / 200.0f);
+            }
+            m_renderer.DrawStatusDot(D2D1::Point2F(knob_x, y_mid), 5.5f, colors::BrandBlue, true);
+
+            D2D1_RECT_F num_rc = D2D1::RectF(row_rc.right - 88.0f, y_mid - 12.0f, row_rc.right - 36.0f, y_mid + 12.0f);
+            m_renderer.DrawInset(num_rc, 4.0f);
+            std::wstring num_str = (i != 4 && values[i] > 0) ? std::format(L"+{}", values[i]) : std::format(L"{}", values[i]);
+            m_renderer.DrawTextSimple(num_str, m_renderer.FontSmallBold(), num_rc,
+                                      values[i] != 0 ? m_renderer.BrushBrandBlue() : m_renderer.BrushTextMuted(),
+                                      DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+            D2D1_RECT_F rst_rc = D2D1::RectF(row_rc.right - 30.0f, y_mid - 12.0f, row_rc.right - 6.0f, y_mid + 12.0f);
+            const int reset_id = Control_Reset_Brightness + i;
+            RegisterClickable(rst_rc, reset_id, loc::Get(loc::S::Video_ResetTooltip), true);
+            m_renderer.DrawButton(rst_rc, L"↺", false,
+                                  state.hovered_control == reset_id,
+                                  state.pressed_control == reset_id);
+        } else {
+            D2D1_RECT_F unsupp_rc = D2D1::RectF(row_rc.left + 100.0f, sy, row_rc.right - 10.0f, sy + srow_h);
+            m_renderer.DrawTextSimple(loc::Get(loc::S::Video_FilterNotSupported), m_renderer.FontSmall(), unsupp_rc,
+                                      m_renderer.BrushTextMuted(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+        sy += srow_h + 4.0f;
+    }
+
+    y += clr_card_h + 16.0f;
+    // Card 2: COLOR RANGE & MATRIX
+    float cs_h = 104.0f;
+    D2D1_RECT_F cs_card = D2D1::RectF(content_left, y, content_right, y + cs_h);
+    m_renderer.DrawCard(cs_card, false, metrics::CardRadius);
+
+    D2D1_RECT_F cs_header = D2D1::RectF(cs_card.left + 14.0f, cs_card.top + 8.0f, cs_card.right - 14.0f, cs_card.top + 24.0f);
+    m_renderer.DrawTextSimple(loc::Get(loc::S::Video_AdvColorOverview), m_renderer.FontSmallBold(), cs_header, m_renderer.BrushBrandBlue(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+    float row_y = cs_card.top + 32.0f;
+    D2D1_RECT_F cr_lbl = D2D1::RectF(cs_card.left + 14.0f, row_y, cs_card.left + 150.0f, row_y + 24.0f);
+    m_renderer.DrawTextSimple(loc::Get(loc::S::Output_ColorRange), m_renderer.FontBody(), cr_lbl, m_renderer.BrushTextPrimary(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+    const std::wstring_view cr_names[] = { loc::Get(loc::S::Opt_Range_Auto), loc::Get(loc::S::Opt_Range_Limited), loc::Get(loc::S::Opt_Range_Full) };
+    D2D1_RECT_F cr_dd = D2D1::RectF(cs_card.right - 180.0f, row_y, cs_card.right - 14.0f, row_y + 24.0f);
+    m_renderer.DrawInset(cr_dd, 4.0f);
+    RegisterClickable(cr_dd, Control_Set_ColorRange, L"", true);
+    if (state.open_dropdown == Control_Set_ColorRange) {
+        m_dropdown_anchor_rc = cr_dd;
+        m_renderer.DrawRoundedRect(cr_dd, 4.0f, m_renderer.BrushBrandBlue(), 1.2f);
+    }
+    m_renderer.DrawTextSimple(std::format(L"{}  ▼", cr_names[std::clamp(state.color_range, 0, 2)]), m_renderer.FontSmall(), cr_dd,
+                              m_renderer.BrushBrandBlue(), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+    row_y += 32.0f;
+    D2D1_RECT_F cm_lbl = D2D1::RectF(cs_card.left + 14.0f, row_y, cs_card.left + 150.0f, row_y + 24.0f);
+    m_renderer.DrawTextSimple(loc::Get(loc::S::Output_ColorMatrix), m_renderer.FontBody(), cm_lbl, m_renderer.BrushTextPrimary(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+    const std::wstring_view cm_names[] = { loc::Get(loc::S::Opt_Matrix_Auto), loc::Get(loc::S::Opt_Matrix_601), loc::Get(loc::S::Opt_Matrix_709), loc::Get(loc::S::Opt_Matrix_2020) };
+    D2D1_RECT_F cm_dd = D2D1::RectF(cs_card.right - 180.0f, row_y, cs_card.right - 14.0f, row_y + 24.0f);
+    m_renderer.DrawInset(cm_dd, 4.0f);
+    RegisterClickable(cm_dd, Control_Set_ColorMatrix, L"", true);
+    if (state.open_dropdown == Control_Set_ColorMatrix) {
+        m_dropdown_anchor_rc = cm_dd;
+        m_renderer.DrawRoundedRect(cm_dd, 4.0f, m_renderer.BrushBrandBlue(), 1.2f);
+    }
+    m_renderer.DrawTextSimple(std::format(L"{}  ▼", cm_names[std::clamp(state.color_matrix, 0, 3)]), m_renderer.FontSmall(), cm_dd,
+                              m_renderer.BrushBrandBlue(), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+    y += cs_h + 16.0f;
     m_content_height = y - area.top;
 }
 

@@ -47,10 +47,12 @@ public:
     void SetOnToggleFullscreen(std::function<void()> cb) noexcept;
     void SetOnToggleAspectLock(std::function<void()> cb) noexcept;
     void SetOnToggleAlwaysOnTop(std::function<void()> cb) noexcept;
+    void SetOnToggleScreenOnly(std::function<void()> cb) noexcept;
     void SetOnTogglePreview(std::function<void()> cb) noexcept;
     void SetOnFullscreenPreview(std::function<void()> cb) noexcept;
     void SetOnTogglePreviewAlwaysOnTop(std::function<void()> cb) noexcept;
     void SetOnToggleMute(std::function<void()> cb) noexcept;
+    void SetOnVolumeChanged(std::function<void(float)> cb) noexcept;
     void SetOnDisconnect(std::function<void()> cb) noexcept;
     void SetOnFlushPipeline(std::function<void()> cb) noexcept;
     void SetOnSettingChanged(ui::MainWindowView::SettingCallback cb) noexcept;

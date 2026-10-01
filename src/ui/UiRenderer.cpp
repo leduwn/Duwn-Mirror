@@ -629,6 +629,18 @@ void UiRenderer::DrawIcon(IconType icon, const D2D1_RECT_F& rect,
         DrawLine(D2D1::Point2F(cx + w * 0.35f, cy + 1.0f), D2D1::Point2F(cx + w * 0.35f + 3.0f, cy - 2.0f), b, stroke);
         break;
     }
+    case IconType::Palette: {
+        float y0 = cy - 4.5f;
+        float y1 = cy;
+        float y2 = cy + 4.5f;
+        DrawLine(D2D1::Point2F(rect.left + 2.0f, y0), D2D1::Point2F(rect.right - 2.0f, y0), b, stroke * 0.8f);
+        DrawLine(D2D1::Point2F(rect.left + 2.0f, y1), D2D1::Point2F(rect.right - 2.0f, y1), b, stroke * 0.8f);
+        DrawLine(D2D1::Point2F(rect.left + 2.0f, y2), D2D1::Point2F(rect.right - 2.0f, y2), b, stroke * 0.8f);
+        DrawRoundedRect(D2D1::RectF(rect.left + 4.0f, y0 - 2.0f, rect.left + 7.0f, y0 + 2.0f), 1.0f, b, stroke);
+        DrawRoundedRect(D2D1::RectF(rect.right - 8.0f, y1 - 2.0f, rect.right - 5.0f, y1 + 2.0f), 1.0f, b, stroke);
+        DrawRoundedRect(D2D1::RectF(cx - 1.5f, y2 - 2.0f, cx + 1.5f, y2 + 2.0f), 1.0f, b, stroke);
+        break;
+    }
     }
 }
 

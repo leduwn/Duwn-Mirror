@@ -12,12 +12,14 @@
 namespace duwn::ui {
 
 enum class NavTab {
-    Mirror,
-    Performance,
+    Mirror = 0,
     Video,
     Audio,
+    Color,
     Settings,
-    About
+    Diagnostics,
+    Performance = Diagnostics,
+    About = Diagnostics
 };
 
 enum class SettingsSubTab {
@@ -170,6 +172,8 @@ struct UiState {
     std::wstring audio_device_id{};           // empty = system default
     std::wstring audio_device_name{L"System Default"};
     std::wstring resolved_audio_device_name{L"—"};
+    bool         audio_fallback_active{false};
+    float        audio_volume{1.0f};          // 0.0f .. 1.0f
     std::vector<AudioDeviceItem> available_audio_devices;
     double       audio_buffer_ms{0.0};
     uint64_t     audio_underrun_count{0};
@@ -202,6 +206,7 @@ struct UiState {
     bool output_fullscreen{false};
     bool aspect_locked{true};
     bool always_on_top{false};
+    bool is_screen_only{false};
     bool preview_visible{false};
     bool preview_always_on_top{false};
 
@@ -219,11 +224,13 @@ enum ControlId : int {
 
     // Navigation
     Control_Nav_Mirror = 10,
-    Control_Nav_Performance,
     Control_Nav_Video,
     Control_Nav_Audio,
+    Control_Nav_Color,
     Control_Nav_Settings,
-    Control_Nav_About,
+    Control_Nav_Diagnostics,
+    Control_Nav_Performance = Control_Nav_Diagnostics,
+    Control_Nav_About = Control_Nav_Diagnostics,
     Control_Mode_Wireless = 20,
     Control_Mode_Wired,
     Control_Wired_Refresh,
@@ -244,10 +251,13 @@ enum ControlId : int {
     Control_Btn_AlwaysOnTop,
     Control_Btn_Mute,
     Control_Btn_Disconnect,
+    Control_Btn_ToggleScreenOnly = 36,
     Control_Btn_TogglePreview = 37,
     Control_Btn_ToggleOutput = 38,
     Control_Btn_FullscreenPreview = 39,
     Control_Toggle_PreviewAlwaysOnTop = 41,
+    Control_Slider_QuickVolume = 42,
+    Control_Slider_AudioVolume = 43,
 
     // Advanced / Diagnostics Action
     Control_Btn_FlushPipeline,

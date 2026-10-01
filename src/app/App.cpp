@@ -489,45 +489,44 @@ int App::Run() noexcept {
             // Audio device change: hot-plug or default-device switch
 
             if (msg.message == audio::WM_APP_AUDIO_DEVICE_CHANGED) {
-
                 if (m_wasapi) {
-
-                    // If user pinned a device, stay on it (SwitchEndpoint with stored id).
-
-                    // If watching default, switch to new default.
-
-                    m_wasapi->SwitchEndpoint(m_settings.monitor_device_id);
-
+                    m_wasapi->OnDeviceEnvironmentChanged();
+                    if (m_window) {
+                        m_window->State().audio_device_id = m_wasapi->CurrentDeviceId();
+                        m_window->State().resolved_audio_device_name = m_wasapi->ResolvedDeviceName();
+                        m_window->State().audio_fallback_active = m_wasapi->IsFallbackActive();
+                        if (m_wasapi->IsFallbackActive()) {
+                            m_window->State().audio_device_name = std::format(L"{} (Tạm thời)", m_wasapi->ResolvedDeviceName());
+                        } else {
+                            m_window->State().audio_device_name = m_wasapi->ResolvedDeviceName();
+                        }
+                        ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+                    }
                 }
-
                 continue;
-
             }
 
             if (msg.message == audio::WM_APP_AUDIO_DEVICE_LIST_CHANGED) {
-
-                // Re-enumerate available devices for UI dropdown — update UiState
-
                 if (m_window) {
-
                     auto devs = m_audio_device_mgr.Enumerate();
-
                     auto& list = m_window->State().available_audio_devices;
-
                     list.clear();
-
                     for (const auto& d : devs) {
-
                         list.push_back({d.id, d.friendly_name});
-
+                        if (d.id == m_settings.monitor_device_id) {
+                            m_window->State().audio_device_name = d.friendly_name;
+                        }
                     }
-
+                    if (m_settings.monitor_device_id.empty()) {
+                        m_window->State().audio_device_name = L"System Default";
+                    }
+                    if (m_wasapi) {
+                        m_window->State().resolved_audio_device_name = m_wasapi->ResolvedDeviceName();
+                        m_window->State().audio_fallback_active = m_wasapi->IsFallbackActive();
+                    }
                     ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
-
                 }
-
                 continue;
-
             }
 
             ::TranslateMessage(&msg);
@@ -743,21 +742,35 @@ bool App::Init() noexcept {
     });
 
     m_window->SetOnToggleMute([this] {
-
         if (m_wasapi) {
-
             bool muted = !m_wasapi->IsMuted();
-
             m_wasapi->SetMuted(muted);
-
+            m_settings.audio_muted = muted;
+            m_settings.Save();
             if (m_window) {
-
                 m_window->State().audio_muted = muted;
-
+                ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
             }
-
         }
+    });
 
+    m_window->SetOnVolumeChanged([this](float vol) {
+        if (m_wasapi) {
+            m_wasapi->SetVolume(vol);
+        }
+        m_settings.monitor_volume = vol;
+        m_settings.Save();
+        if (m_window) {
+            m_window->State().audio_volume = vol;
+            ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+        }
+    });
+
+    m_window->SetOnToggleScreenOnly([this] {
+        if (!m_window) return;
+        bool next_screen_only = !m_window->State().is_screen_only;
+        m_window->State().is_screen_only = next_screen_only;
+        ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
     });
 
     m_window->SetOnDisconnect([this] {
@@ -869,8 +882,8 @@ bool App::Init() noexcept {
             m_window->State().audio_device_id = m_settings.monitor_device_id;
 
             m_window->State().resolved_audio_device_name = m_wasapi
-
                 ? m_wasapi->ResolvedDeviceName() : L"—";
+            m_window->State().audio_fallback_active = m_wasapi ? m_wasapi->IsFallbackActive() : false;
 
             ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
 
@@ -1342,6 +1355,8 @@ bool App::Init() noexcept {
         DUWN_LOG_WARN("App", "WASAPI init failed; audio output disabled");
         // Non-fatal for Milestone 0
     } else {
+        m_wasapi->SetVolume(m_settings.monitor_volume);
+        m_wasapi->SetMuted(m_settings.audio_muted);
         m_wasapi->Start();
     }
 
@@ -1376,8 +1391,11 @@ bool App::Init() noexcept {
         if (m_settings.monitor_device_id.empty()) {
             m_window->State().audio_device_name = L"System Default";
         }
+        m_window->State().audio_volume = m_settings.monitor_volume;
+        m_window->State().audio_muted = m_settings.audio_muted;
         m_window->State().resolved_audio_device_name = m_wasapi
             ? m_wasapi->ResolvedDeviceName() : L"—";
+        m_window->State().audio_fallback_active = m_wasapi ? m_wasapi->IsFallbackActive() : false;
     }
     m_noncritical_ready.store(true, std::memory_order_release);
 
