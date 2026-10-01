@@ -175,8 +175,9 @@ DUWN_TEST(Metadata_ConcurrentConfigAndBackgroundCallbacks) {
 
     // Final drain on UI thread
     coord.ProcessPendingEvents([](const SessionPhaseEvent&, bool) {});
-    coord.PublishSnapshot("LocalRtpUdp", StreamingPolicy{});
+    coord.PublishSnapshot("LocalRtpUdp", StreamingPolicy{}, true);
     SessionMetadataSnapshot final_snap = coord.GetSnapshot();
+    DUWN_ASSERT(final_snap.preview_visible == true);
     if (!final_snap.receiver_quality_pending) {
         DUWN_ASSERT(final_snap.active_receiver_quality == final_snap.req_receiver_quality);
     }

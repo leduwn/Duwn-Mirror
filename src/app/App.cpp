@@ -642,6 +642,8 @@ bool App::Init() noexcept {
 
             ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
 
+            PublishMetadataSnapshot();
+
         }
 
     });
@@ -4361,7 +4363,8 @@ StreamingPolicy App::GetActiveStreamingPolicy() const noexcept {
 }
 
 void App::PublishMetadataSnapshot() noexcept {
-    m_meta_coord.PublishSnapshot(GetActiveTransportString(), GetActiveStreamingPolicy());
+    const bool prev_vis = m_preview_window ? m_preview_window->IsVisible() : false;
+    m_meta_coord.PublishSnapshot(GetActiveTransportString(), GetActiveStreamingPolicy(), prev_vis);
 }
 
 SessionMetadataSnapshot App::GetMetadataSnapshot() const noexcept {
@@ -4777,7 +4780,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
         }
 
         DUWN_LOG_INFOF("Diagnostics",
-            "[METADATA] cycle={} | commit={} | transport={} | stream_mode={} | policy(max_q={}, res_ms={}, cad_pct={}, always_latest={}) | req_quality={} | active_quality={} | quality_pending={} | actual_stream(codec={}, res={}x{}, fps={:.2f})",
+            "[METADATA] cycle={} | commit={} | transport={} | stream_mode={} | policy(max_q={}, res_ms={}, cad_pct={}, always_latest={}) | req_quality={} | active_quality={} | quality_pending={} | preview_visible={} | actual_stream(codec={}, res={}x{}, fps={:.2f})",
             s_metrics_cycle,
             commit_str,
             transport_str,
@@ -4789,6 +4792,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
             req_quality_sv,
             act_quality_sv,
             pending_val,
+            meta_snap.preview_visible ? 1 : 0,
             codec_str,
             coded_w, coded_h,
             m.source_nominal_fps.load(std::memory_order_relaxed));

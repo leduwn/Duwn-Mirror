@@ -33,6 +33,7 @@ struct SessionMetadataSnapshot {
     StreamingMode   active_streaming_mode{StreamingMode::SmoothLive};
     ReceiverQuality active_receiver_quality{ReceiverQuality::Auto};
     bool            receiver_quality_pending{false};
+    bool            preview_visible{false};
     std::string     active_transport{"LocalRtpUdp"};
 };
 
@@ -112,7 +113,8 @@ public:
     }
 
     void PublishSnapshot(const std::string& active_transport,
-                         const StreamingPolicy& active_policy) noexcept {
+                         const StreamingPolicy& active_policy,
+                         bool preview_visible = false) noexcept {
         SessionMetadataSnapshot snap;
         {
             std::lock_guard lock(m_settings_mutex);
@@ -137,6 +139,7 @@ public:
 
         snap.active_transport = active_transport;
         snap.active_policy = active_policy;
+        snap.preview_visible = preview_visible;
 
         const bool is_dirty = m_receiver_config_dirty.load(std::memory_order_acquire);
         const uint64_t cfg_gen = m_config_generation.load(std::memory_order_acquire);

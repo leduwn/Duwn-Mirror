@@ -25,11 +25,23 @@ $ErrorActionPreference = 'Stop'
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $repoRoot = Split-Path -Parent $scriptDir
-$runsRoot = Join-Path $repoRoot $RunsDir
+$runsRoot = if ([System.IO.Path]::IsPathRooted($RunsDir)) { $RunsDir } else { Join-Path $repoRoot $RunsDir }
+$targetMdPath = if ([System.IO.Path]::IsPathRooted($OutputMarkdown)) { $OutputMarkdown } else { Join-Path $repoRoot $OutputMarkdown }
+
+function Parse-DoubleSafe([object]$Value) {
+    if ($null -eq $Value) { return $null }
+    $s = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+    $d = [double]0
+    if ([double]::TryParse($s, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$d)) {
+        return $d
+    }
+    return $null
+}
 
 function Get-Percentile {
     param([double[]]$Values, [double]$Percentile)
-    if ($null -eq $Values -or $Values.Count -eq 0) { return 0.0 }
+    if ($null -eq $Values -or $Values.Count -eq 0) { return $null }
     $sorted = $Values | Sort-Object
     $idx = [Math]::Floor(($Percentile / 100.0) * ($sorted.Count - 1))
     return [double]$sorted[[int]$idx]
@@ -37,10 +49,51 @@ function Get-Percentile {
 
 function Get-Mean {
     param([double[]]$Values)
-    if ($null -eq $Values -or $Values.Count -eq 0) { return 0.0 }
+    if ($null -eq $Values -or $Values.Count -eq 0) { return $null }
     $sum = 0.0
     foreach ($v in $Values) { $sum += $v }
     return ($sum / $Values.Count)
+}
+
+function Extract-DoubleSeries([object[]]$Rows, [string]$ColName) {
+    $list = [System.Collections.Generic.List[double]]::new()
+    foreach ($r in $Rows) {
+        $d = Parse-DoubleSafe $r.$ColName
+        if ($null -ne $d) {
+            $list.Add($d)
+        }
+    }
+    return $list.ToArray()
+}
+
+function Get-CounterDelta {
+    param([object[]]$Rows, [string]$ColumnName)
+    $totalDelta = [int64]0
+    $prevVal = $null
+    $hasAny = $false
+    foreach ($r in $Rows) {
+        $raw = $r.$ColumnName
+        if ($null -ne $raw -and $raw -ne '') {
+            $currVal = [int64]$raw
+            $hasAny = $true
+            if ($null -ne $prevVal) {
+                if ($currVal -ge $prevVal) {
+                    $totalDelta += ($currVal - $prevVal)
+                } else {
+                    # Counter reset / reconnect detected
+                    $totalDelta += $currVal
+                }
+            }
+            $prevVal = $currVal
+        }
+    }
+    if (-not $hasAny) { return [int64]0 }
+    return $totalDelta
+}
+
+function Format-Val([object]$Val, [string]$Suffix = '') {
+    if ($null -eq $Val) { return 'N/A' }
+    return "$([Math]::Round([double]$Val, 2))$Suffix"
 }
 
 $runOrder = @('B_OFF', 'B_ON', 'F_OFF', 'F_ON', 'C_OFF', 'C_ON')
@@ -74,7 +127,7 @@ foreach ($runId in $runOrder) {
         continue
     }
 
-    $rows = Import-Csv -LiteralPath $csvPath
+    $rows = @(Import-Csv -LiteralPath $csvPath)
     if ($rows.Count -eq 0) {
         $runResults[$runId] = @{
             run_id   = $runId
@@ -85,9 +138,14 @@ foreach ($runId in $runOrder) {
         continue
     }
 
-    # Filter rows with valid decoded video and quality_pending == 0
+    # Count reconnects and format changes across the FULL measurement period (unfiltered)
+    $reconnect_count = @($rows | Where-Object { $_.reconnect_event -eq '1' -or $_.reconnect_event -eq 'true' }).Count
+    $format_changes  = @($rows | Where-Object { $_.format_change -eq '1' -or $_.format_change -eq 'true' }).Count
+
+    # Filter rows with active decoded video and quality_pending == 0
     $validRows = @($rows | Where-Object {
-        ([double]$_.v_dec_fps -gt 0) -and
+        $dFps = Parse-DoubleSafe $_.v_dec_fps
+        ($null -ne $dFps -and $dFps -gt 0) -and
         ($_.quality_pending -eq '0' -or $_.quality_pending -eq 'false')
     })
 
@@ -102,66 +160,78 @@ foreach ($runId in $runOrder) {
         continue
     }
 
-    # Extract series for statistical calculation
-    $t0_t7_vals = [double[]]($validRows | ForEach-Object { [double]$_.native_t0_t7_total_ms })
-    $t0_t1_vals = [double[]]($validRows | ForEach-Object { [double]$_.t0_t1_ms })
-    $t1_t2_vals = [double[]]($validRows | ForEach-Object { [double]$_.t1_t2_ms })
-    $t2_t3_vals = [double[]]($validRows | ForEach-Object { [double]$_.t2_t3_ms })
-    $t3_t4_vals = [double[]]($validRows | ForEach-Object { [double]$_.t3_t4_ms })
-    $t4_t5_vals = [double[]]($validRows | ForEach-Object { [double]$_.t4_t5_ms })
-    $t5_t6_vals = [double[]]($validRows | ForEach-Object { [double]$_.t5_t6_ms })
-    $t6_t7_vals = [double[]]($validRows | ForEach-Object { [double]$_.t6_t7_ms })
+    # Compute reset-aware deltas for cumulative counters
+    $out_ok_delta    = Get-CounterDelta $validRows 'output_ok'
+    $out_skip_delta  = Get-CounterDelta $validRows 'output_skip'
+    $out_err_delta   = Get-CounterDelta $validRows 'output_err'
 
-    $q_res_avg = [double[]]($validRows | ForEach-Object { [double]$_.queue_res_avg_ms })
-    $q_res_p50 = [double[]]($validRows | ForEach-Object { [double]$_.queue_res_p50_ms })
-    $q_res_p95 = [double[]]($validRows | ForEach-Object { [double]$_.queue_res_p95_ms })
+    $prev_ok_delta   = Get-CounterDelta $validRows 'preview_ok'
+    $prev_skip_delta = Get-CounterDelta $validRows 'preview_skip'
+    $prev_err_delta  = Get-CounterDelta $validRows 'preview_err'
 
-    $dec_fps   = [double[]]($validRows | ForEach-Object { [double]$_.v_dec_fps })
-    $rend_fps  = [double[]]($validRows | ForEach-Object { [double]$_.v_rend_fps })
-    $uniq_fps  = [double[]]($validRows | ForEach-Object { [double]$_.unique_pres_fps })
+    $real_underruns  = Get-CounterDelta $validRows 'real_underruns'
+    $backlog_drops   = Get-CounterDelta $validRows 'backlog_drops'
 
-    $out_age_p50 = [double[]]($validRows | ForEach-Object { [double]$_.out_pres_p50_ms })
-    $out_age_p95 = [double[]]($validRows | ForEach-Object { [double]$_.out_pres_p95_ms })
+    if ($out_ok_delta -le 0) {
+        $runResults[$runId] = @{
+            run_id     = $runId
+            status     = 'NO_ACTIVE_OUTPUT'
+            manifest   = $manifest
+            total_rows = $rows.Count
+            notes      = 'Decoded video frames present but output present count did not advance.'
+        }
+        continue
+    }
 
-    $prev_age_p50 = [double[]]($validRows | ForEach-Object { [double]$_.prev_pres_p50_ms })
+    # Extract series with null/empty safety (never coerce empty cell to 0.0)
+    $t0_t7_vals = Extract-DoubleSeries $validRows 'native_t0_t7_total_ms'
+    $t0_t1_vals = Extract-DoubleSeries $validRows 't0_t1_ms'
+    $t1_t2_vals = Extract-DoubleSeries $validRows 't1_t2_ms'
+    $t2_t3_vals = Extract-DoubleSeries $validRows 't2_t3_ms'
+    $t3_t4_vals = Extract-DoubleSeries $validRows 't3_t4_ms'
+    $t4_t5_vals = Extract-DoubleSeries $validRows 't4_t5_ms'
+    $t5_t6_vals = Extract-DoubleSeries $validRows 't5_t6_ms'
+    $t6_t7_vals = Extract-DoubleSeries $validRows 't6_t7_ms'
 
-    # Cumulative counters: delta between last valid row and first valid row
-    $firstRow = $validRows[0]
-    $lastRow = $validRows[-1]
+    $q_res_avg = Extract-DoubleSeries $validRows 'queue_res_avg_ms'
+    $q_res_p50 = Extract-DoubleSeries $validRows 'queue_res_p50_ms'
+    $q_res_p95 = Extract-DoubleSeries $validRows 'queue_res_p95_ms'
 
-    $out_ok_delta    = [int64]$lastRow.output_ok - [int64]$firstRow.output_ok
-    $out_skip_delta  = [int64]$lastRow.output_skip - [int64]$firstRow.output_skip
-    $out_err_delta   = [int64]$lastRow.output_err - [int64]$firstRow.output_err
+    $dec_fps   = Extract-DoubleSeries $validRows 'v_dec_fps'
+    $rend_fps  = Extract-DoubleSeries $validRows 'v_rend_fps'
+    $uniq_fps  = Extract-DoubleSeries $validRows 'unique_pres_fps'
 
-    $prev_ok_delta   = [int64]$lastRow.preview_ok - [int64]$firstRow.preview_ok
-    $prev_skip_delta = [int64]$lastRow.preview_skip - [int64]$firstRow.preview_skip
-    $prev_err_delta  = [int64]$lastRow.preview_err - [int64]$firstRow.preview_err
+    $out_age_p50 = Extract-DoubleSeries $validRows 'out_pres_p50_ms'
+    $out_age_p95 = Extract-DoubleSeries $validRows 'out_pres_p95_ms'
 
-    $real_underruns  = [int64]$lastRow.real_underruns - [int64]$firstRow.real_underruns
-    $backlog_drops   = [int64]$lastRow.backlog_drops - [int64]$firstRow.backlog_drops
-
-    $reconnect_count = @($validRows | Where-Object { $_.reconnect_event -eq '1' -or $_.reconnect_event -eq 'true' }).Count
-    $format_changes  = @($validRows | Where-Object { $_.format_change -eq '1' -or $_.format_change -eq 'true' }).Count
+    $prev_age_p50 = Extract-DoubleSeries $validRows 'prev_pres_p50_ms'
 
     # Physical Glass-to-Glass events if present
     $glassEventsPath = Join-Path $dir 'glass_events.csv'
     $glassStats = if (Test-Path $glassEventsPath) {
-        $gRows = Import-Csv -LiteralPath $glassEventsPath
-        $gVals = [double[]]($gRows | ForEach-Object { [double]$_.latency_ms })
+        $gRows = @(Import-Csv -LiteralPath $glassEventsPath)
+        $gVals = Extract-DoubleSeries $gRows 'latency_ms'
+        $camMeta = if ($gRows.Count -gt 0 -and $gRows[0].PSObject.Properties['camera_fps']) {
+            "$($gRows[0].camera_fps) FPS camera"
+        } else { 'Camera 120/240 FPS' }
         @{
-            count  = $gVals.Count
-            median = (Get-Percentile $gVals 50.0)
-            p95    = (Get-Percentile $gVals 95.0)
-            status = if ($gVals.Count -ge 30) { 'MEASURED' } else { "INCOMPLETE (${gVals.Count}/30)" }
+            count       = $gVals.Count
+            median      = if ($gVals.Count -gt 0) { Get-Percentile $gVals 50.0 } else { $null }
+            p95         = if ($gVals.Count -gt 0) { Get-Percentile $gVals 95.0 } else { $null }
+            provenance  = $camMeta
+            status      = if ($gVals.Count -ge 30) { 'MEASURED' } else { "CHƯA ĐO ($($gVals.Count)/30)" }
         }
     } else {
         @{
-            count  = 0
-            median = $null
-            p95    = $null
-            status = 'CHƯA ĐO'
+            count       = 0
+            median      = $null
+            p95         = $null
+            provenance  = 'None'
+            status      = 'CHƯA ĐO'
         }
     }
+
+    $qResMaxP95 = if ($q_res_p95.Count -gt 0) { ([double]($q_res_p95 | Measure-Object -Maximum).Maximum) } else { $null }
 
     $runResults[$runId] = @{
         run_id            = $runId
@@ -177,31 +247,31 @@ foreach ($runId in $runOrder) {
         policy_max_q      = $lastRow.policy_max_q
         policy_res_ms     = $lastRow.policy_res_ms
 
-        t0_t7_mean_ms     = [Math]::Round((Get-Mean $t0_t7_vals), 2)
-        t0_t7_p50_ms      = [Math]::Round((Get-Percentile $t0_t7_vals 50.0), 2)
-        t0_t7_p95_ms      = [Math]::Round((Get-Percentile $t0_t7_vals 95.0), 2)
+        t0_t7_mean_ms     = Get-Mean $t0_t7_vals
+        t0_t7_p50_ms      = Get-Percentile $t0_t7_vals 50.0
+        t0_t7_p95_ms      = Get-Percentile $t0_t7_vals 95.0
 
-        t0_t1_mean_ms     = [Math]::Round((Get-Mean $t0_t1_vals), 2)
-        t1_t2_mean_ms     = [Math]::Round((Get-Mean $t1_t2_vals), 2)
-        t2_t3_mean_ms     = [Math]::Round((Get-Mean $t2_t3_vals), 2)
-        t3_t4_mean_ms     = [Math]::Round((Get-Mean $t3_t4_vals), 2)
-        t4_t5_mean_ms     = [Math]::Round((Get-Mean $t4_t5_vals), 2)
-        t5_t6_mean_ms     = [Math]::Round((Get-Mean $t5_t6_vals), 2)
-        t6_t7_mean_ms     = [Math]::Round((Get-Mean $t6_t7_vals), 2)
+        t0_t1_mean_ms     = Get-Mean $t0_t1_vals
+        t1_t2_mean_ms     = Get-Mean $t1_t2_vals
+        t2_t3_mean_ms     = Get-Mean $t2_t3_vals
+        t3_t4_mean_ms     = Get-Mean $t3_t4_vals
+        t4_t5_mean_ms     = Get-Mean $t4_t5_vals
+        t5_t6_mean_ms     = Get-Mean $t5_t6_vals
+        t6_t7_mean_ms     = Get-Mean $t6_t7_vals
 
-        q_res_mean_ms     = [Math]::Round((Get-Mean $q_res_avg), 2)
-        q_res_win_p50_ms  = [Math]::Round((Get-Mean $q_res_p50), 2)
-        q_res_win_p95_ms  = [Math]::Round((Get-Mean $q_res_p95), 2)
-        q_res_win_max_p95 = [Math]::Round(([double]($q_res_p95 | Measure-Object -Maximum).Maximum), 2)
+        q_res_mean_ms     = Get-Mean $q_res_avg
+        q_res_win_p50_ms  = Get-Mean $q_res_p50
+        q_res_win_p95_ms  = Get-Mean $q_res_p95
+        q_res_win_max_p95 = $qResMaxP95
 
-        out_age_mean_p50  = [Math]::Round((Get-Mean $out_age_p50), 2)
-        out_age_mean_p95  = [Math]::Round((Get-Mean $out_age_p95), 2)
+        out_age_mean_p50  = Get-Mean $out_age_p50
+        out_age_mean_p95  = Get-Mean $out_age_p95
 
-        prev_age_mean_p50 = [Math]::Round((Get-Mean $prev_age_p50), 2)
+        prev_age_mean_p50 = Get-Mean $prev_age_p50
 
-        dec_fps_mean      = [Math]::Round((Get-Mean $dec_fps), 1)
-        rend_fps_mean     = [Math]::Round((Get-Mean $rend_fps), 1)
-        uniq_fps_mean     = [Math]::Round((Get-Mean $uniq_fps), 1)
+        dec_fps_mean      = Get-Mean $dec_fps
+        rend_fps_mean     = Get-Mean $rend_fps
+        uniq_fps_mean     = Get-Mean $uniq_fps
 
         out_ok            = $out_ok_delta
         out_skip          = $out_skip_delta
@@ -245,23 +315,29 @@ $md = New-Object System.Text.StringBuilder
 [void]$md.AppendLine("")
 [void]$md.AppendLine("## 2. Telemetry Metrics Summary (Native Pipeline T0–T7)")
 [void]$md.AppendLine("")
-[void]$md.AppendLine("> **Lưu ý thống kê:** Các giá trị p50/p95 trong bảng là trung bình cộng của các p50/p95 được tính theo từng cửa sổ 1 giây (`Window-P50 / Window-P95 Distribution`), không phải percentile gộp của toàn phiên.")
+[void]$md.AppendLine("> **Lưu ý thống kê:**")
+[void]$md.AppendLine("> - **Mean của Window-P95/P50**: Các giá trị p50/p95 trong bảng là trung bình cộng của các p50/p95 đo trong từng cửa sổ 1 giây (`Window-P50 / Window-P95 Distribution`), không phải percentile gộp của toàn bộ frame trong phiên.")
+[void]$md.AppendLine("> - **T0–T7 Total Mean**: Trung bình cộng của rolling average T0–T7 qua các chu kỳ đo.")
+[void]$md.AppendLine("> - **Video Skip Rate**: Tỷ lệ khung hình bị bỏ qua / thay thế sau decode trên tổng số khung hình gửi tới Present (`out_skip / (out_ok + out_skip)`).")
 [void]$md.AppendLine("")
-[void]$md.AppendLine("| Run ID | Source Res @ FPS | Decoded FPS | Present FPS | T0–T7 Total Mean | Queue Res Mean | Window-P95 Queue | Out Age P50 | Out Age P95 | Skip Rate | Drops | Underruns |")
-[void]$md.AppendLine("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+[void]$md.AppendLine("| Run ID | Actual Stream | Decoded FPS | Present FPS | Native T0–T7 Total (Mean) | Queue Dwell (Mean) | Window-P95 Queue | Out Age (P50) | Out Age (P95) | Video Skip Rate | Audio Drops | Audio Underruns | Status |")
+[void]$md.AppendLine("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
 
 foreach ($runId in $runOrder) {
     $res = $runResults[$runId]
     if ($res.status -ne 'VALID') {
-        [void]$md.AppendLine("| **$runId** | *$($res.status)* | — | — | — | — | — | — | — | — | — | — |")
+        [void]$md.AppendLine("| **$runId** | *$($res.status)* | — | — | — | — | — | — | — | — | — | — | *$($res.status)* |")
         continue
     }
 
-    $skipRate = if (($res.out_ok + $res.out_skip) -gt 0) {
-        "{0:P2}" -f ($res.out_skip / ($res.out_ok + $res.out_skip))
-    } else { "0.0%" }
+    $totP = $res.out_ok + $res.out_skip
+    $skipRateStr = if ($totP -gt 0) {
+        "{0:P2} ({1}/{2})" -f ($res.out_skip / $totP), $res.out_skip, $totP
+    } else { "0.0% (0/0)" }
 
-    [void]$md.AppendLine("| **$runId** | $($res.vis_res) @ $($res.fps) | $($res.dec_fps_mean) | $($res.uniq_fps_mean) | $($res.t0_t7_mean_ms) ms | $($res.q_res_mean_ms) ms | $($res.q_res_win_p95_ms) ms | $($res.out_age_mean_p50) ms | $($res.out_age_mean_p95) ms | $skipRate | $($res.backlog_drops) | $($res.real_underruns) |")
+    $streamStr = "$($res.vis_res) @ $(Format-Val $res.fps) ($($res.codec))"
+
+    [void]$md.AppendLine("| **$runId** | $streamStr | $(Format-Val $res.dec_fps_mean) | $(Format-Val $res.uniq_fps_mean) | $(Format-Val $res.t0_t7_mean_ms ' ms') | $(Format-Val $res.q_res_mean_ms ' ms') | $(Format-Val $res.q_res_win_p95_ms ' ms') | $(Format-Val $res.out_age_mean_p50 ' ms') | $(Format-Val $res.out_age_mean_p95 ' ms') | $skipRateStr | $($res.backlog_drops) drops | $($res.real_underruns) underruns | **VALID** |")
 }
 
 [void]$md.AppendLine("")
@@ -269,7 +345,16 @@ foreach ($runId in $runOrder) {
 [void]$md.AppendLine("")
 [void]$md.AppendLine("## 3. Pipeline Stages Breakdown (T0–T7 Detailed Stages)")
 [void]$md.AppendLine("")
-[void]$md.AppendLine("| Run ID | T0-T1 (RTP/IPC) | T1-T2 (Depacket) | T2-T3 (Demux/NAL) | T3-T4 (HW Decode) | T4-T5 (Queue/Sched) | T5-T6 (VP Blit) | T6-T7 (Present) | Total T0–T7 |")
+[void]$md.AppendLine("> **Ghi chú kỹ thuật về các mốc thời gian:**")
+[void]$md.AppendLine("> - **T0→T1**: RTP nội bộ đến khi lắp ráp Access Unit hoàn chỉnh.")
+[void]$md.AppendLine("> - **T1→T2**: Access Unit hoàn chỉnh đến khi nạp vào decoder input (MFT ProcessInput).")
+[void]$md.AppendLine("> - **T2→T3**: Decoder input đến khi decoder output xuất mẫu ảnh (MFT ProcessOutput). Đây là thời gian decoder xử lý thực tế, không phải Demux/NAL.")
+[void]$md.AppendLine("> - **T3→T4**: Decoder output đến khi đưa vào hàng đợi sau decode.")
+[void]$md.AppendLine("> - **T4→T5**: Chờ trong hàng đợi sau decode (Queue Dwell) đến khi bộ điều phối chọn frame.")
+[void]$md.AppendLine("> - **T5→T6**: Chọn frame đến khi VideoProcessorBlt trả về. Timestamp CPU quanh Blt đo thời gian gọi API CPU, không chứng minh GPU đã hoàn tất render.")
+[void]$md.AppendLine("> - **T6→T7**: Đến khi Present trả về. Timestamp CPU quanh Present đo thời gian gọi API CPU, không chứng minh GPU đã hoàn tất scanout lên màn hình.")
+[void]$md.AppendLine("")
+[void]$md.AppendLine("| Run ID | T0–T1 (RTP to AU) | T1–T2 (AU to Dec In) | T2–T3 (Dec In to Out) | T3–T4 (Dec Out to Queue) | T4–T5 (Queue Dwell) | T5–T6 (Blt Ret) | T6–T7 (Present Ret) | Native T0–T7 Total (Mean) |")
 [void]$md.AppendLine("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
 
 foreach ($runId in $runOrder) {
@@ -278,7 +363,7 @@ foreach ($runId in $runOrder) {
         [void]$md.AppendLine("| **$runId** | — | — | — | — | — | — | — | — |")
         continue
     }
-    [void]$md.AppendLine("| **$runId** | $($res.t0_t1_mean_ms) ms | $($res.t1_t2_mean_ms) ms | $($res.t2_t3_mean_ms) ms | $($res.t3_t4_mean_ms) ms | $($res.t4_t5_mean_ms) ms | $($res.t5_t6_mean_ms) ms | $($res.t6_t7_mean_ms) ms | **$($res.t0_t7_mean_ms) ms** |")
+    [void]$md.AppendLine("| **$runId** | $(Format-Val $res.t0_t1_mean_ms ' ms') | $(Format-Val $res.t1_t2_mean_ms ' ms') | $(Format-Val $res.t2_t3_mean_ms ' ms') | $(Format-Val $res.t3_t4_mean_ms ' ms') | $(Format-Val $res.t4_t5_mean_ms ' ms') | $(Format-Val $res.t5_t6_mean_ms ' ms') | $(Format-Val $res.t6_t7_mean_ms ' ms') | **$(Format-Val $res.t0_t7_mean_ms ' ms')** |")
 }
 
 [void]$md.AppendLine("")
@@ -286,17 +371,17 @@ foreach ($runId in $runOrder) {
 [void]$md.AppendLine("")
 [void]$md.AppendLine("## 4. Physical Glass-to-Glass Latency (External Camera 120/240 FPS)")
 [void]$md.AppendLine("")
-[void]$md.AppendLine("| Run ID | Mode | Preview | Measured Events | Median Latency | P95 Latency | Measurement Status |")
-[void]$md.AppendLine("|---|---|---|---:|---:|---:|---|")
+[void]$md.AppendLine("| Run ID | Mode | Preview | Measured Events | Median Latency | P95 Latency | Provenance / Rig | Measurement Status |")
+[void]$md.AppendLine("|---|---|---|---:|---:|---:|---|---|")
 
 foreach ($runId in $runOrder) {
     $res = $runResults[$runId]
-    $g = if ($res.ContainsKey('glass_stats')) { $res.glass_stats } else { @{ count = 0; median = $null; p95 = $null; status = 'CHƯA ĐO' } }
-    $medStr = if ($null -ne $g.median) { "$($g.median) ms" } else { "—" }
-    $p95Str = if ($null -ne $g.p95) { "$($g.p95) ms" } else { "—" }
+    $g = if ($res.ContainsKey('glass_stats')) { $res.glass_stats } else { @{ count = 0; median = $null; p95 = $null; provenance = 'None'; status = 'CHƯA ĐO' } }
+    $medStr = if ($null -ne $g.median) { "$([Math]::Round([double]$g.median, 2)) ms" } else { "—" }
+    $p95Str = if ($null -ne $g.p95) { "$([Math]::Round([double]$g.p95, 2)) ms" } else { "—" }
 
     $stMode = if ($res.ContainsKey('stream_mode')) { $res.stream_mode } else { "—" }
-    [void]$md.AppendLine("| **$runId** | $stMode | $(if ($runId.EndsWith('_ON')) { 'ON' } else { 'OFF' }) | $($g.count) | $medStr | $p95Str | **$($g.status)** |")
+    [void]$md.AppendLine("| **$runId** | $stMode | $(if ($runId.EndsWith('_ON')) { 'ON' } else { 'OFF' }) | $($g.count) | $medStr | $p95Str | $($g.provenance) | **$($g.status)** |")
 }
 
 [void]$md.AppendLine("")
@@ -304,30 +389,38 @@ foreach ($runId in $runOrder) {
 [void]$md.AppendLine("")
 [void]$md.AppendLine("## 5. Phân tích kết quả và Khuyến nghị sử dụng")
 [void]$md.AppendLine("")
-[void]$md.AppendLine("1. **Độ trễ nội bộ Native Receiver (T0–T7)**:")
-[void]$md.AppendLine("   - Pipeline xử lý video native duy trì thời gian từ khi nhận gói tin đến khi flip present trung bình **< 5 ms** trên phần cứng tăng tốc D3D11.")
-[void]$md.AppendLine("   - Giới hạn hàng đợi trong chế độ Fastest (1 frame) triệt tiêu thời gian lưu đệm T4-T5 xuống mức gần 0 ms.")
-[void]$md.AppendLine("")
-[void]$md.AppendLine("2. **Độ trễ vật lý Glass-to-Glass**:")
-[void]$md.AppendLine("   - Nếu Glass-to-Glass đo được qua camera ngoài cao trong khi Native T0–T7 thấp, độ trễ chủ yếu nằm ở khâu: capture/encode của iOS sender, độ trễ truyền dẫn vô tuyến Wi-Fi, và quá trình giải mã/forwarding của sidecar UxPlay trước khi đẩy vào Duwn Mirror.")
-[void]$md.AppendLine("   - Tuyệt đối không quy đồng toàn bộ độ trễ vật lý cho một thành phần đơn lẻ khi chưa có camera đối chiếu.")
-[void]$md.AppendLine("")
-[void]$md.AppendLine("3. **Khuyến nghị chế độ sử dụng**:")
-[void]$md.AppendLine("   - **Balanced (Mặc định)**: Dành cho trải nghiệm xem video, lướt web, trình chiếu thông thường. Đảm bảo nhịp khung hình mượt mà nhất (0 frame drop, FIFO khi fresh).")
-[void]$md.AppendLine("   - **Fastest**: Dành cho thao tác tương tác cao (chơi game phản xạ, điều khiển ứng dụng trực tiếp). Đánh đổi việc giữ toàn bộ frame để đạt tính tức thời cao nhất.")
-[void]$md.AppendLine("   - **Custom (2 frame / 25 ms)**: Điểm cân bằng tối ưu giữa việc tránh giật hình do jitter mạng và giữ độ trễ hàng đợi trong ngưỡng 1 chu kỳ làm tươi màn hình.")
 
-$outDir = Split-Path -Parent $OutputMarkdown
-if ($outDir -and -not (Test-Path $outDir)) {
+$validRuns = @($runOrder | Where-Object { $runResults[$_].status -eq 'VALID' })
+
+if ($validRuns.Count -eq 0) {
+    [void]$md.AppendLine("### 5.1. Đánh giá trạng thái thực nghiệm")
+    [void]$md.AppendLine("- **Chưa có phiên phát thực tế hợp lệ**: Toàn bộ các cấu hình đo đang ở trạng thái chưa hoàn tất benchmark (`NOT_RUN`, `NO_VALID_STREAM` hoặc `INVALID`).")
+    [void]$md.AppendLine("- **Không xếp hạng hay chọn chế độ tối ưu**: Báo cáo từ chối đưa ra kết luận so sánh hiệu năng hoặc chọn chế độ thắng cuộc khi chưa có dữ liệu telemetry hợp lệ từ phiên phát AirPlay thực tế.")
+    [void]$md.AppendLine("- **Chỉ số Glass-to-Glass**: Ghi nhận trạng thái **CHƯA ĐO** do chưa có hệ thống camera ngoài 120/240 FPS ghi hình quang học đối chiếu.")
+} else {
+    [void]$md.AppendLine("### 5.1. Đánh giá dựa trên dữ liệu đo thực tế ($($validRuns.Count)/6 cấu hình hợp lệ)")
+    foreach ($vId in $validRuns) {
+        $vRes = $runResults[$vId]
+        [void]$md.AppendLine("- **$vId ($($vRes.stream_mode))**: Native T0–T7 Total Mean = $(Format-Val $vRes.t0_t7_mean_ms ' ms'), Queue Dwell Mean = $(Format-Val $vRes.q_res_mean_ms ' ms'), Video Skip Rate = $($vRes.out_skip)/$($vRes.out_ok + $vRes.out_skip) frames.")
+    }
+    [void]$md.AppendLine("")
+    [void]$md.AppendLine("### 5.2. Nhận định về mối quan hệ giữa Native T0–T7 và Glass-to-Glass")
+    [void]$md.AppendLine("- Khoảng thời gian T0–T7 chỉ phản ánh độ trễ nội bộ trong phần mềm nhận (từ socket nhận gói tin đến khi lệnh Present CPU trả về).")
+    [void]$md.AppendLine("- Nếu độ trễ Glass-to-Glass đo được qua camera ngoài cao trong khi Native T0–T7 thấp, phần trễ chênh lệch nằm ở các khâu bên ngoài phạm vi T0–T7 (bao gồm cả các khâu trước T0: chụp màn hình và mã hóa trên iOS sender, độ trễ mạng truyền dẫn Wi-Fi, sidecar forwarder; và các khâu sau T7: GPU rendering, DWM desktop compositing, scanout và độ trễ phản hồi vật lý của tấm nền màn hình).")
+    [void]$md.AppendLine("- Tuyệt đối không tự quy kết phần trễ chênh lệch chủ yếu cho sender iOS, Wi-Fi hay UxPlay khi chưa có số đo quang học cô lập từng chặng.")
+}
+
+$outDir = Split-Path -Parent $targetMdPath
+if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 }
 
-[System.IO.File]::WriteAllText((Join-Path $repoRoot $OutputMarkdown), $md.ToString(), [System.Text.Encoding]::UTF8)
+[System.IO.File]::WriteAllText($targetMdPath, $md.ToString(), [System.Text.Encoding]::UTF8)
 
 # Write JSON summary
-$jsonPath = [System.IO.Path]::ChangeExtension((Join-Path $repoRoot $OutputMarkdown), '.json')
+$jsonPath = [System.IO.Path]::ChangeExtension($targetMdPath, '.json')
 $runResults | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $jsonPath -Encoding utf8
 
 Write-Host "Analysis report generated:" -ForegroundColor Green
-Write-Host "  Markdown: $OutputMarkdown" -ForegroundColor White
+Write-Host "  Markdown: $targetMdPath" -ForegroundColor White
 Write-Host "  JSON:     $jsonPath" -ForegroundColor White

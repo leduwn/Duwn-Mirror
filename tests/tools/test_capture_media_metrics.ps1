@@ -396,7 +396,61 @@ try {
     }
     Write-Host "  [PASS] Test 11: Quality Transitions & Explicit Cycle Delimiters"
 
-    Write-Host "`nALL 11 COLLECTOR FIXTURE TESTS PASSED!"
+    # ------------------------------------------------------------------------
+    # Test 12: StartByteOffset Isolation, Raw Log Output, & preview_visible
+    # ------------------------------------------------------------------------
+    $testCsv12 = Join-Path $testTempDir 'output_offset.csv'
+    $rawLog12 = Join-Path $testTempDir 'metrics_raw.log'
+    $offsetLog = Join-Path $testTempDir 'offset_test.log'
+
+    $oldCycle = @(
+        "[2026-10-01 12:00:00.001] [Info] [Diagnostics] [METRICS CYCLE BEGIN] cycle=1",
+        "[2026-10-01 12:00:00.002] [Info] [Diagnostics] [METADATA] cycle=1 | commit=111111 | transport=LocalRtpUdp | stream_mode=Balanced | policy(max_q=3, res_ms=50, cad_pct=100, always_latest=0) | req_quality=1080p60 | active_quality=1080p60 | quality_pending=0 | preview_visible=0 | actual_stream(codec=H264, res=1920x1080, fps=60.00)",
+        "[2026-10-01 12:00:00.003] [Info] [Diagnostics] [STATS] VIDEO: rtp=60/s (1200.5 KB/s) | au=60/s | dec=60 fps | rend=60 fps (unique=60, opp=60/s) | ticks=60/s (hold=0/s) | drop=0/s (superseded=0/s, late=0/s, late_drop=0, trans_drop=0, q_overflow=0, sess_q_full=0, life_q_full=0) | q=1 | gen=1 | coded=1920x1080 vis=1920x1080",
+        "[2026-10-01 12:00:00.004] [Info] [Diagnostics] [STATS] SYNC/SESSION: A/V=5.2ms drift=0.10ms/min | sidecar=alive | state=Streaming | source=connected | output=1920x1080 preview=640x360 | lifecycle=streaming_active",
+        "[2026-10-01 12:00:00.005] [Info] [Diagnostics] [METRICS CYCLE END] cycle=1`r`n"
+    ) -join "`r`n"
+
+    $oldCycle | Set-Content -LiteralPath $offsetLog -Encoding utf8
+    $offsetBytes = (Get-Item -LiteralPath $offsetLog).Length
+
+    $newCycle = @(
+        "[2026-10-01 12:00:01.001] [Info] [Diagnostics] [METRICS CYCLE BEGIN] cycle=2",
+        "[2026-10-01 12:00:01.002] [Info] [Diagnostics] [METADATA] cycle=2 | commit=222222 | transport=LocalRtpUdp | stream_mode=Fastest | policy(max_q=1, res_ms=0, cad_pct=100, always_latest=1) | req_quality=1080p60 | active_quality=1080p60 | quality_pending=0 | preview_visible=1 | actual_stream(codec=H264, res=1920x1080, fps=60.00)",
+        "[2026-10-01 12:00:01.003] [Info] [Diagnostics] [STATS] VIDEO: rtp=60/s (1200.5 KB/s) | au=60/s | dec=60 fps | rend=60 fps (unique=60, opp=60/s) | ticks=60/s (hold=0/s) | drop=0/s (superseded=0/s, late=0/s, late_drop=0, trans_drop=0, q_overflow=0, sess_q_full=0, life_q_full=0) | q=1 | gen=1 | coded=1920x1080 vis=1920x1080",
+        "[2026-10-01 12:00:01.004] [Info] [Diagnostics] [STATS] SYNC/SESSION: A/V=5.2ms drift=0.10ms/min | sidecar=alive | state=Streaming | source=connected | output=1920x1080 preview=640x360 | lifecycle=streaming_active",
+        "[2026-10-01 12:00:01.005] [Info] [Diagnostics] [METRICS CYCLE END] cycle=2`r`n"
+    ) -join "`r`n"
+
+    $newCycle | Add-Content -LiteralPath $offsetLog -Encoding utf8
+
+    $job = Start-Job -ScriptBlock {
+        param($col, $out, $log, $offset, $rawOut)
+        & $col -OutputPath $out -DurationSeconds 3 -LogPath $log -StartByteOffset $offset -RawLogOutputPath $rawOut
+    } -ArgumentList $collectorScript, $testCsv12, $offsetLog, $offsetBytes, $rawLog12
+    $job | Wait-Job -Timeout 10 | Out-Null
+    Receive-Job $job | Out-Null
+
+    $rows = @(Import-Csv -LiteralPath $testCsv12)
+    if ($rows.Count -ne 1) {
+        throw "Test 12 FAILED: Expected exactly 1 row after offset, got $($rows.Count)"
+    }
+    if ($rows[0].cycle_id -ne '2' -or $rows[0].commit -ne '222222') {
+        throw "Test 12 FAILED: Historical cycle 1 was not filtered out! cycle_id=$($rows[0].cycle_id), commit=$($rows[0].commit)"
+    }
+    if ($rows[0].preview_visible -ne '1') {
+        throw "Test 12 FAILED: preview_visible expected '1', got '$($rows[0].preview_visible)'"
+    }
+    if (-not (Test-Path -LiteralPath $rawLog12)) {
+        throw "Test 12 FAILED: Raw log file not created at $rawLog12"
+    }
+    $rawContent = Get-Content -LiteralPath $rawLog12 -Raw
+    if ($rawContent -notmatch 'cycle=2' -or $rawContent -match 'cycle=1') {
+        throw "Test 12 FAILED: Raw log content incorrect or contains old cycle 1"
+    }
+    Write-Host "  [PASS] Test 12: StartByteOffset Isolation, Raw Log Output, & preview_visible"
+
+    Write-Host "`nALL 12 COLLECTOR FIXTURE TESTS PASSED!"
 }
 finally {
     if (Test-Path -LiteralPath $testTempDir) {

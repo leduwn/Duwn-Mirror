@@ -2,7 +2,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$OutputPath,
     [int]$DurationSeconds = 1800,
-    [string]$LogPath = (Join-Path $env:LOCALAPPDATA 'DUWN Mirror\Logs\duwn-mirror.log')
+    [string]$LogPath = (Join-Path $env:LOCALAPPDATA 'DUWN Mirror\Logs\duwn-mirror.log'),
+    [int64]$StartByteOffset = 0,
+    [string]$RawLogOutputPath = $null
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,7 +23,7 @@ function Escape-CsvField([object]$value) {
 $headerCols = @(
     'run_id', 'session_id', 'cycle_id', 'collector_time', 'source_time', 'reconnect_event', 'format_change',
     'commit', 'transport', 'stream_mode', 'policy_max_q', 'policy_res_ms', 'policy_cad_pct', 'policy_always_latest',
-    'req_quality', 'active_quality', 'quality_pending', 'actual_codec', 'actual_res', 'actual_fps',
+    'req_quality', 'active_quality', 'quality_pending', 'preview_visible', 'actual_codec', 'actual_res', 'actual_fps',
     'native_t0_t7_total_ms', 't0_t1_ms', 't1_t2_ms', 't2_t3_ms', 't3_t4_ms', 't4_t5_ms', 't5_t6_ms', 't6_t7_ms',
     'decode_avg_ms', 'decode_p50_ms', 'decode_p95_ms', 'decode_n',
     'queue_res_avg_ms', 'queue_res_p50_ms', 'queue_res_p95_ms', 'queue_res_n',
@@ -44,7 +46,8 @@ if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {
 
 ($headerCols -join ',') | Set-Content -LiteralPath $OutputPath -Encoding utf8
 
-$lastFilePos = 0
+$lastFilePos = $StartByteOffset
+$script:waitingForFirstBegin = ($StartByteOffset -gt 0)
 $lastCreationTime = $null
 $fileHeaderPrefix = ''
 $pendingText = ''
@@ -52,6 +55,15 @@ $pendingBytes = New-Object byte[] (0)
 $sessionId = 1
 $lastGen = $null
 $lastSourceConn = $null
+
+if ($RawLogOutputPath) {
+    $rawLogDir = Split-Path -Parent $RawLogOutputPath
+    if ($rawLogDir -and -not (Test-Path -LiteralPath $rawLogDir)) {
+        New-Item -ItemType Directory -Path $rawLogDir -Force | Out-Null
+    }
+    # Initialize empty raw log file
+    "" | Set-Content -LiteralPath $RawLogOutputPath -Encoding utf8
+}
 
 function Get-IncompleteUtf8ByteCount([byte[]]$bytes) {
     if ($null -eq $bytes -or $bytes.Length -eq 0) { return 0 }
@@ -138,7 +150,7 @@ function New-CycleState {
 
         commit = ''; transport = ''; stream_mode = ''
         policy_max_q = ''; policy_res_ms = ''; policy_cad_pct = ''; policy_always_latest = ''
-        req_quality = ''; active_quality = ''; quality_pending = ''
+        req_quality = ''; active_quality = ''; quality_pending = ''; preview_visible = ''
         actual_codec = ''; actual_res = ''; actual_fps = ''
 
         t0_t7_total = ''; t0_t1 = ''; t1_t2 = ''; t2_t3 = ''; t3_t4 = ''; t4_t5 = ''; t5_t6 = ''; t6_t7 = ''
@@ -187,13 +199,22 @@ function Emit-Cycle([System.Collections.IDictionary]$cycle) {
     $videoStale = if ($cycle.has_video) { 0 } else { 1 }
     $audioStale = if ($cycle.has_audio) { 0 } else { 1 }
 
+    $prevVis = $cycle.preview_visible
+    if ($prevVis -eq '' -or $null -eq $prevVis) {
+        if (([int64]$cycle.prev_att -gt 0) -or ([int64]$cycle.prev_ok -gt 0)) {
+            $prevVis = '1'
+        } else {
+            $prevVis = '0'
+        }
+    }
+
     $collectorTime = (Get-Date).ToString('o')
     $sourceTime = $cycle.source_time
 
     $rowValues = @(
         $runId, $script:sessionId, $cycle.cycle_id, $collectorTime, $sourceTime, $reconnectEvent, $formatChange,
         $cycle.commit, $cycle.transport, $cycle.stream_mode, $cycle.policy_max_q, $cycle.policy_res_ms, $cycle.policy_cad_pct, $cycle.policy_always_latest,
-        $cycle.req_quality, $cycle.active_quality, $cycle.quality_pending, $cycle.actual_codec, $cycle.actual_res, $cycle.actual_fps,
+        $cycle.req_quality, $cycle.active_quality, $cycle.quality_pending, $prevVis, $cycle.actual_codec, $cycle.actual_res, $cycle.actual_fps,
         $cycle.t0_t7_total, $cycle.t0_t1, $cycle.t1_t2, $cycle.t2_t3, $cycle.t3_t4, $cycle.t4_t5, $cycle.t5_t6, $cycle.t6_t7,
         $cycle.decode_avg, $cycle.decode_p50, $cycle.decode_p95, $cycle.decode_n,
         $cycle.q_res_avg, $cycle.q_res_p50, $cycle.q_res_p95, $cycle.q_res_n,
@@ -216,6 +237,18 @@ function Emit-Cycle([System.Collections.IDictionary]$cycle) {
 function Process-LogLine([string]$line) {
     if (-not $line) { return }
     $line = $line.TrimStart([char]0xFEFF)
+
+    if ($script:waitingForFirstBegin) {
+        if ($line -match '\[METRICS CYCLE BEGIN\]') {
+            $script:waitingForFirstBegin = $false
+        } else {
+            return
+        }
+    }
+
+    if ($RawLogOutputPath -and $line.Trim().Length -gt 0) {
+        $line | Add-Content -LiteralPath $RawLogOutputPath -Encoding utf8
+    }
 
     if ($line -match '\[METRICS CYCLE END\](?: cycle=(?<cid>\d+))?') {
         if ($Matches.ContainsKey('cid') -and $Matches.cid -and -not $script:currentCycle.cycle_id) {
@@ -254,7 +287,7 @@ function Process-LogLine([string]$line) {
         }
     }
 
-    if ($line -match '\[METADATA\](?: cycle=(?<cid>\d+) \|)? commit=(?<commit>[^ ]*) \| transport=(?<transport>[^ ]*) \| stream_mode=(?<mode>[^ ]*) \| policy\(max_q=(?<mq>\d+), res_ms=(?<rms>\d+), cad_pct=(?<cp>\d+), always_latest=(?<al>\d+)\) \| req_quality=(?<rq>[^ |]*)(?: \| active_quality=(?<aq>[^ |]*) \| quality_pending=(?<qp>[^ |]*))? \| actual_stream\(codec=(?<codec>[^,]*), res=(?<res>[^,]*), fps=(?<fps>[^)]*)\)') {
+    if ($line -match '\[METADATA\](?: cycle=(?<cid>\d+) \|)? commit=(?<commit>[^ ]*) \| transport=(?<transport>[^ ]*) \| stream_mode=(?<mode>[^ ]*) \| policy\(max_q=(?<mq>\d+), res_ms=(?<rms>\d+), cad_pct=(?<cp>\d+), always_latest=(?<al>\d+)\) \| req_quality=(?<rq>[^ |]*)(?: \| active_quality=(?<aq>[^ |]*) \| quality_pending=(?<qp>[^ |]*))?(?: \| preview_visible=(?<pv>[^ |]*))? \| actual_stream\(codec=(?<codec>[^,]*), res=(?<res>[^,]*), fps=(?<fps>[^)]*)\)') {
         if ($Matches.ContainsKey('cid') -and $Matches.cid) {
             $script:currentCycle.cycle_id = $Matches.cid
         }
@@ -275,6 +308,9 @@ function Process-LogLine([string]$line) {
             $script:currentCycle.quality_pending = $Matches.qp
         } else {
             $script:currentCycle.quality_pending = '0'
+        }
+        if ($Matches.ContainsKey('pv') -and $Matches.pv) {
+            $script:currentCycle.preview_visible = $Matches.pv
         }
         $script:currentCycle.actual_codec = $Matches.codec
         $script:currentCycle.actual_res = $Matches.res
