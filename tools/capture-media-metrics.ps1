@@ -4,7 +4,8 @@ param(
     [int]$DurationSeconds = 1800,
     [string]$LogPath = (Join-Path $env:LOCALAPPDATA 'DUWN Mirror\Logs\duwn-mirror.log'),
     [int64]$StartByteOffset = 0,
-    [string]$RawLogOutputPath = $null
+    [string]$RawLogOutputPath = $null,
+    [switch]$StrictCycles = $false
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,6 +56,8 @@ $pendingBytes = New-Object byte[] (0)
 $sessionId = 1
 $lastGen = $null
 $lastSourceConn = $null
+$script:inCycle = $false
+$script:currentBeginId = $null
 
 if ($RawLogOutputPath) {
     $rawLogDir = Split-Path -Parent $RawLogOutputPath
@@ -251,31 +254,62 @@ function Process-LogLine([string]$line) {
     }
 
     if ($line -match '\[METRICS CYCLE END\](?: cycle=(?<cid>\d+))?') {
-        if ($Matches.ContainsKey('cid') -and $Matches.cid -and -not $script:currentCycle.cycle_id) {
-            $script:currentCycle.cycle_id = $Matches.cid
+        $endId = if ($Matches.ContainsKey('cid') -and $Matches.cid) { $Matches.cid } else { $null }
+        if ($StrictCycles) {
+            # In strict mode: only emit if currently in a cycle and begin/end cycle_id match
+            $isMatching = $script:inCycle -and (
+                ($null -eq $script:currentBeginId -and $null -eq $endId) -or
+                ($null -ne $script:currentBeginId -and $script:currentBeginId -eq $endId)
+            )
+            if ($isMatching) {
+                if ($endId -and -not $script:currentCycle.cycle_id) {
+                    $script:currentCycle.cycle_id = $endId
+                }
+                Emit-Cycle $script:currentCycle
+            }
+            # Always reset state after END
+            $script:inCycle = $false
+            $script:currentBeginId = $null
+            $script:currentCycle = New-CycleState
+            return
+        } else {
+            if ($Matches.ContainsKey('cid') -and $Matches.cid -and -not $script:currentCycle.cycle_id) {
+                $script:currentCycle.cycle_id = $Matches.cid
+            }
+            Emit-Cycle $script:currentCycle
+            $script:currentCycle = New-CycleState
+            return
         }
-        Emit-Cycle $script:currentCycle
-        $script:currentCycle = New-CycleState
-        return
     }
 
     if ($line -match '\[METRICS CYCLE BEGIN\](?: cycle=(?<cid>\d+))?') {
-        if ($script:currentCycle.has_update) {
-            Emit-Cycle $script:currentCycle
+        $beginId = if ($Matches.ContainsKey('cid') -and $Matches.cid) { $Matches.cid } else { $null }
+        if ($StrictCycles) {
+            # Incomplete prior cycle without END is dropped in strict benchmark mode
             $script:currentCycle = New-CycleState
-        }
-        if ($Matches.ContainsKey('cid') -and $Matches.cid) {
-            $script:currentCycle.cycle_id = $Matches.cid
+            $script:inCycle = $true
+            $script:currentBeginId = $beginId
+            if ($beginId) {
+                $script:currentCycle.cycle_id = $beginId
+            }
+        } else {
+            if ($script:currentCycle.has_update) {
+                Emit-Cycle $script:currentCycle
+                $script:currentCycle = New-CycleState
+            }
+            if ($beginId) {
+                $script:currentCycle.cycle_id = $beginId
+            }
         }
     }
     elseif ($line -match '\[METADATA\]') {
-        if ($script:currentCycle.has_meta) {
+        if (-not $StrictCycles -and $script:currentCycle.has_meta) {
             Emit-Cycle $script:currentCycle
             $script:currentCycle = New-CycleState
         }
     }
     elseif ($line -match '\[STATS\] VIDEO:') {
-        if ($script:currentCycle.has_video) {
+        if (-not $StrictCycles -and $script:currentCycle.has_video) {
             Emit-Cycle $script:currentCycle
             $script:currentCycle = New-CycleState
         }
@@ -572,7 +606,7 @@ if ($pendingText.Length -gt 0) {
     $pendingText = ''
 }
 
-if ($script:currentCycle.has_update) {
+if (-not $StrictCycles -and $script:currentCycle.has_update) {
     Emit-Cycle $script:currentCycle
     $script:currentCycle = New-CycleState
 }

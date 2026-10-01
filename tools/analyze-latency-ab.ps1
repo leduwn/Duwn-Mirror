@@ -23,10 +23,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 $repoRoot = Split-Path -Parent $scriptDir
 $runsRoot = if ([System.IO.Path]::IsPathRooted($RunsDir)) { $RunsDir } else { Join-Path $repoRoot $RunsDir }
 $targetMdPath = if ([System.IO.Path]::IsPathRooted($OutputMarkdown)) { $OutputMarkdown } else { Join-Path $repoRoot $OutputMarkdown }
+
+$validationHelperPath = Join-Path $scriptDir 'benchmark-validation-helpers.ps1'
+if (Test-Path -LiteralPath $validationHelperPath) {
+    . $validationHelperPath
+}
 
 function Parse-DoubleSafe([object]$Value) {
     if ($null -eq $Value) { return $null }
@@ -66,6 +71,31 @@ function Extract-DoubleSeries([object[]]$Rows, [string]$ColName) {
     return $list.ToArray()
 }
 
+function Extract-FilteredDoubleSeries {
+    param(
+        [object[]]$Rows,
+        [string]$ColName,
+        [scriptblock]$Filter = $null
+    )
+    $list = [System.Collections.Generic.List[double]]::new()
+    foreach ($r in $Rows) {
+        if ($null -ne $Filter) {
+            $pass = $false
+            try {
+                $pass = [bool](& $Filter $r)
+            } catch {
+                $pass = $false
+            }
+            if (-not $pass) { continue }
+        }
+        $d = Parse-DoubleSafe $r.$ColName
+        if ($null -ne $d) {
+            $list.Add($d)
+        }
+    }
+    return $list.ToArray()
+}
+
 function Get-CounterDelta {
     param([object[]]$Rows, [string]$ColumnName)
     $totalDelta = [int64]0
@@ -87,7 +117,7 @@ function Get-CounterDelta {
             $prevVal = $currVal
         }
     }
-    if (-not $hasAny) { return [int64]0 }
+    if (-not $hasAny) { return $null }
     return $totalDelta
 }
 
@@ -114,7 +144,9 @@ foreach ($runId in $runOrder) {
     $csvPath = Join-Path $dir 'metrics.csv'
 
     $manifest = if (Test-Path $manifestPath) {
-        Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        try {
+            Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        } catch { $null }
     } else { $null }
 
     if (-not (Test-Path $csvPath)) {
@@ -138,73 +170,70 @@ foreach ($runId in $runOrder) {
         continue
     }
 
-    # Count reconnects and format changes across the FULL measurement period (unfiltered)
+    # Incident counters computed across FULL measurement window (including cycles with no decoded video)
     $reconnect_count = @($rows | Where-Object { $_.reconnect_event -eq '1' -or $_.reconnect_event -eq 'true' }).Count
     $format_changes  = @($rows | Where-Object { $_.format_change -eq '1' -or $_.format_change -eq 'true' }).Count
 
-    # Filter rows with active decoded video and quality_pending == 0
-    $validRows = @($rows | Where-Object {
-        $dFps = Parse-DoubleSafe $_.v_dec_fps
-        ($null -ne $dFps -and $dFps -gt 0) -and
-        ($_.quality_pending -eq '0' -or $_.quality_pending -eq 'false')
-    })
+    $out_ok_delta    = Get-CounterDelta $rows 'output_ok'
+    $out_skip_delta  = Get-CounterDelta $rows 'output_skip'
+    $out_err_delta   = Get-CounterDelta $rows 'output_err'
 
-    if ($validRows.Count -eq 0) {
+    $prev_ok_delta   = Get-CounterDelta $rows 'preview_ok'
+    $prev_skip_delta = Get-CounterDelta $rows 'preview_skip'
+    $prev_err_delta  = Get-CounterDelta $rows 'preview_err'
+
+    $real_underruns  = Get-CounterDelta $rows 'real_underruns'
+    $backlog_drops   = Get-CounterDelta $rows 'backlog_drops'
+
+    # Strict validation of manifest and configuration
+    $valRes = Test-BenchmarkRunValidation -RunId $runId -Manifest $manifest -Rows $rows
+    if (-not $valRes.IsValid) {
         $runResults[$runId] = @{
-            run_id     = $runId
-            status     = 'NO_VALID_STREAM'
-            manifest   = $manifest
-            total_rows = $rows.Count
-            notes      = 'No cycles with active decoded video and quality_pending=0.'
+            run_id         = $runId
+            status         = $valRes.Status
+            manifest       = $manifest
+            total_rows     = $rows.Count
+            notes          = ($valRes.Reasons -join '; ')
+            reconnects     = $reconnect_count
+            format_changes = $format_changes
+            out_ok         = $out_ok_delta
+            out_skip       = $out_skip_delta
+            out_err        = $out_err_delta
+            prev_ok        = $prev_ok_delta
+            prev_skip      = $prev_skip_delta
+            prev_err       = $prev_err_delta
+            real_underruns = $real_underruns
+            backlog_drops  = $backlog_drops
         }
         continue
     }
 
-    # Compute reset-aware deltas for cumulative counters
-    $out_ok_delta    = Get-CounterDelta $validRows 'output_ok'
-    $out_skip_delta  = Get-CounterDelta $validRows 'output_skip'
-    $out_err_delta   = Get-CounterDelta $validRows 'output_err'
-
-    $prev_ok_delta   = Get-CounterDelta $validRows 'preview_ok'
-    $prev_skip_delta = Get-CounterDelta $validRows 'preview_skip'
-    $prev_err_delta  = Get-CounterDelta $validRows 'preview_err'
-
-    $real_underruns  = Get-CounterDelta $validRows 'real_underruns'
-    $backlog_drops   = Get-CounterDelta $validRows 'backlog_drops'
-
-    if ($out_ok_delta -le 0) {
-        $runResults[$runId] = @{
-            run_id     = $runId
-            status     = 'NO_ACTIVE_OUTPUT'
-            manifest   = $manifest
-            total_rows = $rows.Count
-            notes      = 'Decoded video frames present but output present count did not advance.'
-        }
-        continue
-    }
+    $validRows = $valRes.ValidRows
+    $lastRow = $validRows[-1]
 
     # Extract series with null/empty safety (never coerce empty cell to 0.0)
-    $t0_t7_vals = Extract-DoubleSeries $validRows 'native_t0_t7_total_ms'
-    $t0_t1_vals = Extract-DoubleSeries $validRows 't0_t1_ms'
-    $t1_t2_vals = Extract-DoubleSeries $validRows 't1_t2_ms'
-    $t2_t3_vals = Extract-DoubleSeries $validRows 't2_t3_ms'
-    $t3_t4_vals = Extract-DoubleSeries $validRows 't3_t4_ms'
-    $t4_t5_vals = Extract-DoubleSeries $validRows 't4_t5_ms'
-    $t5_t6_vals = Extract-DoubleSeries $validRows 't5_t6_ms'
-    $t6_t7_vals = Extract-DoubleSeries $validRows 't6_t7_ms'
+    # Latency samples: only extracted when sample count > 0 and data is fresh/active
+    $t0_t7_vals = Extract-FilteredDoubleSeries $validRows 'native_t0_t7_total_ms' { param($r) $r.video_stale -ne '1' -and (Parse-DoubleSafe $r.v_dec_fps) -gt 0 }
+    $t0_t1_vals = Extract-FilteredDoubleSeries $validRows 't0_t1_ms' { param($r) $r.video_stale -ne '1' -and (Parse-DoubleSafe $r.v_dec_fps) -gt 0 }
+    $t1_t2_vals = Extract-FilteredDoubleSeries $validRows 't1_t2_ms' { param($r) $r.video_stale -ne '1' -and (Parse-DoubleSafe $r.v_dec_fps) -gt 0 }
+    $t2_t3_vals = Extract-FilteredDoubleSeries $validRows 't2_t3_ms' { param($r) $r.video_stale -ne '1' -and (Parse-DoubleSafe $r.v_dec_fps) -gt 0 }
+    $t3_t4_vals = Extract-FilteredDoubleSeries $validRows 't3_t4_ms' { param($r) $r.video_stale -ne '1' -and (Parse-DoubleSafe $r.v_dec_fps) -gt 0 }
+    $t4_t5_vals = Extract-FilteredDoubleSeries $validRows 't4_t5_ms' { param($r) $r.video_stale -ne '1' -and (Parse-DoubleSafe $r.v_dec_fps) -gt 0 }
+    $t5_t6_vals = Extract-FilteredDoubleSeries $validRows 't5_t6_ms' { param($r) $r.video_stale -ne '1' -and (Parse-DoubleSafe $r.v_dec_fps) -gt 0 }
+    $t6_t7_vals = Extract-FilteredDoubleSeries $validRows 't6_t7_ms' { param($r) $r.video_stale -ne '1' -and (Parse-DoubleSafe $r.v_dec_fps) -gt 0 }
 
-    $q_res_avg = Extract-DoubleSeries $validRows 'queue_res_avg_ms'
-    $q_res_p50 = Extract-DoubleSeries $validRows 'queue_res_p50_ms'
-    $q_res_p95 = Extract-DoubleSeries $validRows 'queue_res_p95_ms'
+    $q_res_avg = Extract-FilteredDoubleSeries $validRows 'queue_res_avg_ms' { param($r) $r.video_stale -ne '1' -and [int64]$r.queue_res_n -gt 0 }
+    $q_res_p50 = Extract-FilteredDoubleSeries $validRows 'queue_res_p50_ms' { param($r) $r.video_stale -ne '1' -and [int64]$r.queue_res_n -gt 0 }
+    $q_res_p95 = Extract-FilteredDoubleSeries $validRows 'queue_res_p95_ms' { param($r) $r.video_stale -ne '1' -and [int64]$r.queue_res_n -gt 0 }
 
-    $dec_fps   = Extract-DoubleSeries $validRows 'v_dec_fps'
-    $rend_fps  = Extract-DoubleSeries $validRows 'v_rend_fps'
-    $uniq_fps  = Extract-DoubleSeries $validRows 'unique_pres_fps'
+    $dec_fps   = Extract-FilteredDoubleSeries $validRows 'v_dec_fps' { param($r) $r.video_stale -ne '1' }
+    $rend_fps  = Extract-FilteredDoubleSeries $validRows 'v_rend_fps' { param($r) $r.video_stale -ne '1' }
+    $uniq_fps  = Extract-FilteredDoubleSeries $validRows 'unique_pres_fps' { param($r) $r.video_stale -ne '1' }
 
-    $out_age_p50 = Extract-DoubleSeries $validRows 'out_pres_p50_ms'
-    $out_age_p95 = Extract-DoubleSeries $validRows 'out_pres_p95_ms'
+    $out_age_p50 = Extract-FilteredDoubleSeries $validRows 'out_pres_p50_ms' { param($r) [int64]$r.out_age_count -gt 0 }
+    $out_age_p95 = Extract-FilteredDoubleSeries $validRows 'out_pres_p95_ms' { param($r) [int64]$r.out_age_count -gt 0 }
 
-    $prev_age_p50 = Extract-DoubleSeries $validRows 'prev_pres_p50_ms'
+    $prev_age_p50 = Extract-FilteredDoubleSeries $validRows 'prev_pres_p50_ms' { param($r) [int64]$r.prev_age_count -gt 0 }
 
     # Physical Glass-to-Glass events if present
     $glassEventsPath = Join-Path $dir 'glass_events.csv'
@@ -330,14 +359,17 @@ foreach ($runId in $runOrder) {
         continue
     }
 
-    $totP = $res.out_ok + $res.out_skip
+    $totP = if ($null -ne $res.out_ok -and $null -ne $res.out_skip) { $res.out_ok + $res.out_skip } else { 0 }
     $skipRateStr = if ($totP -gt 0) {
         "{0:P2} ({1}/{2})" -f ($res.out_skip / $totP), $res.out_skip, $totP
     } else { "0.0% (0/0)" }
 
+    $dropsStr = if ($null -ne $res.backlog_drops) { "$($res.backlog_drops) drops" } else { "N/A" }
+    $underrunsStr = if ($null -ne $res.real_underruns) { "$($res.real_underruns) underruns" } else { "N/A" }
+
     $streamStr = "$($res.vis_res) @ $(Format-Val $res.fps) ($($res.codec))"
 
-    [void]$md.AppendLine("| **$runId** | $streamStr | $(Format-Val $res.dec_fps_mean) | $(Format-Val $res.uniq_fps_mean) | $(Format-Val $res.t0_t7_mean_ms ' ms') | $(Format-Val $res.q_res_mean_ms ' ms') | $(Format-Val $res.q_res_win_p95_ms ' ms') | $(Format-Val $res.out_age_mean_p50 ' ms') | $(Format-Val $res.out_age_mean_p95 ' ms') | $skipRateStr | $($res.backlog_drops) drops | $($res.real_underruns) underruns | **VALID** |")
+    [void]$md.AppendLine("| **$runId** | $streamStr | $(Format-Val $res.dec_fps_mean) | $(Format-Val $res.uniq_fps_mean) | $(Format-Val $res.t0_t7_mean_ms ' ms') | $(Format-Val $res.q_res_mean_ms ' ms') | $(Format-Val $res.q_res_win_p95_ms ' ms') | $(Format-Val $res.out_age_mean_p50 ' ms') | $(Format-Val $res.out_age_mean_p95 ' ms') | $skipRateStr | $dropsStr | $underrunsStr | **VALID** |")
 }
 
 [void]$md.AppendLine("")
@@ -401,7 +433,9 @@ if ($validRuns.Count -eq 0) {
     [void]$md.AppendLine("### 5.1. Đánh giá dựa trên dữ liệu đo thực tế ($($validRuns.Count)/6 cấu hình hợp lệ)")
     foreach ($vId in $validRuns) {
         $vRes = $runResults[$vId]
-        [void]$md.AppendLine("- **$vId ($($vRes.stream_mode))**: Native T0–T7 Total Mean = $(Format-Val $vRes.t0_t7_mean_ms ' ms'), Queue Dwell Mean = $(Format-Val $vRes.q_res_mean_ms ' ms'), Video Skip Rate = $($vRes.out_skip)/$($vRes.out_ok + $vRes.out_skip) frames.")
+        $totP = if ($null -ne $vRes.out_ok -and $null -ne $vRes.out_skip) { $vRes.out_ok + $vRes.out_skip } else { 0 }
+        $skipSummary = if ($totP -gt 0) { "$($vRes.out_skip)/$totP frames" } else { "N/A" }
+        [void]$md.AppendLine("- **$vId ($($vRes.stream_mode))**: Native T0–T7 Total Mean = $(Format-Val $vRes.t0_t7_mean_ms ' ms'), Queue Dwell Mean = $(Format-Val $vRes.q_res_mean_ms ' ms'), Video Skip Rate = $skipSummary.")
     }
     [void]$md.AppendLine("")
     [void]$md.AppendLine("### 5.2. Nhận định về mối quan hệ giữa Native T0–T7 và Glass-to-Glass")

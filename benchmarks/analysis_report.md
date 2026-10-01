@@ -1,6 +1,6 @@
 ﻿# Duwn Mirror — A/B Receiver Latency Benchmark Report
 
-Date: 2026-10-01 08:12:06 UTC
+Date: 2026-10-01 09:23:05 UTC
 Scope: Built-in iOS AirPlay Screen Mirroring receiver pipeline latency (T0–T7) and physical Glass-to-Glass assessment.
 
 ---

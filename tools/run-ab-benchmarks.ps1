@@ -55,8 +55,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 $repoRoot = Split-Path -Parent $scriptDir
+
+$validationHelperPath = Join-Path $scriptDir 'benchmark-validation-helpers.ps1'
+if (Test-Path -LiteralPath $validationHelperPath) {
+    . $validationHelperPath
+}
 
 if ([string]::IsNullOrWhiteSpace($SessionId)) {
     $SessionId = "session_" + (Get-Date -Format "yyyyMMdd_HHmmss")
@@ -66,13 +71,15 @@ $sessionsRootDir = Join-Path $repoRoot 'benchmarks/sessions'
 $currentSessionDir = Join-Path $sessionsRootDir $SessionId
 
 # Configuration matrix
-$configs = @{
-    'B_OFF' = @{ Mode = 'Balanced'; Preview = 'OFF'; Desc = 'Balanced (SmoothLive), Preview OFF'; TargetMaxQ = '3'; TargetResMs = $null }
-    'B_ON'  = @{ Mode = 'Balanced'; Preview = 'ON';  Desc = 'Balanced (SmoothLive), Preview ON';  TargetMaxQ = '3'; TargetResMs = $null }
-    'F_OFF' = @{ Mode = 'Fastest';  Preview = 'OFF'; Desc = 'Fastest (LowLatency 1-frame), Preview OFF'; TargetMaxQ = '1'; TargetResMs = $null }
-    'F_ON'  = @{ Mode = 'Fastest';  Preview = 'ON';  Desc = 'Fastest (LowLatency 1-frame), Preview ON';  TargetMaxQ = '1'; TargetResMs = $null }
-    'C_OFF' = @{ Mode = 'Custom';   Preview = 'OFF'; Desc = 'Custom (2 frames / 25 ms), Preview OFF'; TargetMaxQ = '2'; TargetResMs = '25' }
-    'C_ON'  = @{ Mode = 'Custom';   Preview = 'ON';  Desc = 'Custom (2 frames / 25 ms), Preview ON';  TargetMaxQ = '2'; TargetResMs = '25' }
+$configs = if ($null -ne $BenchmarkConfigs) { $BenchmarkConfigs } else {
+    @{
+        'B_OFF' = @{ Mode = 'Balanced'; Preview = 'OFF'; Desc = 'Balanced (SmoothLive), Preview OFF'; TargetMaxQ = '3'; TargetResMs = $null }
+        'B_ON'  = @{ Mode = 'Balanced'; Preview = 'ON';  Desc = 'Balanced (SmoothLive), Preview ON';  TargetMaxQ = '3'; TargetResMs = $null }
+        'F_OFF' = @{ Mode = 'Fastest';  Preview = 'OFF'; Desc = 'Fastest (LowLatency 1-frame), Preview OFF'; TargetMaxQ = '1'; TargetResMs = $null }
+        'F_ON'  = @{ Mode = 'Fastest';  Preview = 'ON';  Desc = 'Fastest (LowLatency 1-frame), Preview ON';  TargetMaxQ = '1'; TargetResMs = $null }
+        'C_OFF' = @{ Mode = 'Custom';   Preview = 'OFF'; Desc = 'Custom (2 frames / 25 ms), Preview OFF'; TargetMaxQ = '2'; TargetResMs = '25' }
+        'C_ON'  = @{ Mode = 'Custom';   Preview = 'ON';  Desc = 'Custom (2 frames / 25 ms), Preview ON';  TargetMaxQ = '2'; TargetResMs = '25' }
+    }
 }
 
 $runsToExecute = if ($RunId -eq 'All') {
@@ -147,135 +154,6 @@ function Get-HostManifest {
         exe_path       = $exePath
         exe_sha256     = $exeHash
         exe_timestamp  = $exeTime
-    }
-}
-
-$hostInfo = Get-HostManifest
-
-function Test-LiveTelemetryTarget {
-    param(
-        [string]$Path,
-        [hashtable]$ExpectedCfg
-    )
-
-    if (-not (Test-Path -LiteralPath $Path)) {
-        return @{
-            IsReady = $false
-            Errors = @("Log file not found at: $Path")
-            Details = @{}
-        }
-    }
-
-    $tailLines = @()
-    try {
-        $fs = [System.IO.FileStream]::new($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        try {
-            $seekPos = [Math]::Max(0L, $fs.Length - 16384L)
-            $null = $fs.Seek($seekPos, [System.IO.SeekOrigin]::Begin)
-            $buf = New-Object byte[] ([int]($fs.Length - $seekPos))
-            $read = $fs.Read($buf, 0, $buf.Length)
-            $tailText = [System.Text.Encoding]::UTF8.GetString($buf, 0, $read)
-            $tailLines = $tailText -split "`r?`n"
-        } finally {
-            $fs.Dispose()
-        }
-    } catch {
-        return @{
-            IsReady = $false
-            Errors = @("Failed to read log file: $($_.Exception.Message)")
-            Details = @{}
-        }
-    }
-
-    $lastMeta = $null
-    $lastVideo = $null
-    $lastPresent = $null
-    $lastOutAge = $null
-
-    for ($i = $tailLines.Count - 1; $i -ge 0; $i--) {
-        $line = $tailLines[$i]
-        if ($null -eq $lastMeta -and $line -match '\[METADATA\](?: cycle=\d+ \|)? commit=(?<commit>[^ ]*) \| transport=[^ ]* \| stream_mode=(?<mode>[^ ]*) \| policy\(max_q=(?<mq>\d+), res_ms=(?<rms>\d+), cad_pct=\d+, always_latest=(?<al>\d+)\) \| req_quality=[^ |]*(?: \| active_quality=[^ |]* \| quality_pending=(?<qp>[^ |]*))?(?: \| preview_visible=(?<pv>[^ |]*))?') {
-            $lastMeta = @{
-                commit          = $Matches.commit
-                mode            = $Matches.mode
-                max_q           = $Matches.mq
-                res_ms          = $Matches.rms
-                always_latest   = $Matches.al
-                quality_pending = if ($Matches.ContainsKey('qp')) { $Matches.qp } else { '0' }
-                preview_visible = if ($Matches.ContainsKey('pv')) { $Matches.pv } else { $null }
-            }
-        }
-        if ($null -eq $lastVideo -and $line -match '\[STATS\] VIDEO:.*?dec=(?<dec>\d+) fps') {
-            $lastVideo = @{ dec = [int]$Matches.dec }
-        }
-        if ($null -eq $lastPresent -and $line -match '\[STATS\] PRESENT:.*?output\(att=(?<oatt>\d+), ok=(?<ook>\d+), skip=(?<oskip>\d+), err=(?<oerr>\d+)\) \| preview\(att=(?<patt>\d+), ok=(?<pok>\d+)') {
-            $lastPresent = @{
-                o_ok = [int64]$Matches.ook
-                p_ok = [int64]$Matches.pok
-                p_att = [int64]$Matches.patt
-            }
-        }
-        if ($null -eq $lastOutAge -and $line -match '\[FRAME AGE OUTPUT\] count=(?<cnt>\d+)') {
-            $lastOutAge = @{ count = [int64]$Matches.cnt }
-        }
-    }
-
-    $errors = @()
-    if ($null -eq $lastMeta) {
-        $errors += "No [METADATA] telemetry record found in recent log."
-    } else {
-        if ($lastMeta.mode -ne $ExpectedCfg.Mode) {
-            $errors += "stream_mode mismatch: telemetry reported '$($lastMeta.mode)', expected '$($ExpectedCfg.Mode)'."
-        }
-        if ($ExpectedCfg.Mode -eq 'Custom') {
-            if ($lastMeta.max_q -ne '2' -or $lastMeta.res_ms -ne '25') {
-                $errors += "Custom policy params mismatch: telemetry policy(max_q=$($lastMeta.max_q), res_ms=$($lastMeta.res_ms)), expected (max_q=2, res_ms=25)."
-            }
-        } elseif ($ExpectedCfg.Mode -eq 'Fastest') {
-            if ($lastMeta.max_q -ne '1') {
-                $errors += "Fastest policy max_q mismatch: telemetry max_q=$($lastMeta.max_q), expected 1."
-            }
-        } elseif ($ExpectedCfg.Mode -eq 'Balanced') {
-            if ($lastMeta.max_q -ne '3') {
-                $errors += "Balanced policy max_q mismatch: telemetry max_q=$($lastMeta.max_q), expected 3."
-            }
-        }
-
-        if ($lastMeta.quality_pending -ne '0') {
-            $errors += "quality_pending is not 0 (reported: $($lastMeta.quality_pending)). Settings not yet applied."
-        }
-
-        $expectedPrev = ($ExpectedCfg.Preview -eq 'ON')
-        if ($null -ne $lastMeta.preview_visible) {
-            $actualPrev = ($lastMeta.preview_visible -eq '1')
-            if ($actualPrev -ne $expectedPrev) {
-                $errors += "Preview visibility mismatch: telemetry preview_visible=$($lastMeta.preview_visible), expected $(if ($expectedPrev) { '1' } else { '0' })."
-            }
-        } elseif ($null -ne $lastPresent) {
-            $hasPrevPresent = ($lastPresent.p_att -gt 0 -or $lastPresent.p_ok -gt 0)
-            if ($expectedPrev -and -not $hasPrevPresent) {
-                $errors += "Preview is expected ON, but present counter shows 0 preview attempts/ok."
-            }
-        }
-    }
-
-    if ($null -eq $lastVideo -or $lastVideo.dec -le 0) {
-        $errors += "No active decoded video stream detected (v_dec_fps <= 0). Ensure iPhone AirPlay Mirroring is active."
-    }
-
-    if ($null -ne $lastOutAge -and $lastOutAge.count -le 0) {
-        $errors += "out_age_count <= 0. Frame scheduler has not presented frames to display yet."
-    }
-
-    return @{
-        IsReady = ($errors.Count -eq 0)
-        Errors  = $errors
-        Details = @{
-            meta    = $lastMeta
-            video   = $lastVideo
-            present = $lastPresent
-            out_age = $lastOutAge
-        }
     }
 }
 
@@ -358,13 +236,14 @@ foreach ($currentRunId in $runsToExecute) {
     Write-Host "Starting measurement: $DurationSeconds seconds from byte offset $startByteOffset..." -ForegroundColor Green
     $collectorScript = Join-Path $scriptDir "capture-media-metrics.ps1"
 
-    # Step 3: Run collector with offset isolation and raw log recording
+    # Step 3: Run collector with offset isolation, raw log recording, and strict cycle boundaries
     & powershell -ExecutionPolicy Bypass -File $collectorScript `
         -OutputPath $csvPath `
         -DurationSeconds $DurationSeconds `
         -LogPath $LogPath `
         -StartByteOffset $startByteOffset `
-        -RawLogOutputPath $rawLogPath
+        -RawLogOutputPath $rawLogPath `
+        -StrictCycles
 
     $measurementEndUtc = [DateTime]::UtcNow
 
@@ -372,12 +251,6 @@ foreach ($currentRunId in $runsToExecute) {
     $isValidStream = $false
     $validationNotes = @()
     $totalRows = 0
-    $activeDecodedRows = 0
-    $qualityPendingRows = 0
-    $modeMismatchRows = 0
-    $previewMismatchRows = 0
-    $customParamMismatchRows = 0
-    $deltaOutputOk = [int64]0
     $appReportedCommit = 'unknown'
 
     if (Test-Path -LiteralPath $csvPath) {
@@ -386,60 +259,13 @@ foreach ($currentRunId in $runsToExecute) {
         if ($totalRows -gt 0) {
             $appReportedCommit = $rows[-1].commit
 
-            # Reset-aware calculation of delta output_ok
-            $prevOk = $null
-            foreach ($r in $rows) {
-                if ($r.output_ok -ne '' -and $null -ne $r.output_ok) {
-                    $currOk = [int64]$r.output_ok
-                    if ($null -ne $prevOk) {
-                        if ($currOk -ge $prevOk) {
-                            $deltaOutputOk += ($currOk - $prevOk)
-                        } else {
-                            $deltaOutputOk += $currOk # counter reset / reconnect
-                        }
-                    }
-                    $prevOk = $currOk
-                }
-
-                if ([double]$r.v_dec_fps -gt 0) { $activeDecodedRows++ }
-                if ($r.quality_pending -ne '0' -and $r.quality_pending -ne 'false') { $qualityPendingRows++ }
-
-                # Verify mode stability during measurement
-                if ($r.stream_mode -ne $cfg.Mode) { $modeMismatchRows++ }
-
-                if ($cfg.Mode -eq 'Custom') {
-                    if ($r.policy_max_q -ne '2' -or $r.policy_res_ms -ne '25') {
-                        $customParamMismatchRows++
-                    }
-                }
-
-                $expPrevVal = if ($cfg.Preview -eq 'ON') { '1' } else { '0' }
-                if ($r.preview_visible -ne '' -and $r.preview_visible -ne $expPrevVal) {
-                    $previewMismatchRows++
-                }
-            }
-
-            if ($qualityPendingRows -gt 0) {
-                $validationNotes += "DISQUALIFIED: Detected $qualityPendingRows cycles with quality_pending != 0 during measurement."
-            }
-            if ($modeMismatchRows -gt 0) {
-                $validationNotes += "DISQUALIFIED: Detected $modeMismatchRows cycles where stream_mode deviated from target '$($cfg.Mode)'."
-            }
-            if ($customParamMismatchRows -gt 0) {
-                $validationNotes += "DISQUALIFIED: Detected $customParamMismatchRows cycles where Custom policy deviated from 2F/25ms."
-            }
-            if ($previewMismatchRows -gt 0) {
-                $validationNotes += "DISQUALIFIED: Detected $previewMismatchRows cycles where preview_visible deviated from target $($cfg.Preview)."
-            }
-            if ($deltaOutputOk -le 0) {
-                $validationNotes += "DISQUALIFIED: Output Present count did not advance (delta_output_ok <= 0)."
-            }
-            if ($activeDecodedRows -le ($totalRows * 0.5)) {
-                $validationNotes += "DISQUALIFIED: Less than 50% of cycles contained active decoded frames ($activeDecodedRows / $totalRows)."
-            }
-
-            if ($validationNotes.Count -eq 0) {
+            $valRes = Test-BenchmarkRunValidation -RunId $currentRunId -Manifest @{ status = 'VALID_STREAM' } -Rows $rows
+            if ($valRes.IsValid) {
                 $isValidStream = $true
+            } else {
+                foreach ($r in $valRes.Reasons) {
+                    $validationNotes += "DISQUALIFIED: $r"
+                }
             }
         } else {
             $validationNotes += "DISQUALIFIED: CSV file is empty (no completed cycles captured after offset)."
@@ -448,7 +274,13 @@ foreach ($currentRunId in $runsToExecute) {
         $validationNotes += "DISQUALIFIED: CSV output file was not created."
     }
 
-    $statusStr = if ($isValidStream) { "VALID_STREAM" } else { "INVALID_OR_NO_STREAM" }
+    $statusStr = if ($isValidStream) {
+        "VALID_STREAM"
+    } elseif ($valRes -and $valRes.Status) {
+        $valRes.Status
+    } else {
+        "INVALID_OR_NO_STREAM"
+    }
 
     $manifest = [ordered]@{
         run_id                 = $currentRunId
@@ -479,9 +311,8 @@ foreach ($currentRunId in $runsToExecute) {
         csv_file               = "metrics.csv"
         raw_log_file           = "metrics_raw.log"
         total_cycles           = $totalRows
-        active_cycles          = $activeDecodedRows
-        delta_output_ok        = $deltaOutputOk
-        quality_pending_cycles = $qualityPendingRows
+        active_cycles          = if ($valRes -and $valRes.ValidRows) { $valRes.ValidRows.Count } else { 0 }
+        delta_output_ok        = if ($valRes -and $valRes.ContainsKey('OutOkDelta')) { $valRes.OutOkDelta } else { 0 }
         validation_notes       = $validationNotes
     }
 
