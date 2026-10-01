@@ -236,6 +236,11 @@ private:
     std::atomic<bool> m_use_present_00{true}; // Default to app-controlled pacing via Present(0,0) + waitable object
     std::atomic<bool> m_non_blocking{false};
 
+    // Render-thread-only windowed duration samples for 1s percentiles
+    std::vector<double> m_vp_samples;
+    std::vector<double> m_present_samples;
+    int64_t             m_last_render_stats_time_ns{0};
+
     bool m_vc1_warned{false}; // one-shot: log ID3D11VideoContext1 QI failure once
 };
 

@@ -170,11 +170,13 @@ bool FrameScheduler::PopLatestValidFrame(VideoFrame& out_frame, uint64_t& out_su
 
     // 1. Purge stale generation frames from the front
 
+    const uint64_t active_gen = m_active_generation.load(std::memory_order_acquire);
+
     while (!m_decoded_queue.empty() &&
 
-           m_active_generation != 0 &&
+           active_gen != 0 &&
 
-           m_decoded_queue.front().format_generation < m_active_generation) {
+           m_decoded_queue.front().format_generation < active_gen) {
 
         m_decoded_queue.pop_front();
 
@@ -374,7 +376,9 @@ void FrameScheduler::PushFrame(VideoFrame frame) noexcept {
 
     // Format generation transition handling
 
-    if (frame.format_generation > m_active_generation) {
+    const uint64_t current_active_gen = m_active_generation.load(std::memory_order_acquire);
+
+    if (frame.format_generation > current_active_gen) {
 
         {
 
@@ -428,15 +432,15 @@ void FrameScheduler::PushFrame(VideoFrame frame) noexcept {
 
         }
 
-        m_active_generation       = frame.format_generation;
+        m_active_generation.store(frame.format_generation, std::memory_order_release);
 
-        m_last_presented_sequence = 0;
+        m_last_presented_sequence.store(0, std::memory_order_release);
 
         m_clock_anchored.store(false, std::memory_order_relaxed);
 
-        GlobalMetrics().video_format_generation.store(m_active_generation, std::memory_order_relaxed);
+        GlobalMetrics().video_format_generation.store(frame.format_generation, std::memory_order_relaxed);
 
-    } else if (frame.format_generation < m_active_generation) {
+    } else if (frame.format_generation < current_active_gen) {
 
         GlobalMetrics().video_stale_generation_drops.fetch_add(1, std::memory_order_relaxed);
 
@@ -483,7 +487,7 @@ void FrameScheduler::PushFrame(VideoFrame frame) noexcept {
 
             // Evaluate staleness: staleness threshold ~1.5 - 2x observed display refresh interval
 
-            const double staleness_threshold_ms = m_observed_display_interval_ms * 1.75;
+            const double staleness_threshold_ms = m_observed_display_interval_ms.load(std::memory_order_relaxed) * 1.75;
 
             const int64_t now_qpc = clock::NowQpcTicks();
 
@@ -572,7 +576,9 @@ void FrameScheduler::PushFrame(VideoFrame frame) noexcept {
 
         // Check if frame is too late relative to current presentation position
 
-        if (m_prev_pts_ns > 0 && frame.pts_ns < m_prev_pts_ns) {
+        const int64_t prev_pts = m_prev_pts_ns.load(std::memory_order_relaxed);
+
+        if (prev_pts > 0 && frame.pts_ns < prev_pts) {
 
             GlobalMetrics().video_presentation_late_drops.fetch_add(1, std::memory_order_relaxed);
 
@@ -623,6 +629,8 @@ void FrameScheduler::PushFrame(VideoFrame frame) noexcept {
 
 
 void FrameScheduler::UpdateCadenceEstimate(int64_t pts_ns) noexcept {
+
+    std::lock_guard lock{m_cadence_mutex};
 
     if (m_last_source_pts_ns <= 0 || pts_ns <= m_last_source_pts_ns) {
 
@@ -808,49 +816,39 @@ void FrameScheduler::Flush() noexcept {
 
     }
 
-    m_active_generation           = 0;
+    m_active_generation.store(0, std::memory_order_release);
 
-    m_last_presented_sequence     = 0;
+    m_last_presented_sequence.store(0, std::memory_order_release);
 
-    m_prev_pts_ns                 = 0;
+    m_prev_pts_ns.store(0, std::memory_order_relaxed);
 
     m_render_start_ns             = 0;
 
     m_pts_origin_ns               = 0;
 
-    m_last_source_pts_ns          = 0;
-
-    m_last_present_time_ns        = 0;
-
-    m_last_dxgi_ready_qpc         = 0;
-
-    m_dxgi_ready_samples.clear();
-
     m_clock_anchored.store(false, std::memory_order_relaxed);
 
-    m_cadence_delta_history.clear();
+    m_render_reset_requested.store(true, std::memory_order_release);
 
-    m_current_cadence_class       = CadenceClass::Class30;
+    {
 
-    m_candidate_cadence_class     = CadenceClass::Unknown;
+        std::lock_guard lock{m_cadence_mutex};
 
-    m_consecutive_candidate_evals = 0;
+        m_last_source_pts_ns          = 0;
 
-    m_cadence_eval_counter        = 0;
+        m_cadence_delta_history.clear();
 
-    m_pts_delta_samples.clear();
+        m_current_cadence_class       = CadenceClass::Class30;
 
-    m_wake_error_samples.clear();
+        m_candidate_cadence_class     = CadenceClass::Unknown;
 
-    m_lateness_samples.clear();
+        m_consecutive_candidate_evals = 0;
 
-    m_decode_to_present_samples.clear();
+        m_cadence_eval_counter        = 0;
 
-    m_queue_age_samples.clear();
+        m_pts_delta_samples.clear();
 
-    m_present_call_samples.clear();
-
-    m_present_interval_samples.clear();
+    }
 
     GlobalMetrics().session_q_full.store(0, std::memory_order_relaxed);
 
@@ -976,6 +974,30 @@ void FrameScheduler::SchedulerLoopGameLowLatency(std::stop_token stop) noexcept 
 
     while (!stop.stop_requested() && m_running.load(std::memory_order_acquire)) {
 
+        if (m_render_reset_requested.exchange(false, std::memory_order_acq_rel)) {
+
+            m_dxgi_ready_samples.clear();
+
+            m_dxgi_wait_samples.clear();
+
+            m_wake_error_samples.clear();
+
+            m_lateness_samples.clear();
+
+            m_decode_to_present_samples.clear();
+
+            m_queue_age_samples.clear();
+
+            m_present_call_samples.clear();
+
+            m_present_interval_samples.clear();
+
+            m_last_dxgi_ready_qpc = 0;
+
+            m_last_present_time_ns = 0;
+
+        }
+
         bool queue_empty = false;
 
         {
@@ -1020,15 +1042,21 @@ void FrameScheduler::SchedulerLoopGameLowLatency(std::stop_token stop) noexcept 
 
         if (waitable) {
 
+            int64_t wait_start_qpc = clock::NowQpcTicks();
+
             DWORD wr = ::WaitForSingleObject(waitable, 100);
 
             if (stop.stop_requested()) break;
 
             if (wr == WAIT_OBJECT_0) {
 
-                GlobalMetrics().dxgi_ready_signals.fetch_add(1, std::memory_order_relaxed);
-
                 int64_t now_qpc = clock::NowQpcTicks();
+
+                double wait_ms = clock::QpcDeltaMs(wait_start_qpc, now_qpc);
+
+                m_dxgi_wait_samples.push_back(wait_ms);
+
+                GlobalMetrics().dxgi_ready_signals.fetch_add(1, std::memory_order_relaxed);
 
                 if (m_last_dxgi_ready_qpc > 0) {
 
@@ -1038,7 +1066,9 @@ void FrameScheduler::SchedulerLoopGameLowLatency(std::stop_token stop) noexcept 
 
                     if (delta_ms >= 5.0 && delta_ms <= 50.0) {
 
-                        m_observed_display_interval_ms = 0.9 * m_observed_display_interval_ms + 0.1 * delta_ms;
+                        const double cur_interval = m_observed_display_interval_ms.load(std::memory_order_relaxed);
+
+                        m_observed_display_interval_ms.store(0.9 * cur_interval + 0.1 * delta_ms, std::memory_order_relaxed);
 
                     }
 
@@ -1090,9 +1120,11 @@ void FrameScheduler::SchedulerLoopGameLowLatency(std::stop_token stop) noexcept 
 
             // Sequence order verification: never present older frame after newer already presented
 
-            if (frame.sequence_number != 0 && m_last_presented_sequence != 0 &&
+            const uint64_t last_seq = m_last_presented_sequence.load(std::memory_order_acquire);
 
-                frame.sequence_number <= m_last_presented_sequence) {
+            if (frame.sequence_number != 0 && last_seq != 0 &&
+
+                frame.sequence_number <= last_seq) {
 
                 GlobalMetrics().video_presentation_late_drops.fetch_add(1, std::memory_order_relaxed);
 
@@ -1110,7 +1142,9 @@ void FrameScheduler::SchedulerLoopGameLowLatency(std::stop_token stop) noexcept 
 
             // Generation verification
 
-            if (frame.format_generation != m_active_generation && m_active_generation != 0) {
+            const uint64_t active_gen = m_active_generation.load(std::memory_order_acquire);
+
+            if (frame.format_generation != active_gen && active_gen != 0) {
 
                 GlobalMetrics().video_stale_generation_drops.fetch_add(1, std::memory_order_relaxed);
 
@@ -1126,7 +1160,7 @@ void FrameScheduler::SchedulerLoopGameLowLatency(std::stop_token stop) noexcept 
 
 
 
-            m_last_presented_sequence = frame.sequence_number;
+            m_last_presented_sequence.store(frame.sequence_number, std::memory_order_release);
 
 
 
@@ -1198,7 +1232,7 @@ void FrameScheduler::SchedulerLoopGameLowLatency(std::stop_token stop) noexcept 
 
             GlobalMetrics().presentation_ticks.fetch_add(1, std::memory_order_relaxed);
 
-            m_prev_pts_ns = frame.pts_ns;
+            m_prev_pts_ns.store(frame.pts_ns, std::memory_order_relaxed);
 
         } else {
 
@@ -1218,7 +1252,17 @@ void FrameScheduler::SchedulerLoopGameLowLatency(std::stop_token stop) noexcept 
 
         } else if (stats_now - m_last_metrics_sample_ns >= 1'000'000'000LL) {
 
-            CalcDiagnosticsStats(m_pts_delta_samples,
+            std::vector<double> pts_samples_copy;
+
+            {
+
+                std::lock_guard cadence_lock{m_cadence_mutex};
+
+                pts_samples_copy.swap(m_pts_delta_samples);
+
+            }
+
+            CalcDiagnosticsStats(pts_samples_copy,
 
                                  GlobalMetrics().video_pts_delta_avg_ms,
 
@@ -1260,13 +1304,31 @@ void FrameScheduler::SchedulerLoopGameLowLatency(std::stop_token stop) noexcept 
 
                                  &GlobalMetrics().dxgi_ready_interval_max_ms);
 
+            const uint64_t dxgi_wait_cnt = m_dxgi_wait_samples.size();
+
+            CalcDiagnosticsStats(m_dxgi_wait_samples,
+
+                                 GlobalMetrics().dxgi_wait_avg_ms,
+
+                                 &GlobalMetrics().dxgi_wait_p50_ms,
+
+                                 &GlobalMetrics().dxgi_wait_p95_ms,
+
+                                 &GlobalMetrics().dxgi_wait_max_ms);
+
+            GlobalMetrics().dxgi_wait_sample_count.store(dxgi_wait_cnt, std::memory_order_relaxed);
+
+            const uint64_t q_res_cnt = queue_residence_samples.size();
+
             CalcDiagnosticsStats(queue_residence_samples,
 
                                  GlobalMetrics().queue_residence_avg_ms,
 
-                                 nullptr,
+                                 &GlobalMetrics().queue_residence_p50_ms,
 
                                  &GlobalMetrics().queue_residence_p95_ms);
+
+            GlobalMetrics().queue_residence_sample_count.store(q_res_cnt, std::memory_order_relaxed);
 
 
 
@@ -1377,6 +1439,30 @@ void FrameScheduler::SchedulerLoopPresentationClock(std::stop_token stop) noexce
 
 
     while (!stop.stop_requested() && m_running.load(std::memory_order_acquire)) {
+
+        if (m_render_reset_requested.exchange(false, std::memory_order_acq_rel)) {
+
+            m_dxgi_ready_samples.clear();
+
+            m_dxgi_wait_samples.clear();
+
+            m_wake_error_samples.clear();
+
+            m_lateness_samples.clear();
+
+            m_decode_to_present_samples.clear();
+
+            m_queue_age_samples.clear();
+
+            m_present_call_samples.clear();
+
+            m_present_interval_samples.clear();
+
+            m_last_dxgi_ready_qpc = 0;
+
+            m_last_present_time_ns = 0;
+
+        }
 
         int64_t cur_tick_interval = m_tick_interval_ns.load(std::memory_order_relaxed);
 
@@ -1588,7 +1674,7 @@ void FrameScheduler::SchedulerLoopPresentationClock(std::stop_token stop) noexce
 
             GlobalMetrics().presentation_unique_frames.fetch_add(1, std::memory_order_relaxed);
 
-            m_prev_pts_ns = frame_to_present.pts_ns;
+            m_prev_pts_ns.store(frame_to_present.pts_ns, std::memory_order_relaxed);
 
         } else {
 
@@ -1608,7 +1694,17 @@ void FrameScheduler::SchedulerLoopPresentationClock(std::stop_token stop) noexce
 
         } else if (stats_now - m_last_metrics_sample_ns >= 1'000'000'000LL) {
 
-            CalcDiagnosticsStats(m_pts_delta_samples,
+            std::vector<double> pts_samples_copy;
+
+            {
+
+                std::lock_guard cadence_lock{m_cadence_mutex};
+
+                pts_samples_copy.swap(m_pts_delta_samples);
+
+            }
+
+            CalcDiagnosticsStats(pts_samples_copy,
 
                                  GlobalMetrics().video_pts_delta_avg_ms,
 

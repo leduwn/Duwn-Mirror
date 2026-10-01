@@ -111,14 +111,18 @@ int main() {
     int passed = 0, failed = 0;
     for (auto& tc : test_framework::Registry()) {
         try {
+            printf("[RUN ] %.*s\n", static_cast<int>(tc.name.size()), tc.name.data());
+            fflush(stdout);
             tc.fn();
             tc.passed = true;
             printf("[PASS] %.*s\n", static_cast<int>(tc.name.size()), tc.name.data());
+            fflush(stdout);
             ++passed;
         } catch (const std::exception& e) {
             tc.passed = false;
             printf("[FAIL] %.*s: %s\n",
                 static_cast<int>(tc.name.size()), tc.name.data(), e.what());
+            fflush(stdout);
             ++failed;
         }
     }

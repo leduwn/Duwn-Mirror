@@ -10,9 +10,12 @@ by `App`. The decoded queue always held up to three frames. The app's
 `SchedulerConfig::max_queue_depth = 2` only applied to the experimental
 PresentationClock path, which production does not use.
 
-The software/no-DXGI-waitable path also waited on the frame event a second time
+The software/no-DXGI-waitable fallback path also waited on the frame event a second time
 after consuming it, adding up to a 16 ms timeout to a frame already available.
-This change removes that redundant wait; hardware DXGI pacing remains active.
+This change removes that redundant `WaitForSingleObject(event, 16)` in the fallback scheduler;
+it did NOT remove `WaitForSingleObjectEx` on the DXGI swap chain frame latency waitable object
+in the hardware renderer (`SetMaximumFrameLatency(1)`), which remains active for low-latency
+GPU presentation pacing without holding decoded queue locks.
 
 The prior receiver audit is decisive for the transport configuration:
 

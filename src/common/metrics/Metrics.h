@@ -54,6 +54,19 @@ struct alignas(64) Metrics {
     std::atomic<uint64_t> video_decoder_gap_drops{0};
     std::atomic<uint64_t> preview_skips{0};
 
+    // Video Presentation Call Classification (Primary Output vs Preview)
+    std::atomic<uint64_t> video_present_attempts{0};
+    std::atomic<uint64_t> video_present_ok{0};
+    std::atomic<uint64_t> video_present_skipped{0};
+    std::atomic<uint64_t> video_present_errors{0};
+
+    std::atomic<uint64_t> preview_present_attempts{0};
+    std::atomic<uint64_t> preview_present_ok{0};
+    std::atomic<uint64_t> preview_present_skipped{0};
+    std::atomic<uint64_t> preview_present_errors{0};
+    std::atomic<double>   preview_vp_duration_avg_ms{0.0};
+    std::atomic<double>   preview_present_duration_avg_ms{0.0};
+
     // HEVC RFC 7798 Depacketizer Counters (Phase 15E)
     std::atomic<uint64_t> hevc_fu_started{0};
     std::atomic<uint64_t> hevc_fu_completed{0};
@@ -85,11 +98,17 @@ struct alignas(64) Metrics {
 
     // End-to-End Frame Lifecycle Durations (Phase 12)
     std::atomic<double>   queue_residence_avg_ms{0.0};
+    std::atomic<double>   queue_residence_p50_ms{0.0};
     std::atomic<double>   queue_residence_p95_ms{0.0};
+    std::atomic<uint64_t> queue_residence_sample_count{0};
     std::atomic<double>   vp_duration_avg_ms{0.0};
+    std::atomic<double>   vp_duration_p50_ms{0.0};
     std::atomic<double>   vp_duration_p95_ms{0.0};
+    std::atomic<uint64_t> vp_sample_count{0};
     std::atomic<double>   present_duration_avg_ms{0.0};
+    std::atomic<double>   present_duration_p50_ms{0.0};
     std::atomic<double>   present_duration_p95_ms{0.0};
+    std::atomic<uint64_t> present_sample_count{0};
     std::atomic<double>   total_pipeline_avg_ms{0.0};
     std::atomic<double>   total_pipeline_p95_ms{0.0};
 
@@ -115,6 +134,7 @@ struct alignas(64) Metrics {
     std::atomic<double>   dxgi_wait_p50_ms{0.0};
     std::atomic<double>   dxgi_wait_p95_ms{0.0};
     std::atomic<double>   dxgi_wait_max_ms{0.0};
+    std::atomic<uint64_t> dxgi_wait_sample_count{0};
 
     // Source Cadence Classification
     std::atomic<double>   source_nominal_fps{30.0};
@@ -122,7 +142,10 @@ struct alignas(64) Metrics {
     std::atomic<double>   source_jitter_p95_ms{0.0};
     std::atomic<uint64_t> source_outliers{0};
 
-    std::atomic<double>   video_decode_time_ms{0.0};  // rolling avg
+    std::atomic<double>   video_decode_time_ms{0.0};  // rolling avg / 1s avg
+    std::atomic<double>   video_decode_p50_ms{0.0};
+    std::atomic<double>   video_decode_p95_ms{0.0};
+    std::atomic<uint64_t> video_decode_sample_count{0};
     std::atomic<double>   video_render_time_ms{0.0};  // rolling avg
     std::atomic<int32_t>  video_queue_depth{0};
     std::atomic<uint64_t> video_format_generation{0};

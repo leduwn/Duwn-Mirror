@@ -451,20 +451,45 @@ PresentResult VideoRenderer::Present(const VideoFrame& frame) noexcept {
 }
 
 PresentResult VideoRenderer::Present(VideoFrame& frame, bool skip_wait) noexcept {
-    if (!m_swap_chain || !m_video_device || !m_video_context)
-        return PresentResult::Skipped;
-    if (!frame.texture || (frame.format != DXGI_FORMAT_NV12 && frame.format != DXGI_FORMAT_P010))
-        return PresentResult::Skipped;
-
     const bool is_non_blocking = m_non_blocking.load(std::memory_order_relaxed);
+
+    if (is_non_blocking) {
+        duwn::GlobalMetrics().preview_present_attempts.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        duwn::GlobalMetrics().video_present_attempts.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    auto record_skipped = [is_non_blocking]() noexcept -> PresentResult {
+        if (is_non_blocking) {
+            duwn::GlobalMetrics().preview_present_skipped.fetch_add(1, std::memory_order_relaxed);
+            duwn::GlobalMetrics().preview_skips.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            duwn::GlobalMetrics().video_present_skipped.fetch_add(1, std::memory_order_relaxed);
+        }
+        return PresentResult::Skipped;
+    };
+
+    auto record_error = [is_non_blocking](PresentResult res) noexcept -> PresentResult {
+        if (is_non_blocking) {
+            duwn::GlobalMetrics().preview_present_errors.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            duwn::GlobalMetrics().video_present_errors.fetch_add(1, std::memory_order_relaxed);
+        }
+        return res;
+    };
+
+    if (!m_swap_chain || !m_video_device || !m_video_context)
+        return record_skipped();
+    if (!frame.texture || (frame.format != DXGI_FORMAT_NV12 && frame.format != DXGI_FORMAT_P010))
+        return record_skipped();
 
     // --- 1. Apply pending window resize ---
     const ResizeResult rr = ApplyPendingResize();
-    if (rr == ResizeResult::DeviceLost) return PresentResult::DeviceLost;
+    if (rr == ResizeResult::DeviceLost) return record_error(PresentResult::DeviceLost);
     if (rr == ResizeResult::Failed) {
         // Transient resize failure during interactive drag must NOT terminate app
         DUWN_LOG_WARN("VideoRenderer", "ApplyPendingResize transient failure — frame skipped");
-        return PresentResult::Skipped;
+        return record_skipped();
     }
 
     // --- 2. Rebuild VP ONLY when CODED texture dims change ---
@@ -478,21 +503,21 @@ PresentResult VideoRenderer::Present(VideoFrame& frame, bool skip_wait) noexcept
             frame.width, frame.height, frame.format_generation);
         if (is_non_blocking) {
             std::unique_lock lock{m_device.ContextMutex(), std::try_to_lock};
-            if (!lock.owns_lock()) return PresentResult::Skipped;
+            if (!lock.owns_lock()) return record_skipped();
             if (!RebuildVideoProcessor(frame.width, frame.height,
                                        m_swap_width, m_swap_height, frame.format))
-                return PresentResult::Skipped;
+                return record_skipped();
         } else {
             std::lock_guard lock{m_device.ContextMutex()};
             if (!RebuildVideoProcessor(frame.width, frame.height,
                                        m_swap_width, m_swap_height, frame.format))
-                return PresentResult::Skipped;
+                return record_skipped();
         }
     }
     m_active_source_generation = frame.format_generation;
 
     // m_output_view must exist now (RebuildVideoProcessor ensures it).
-    if (!m_output_view) return PresentResult::Skipped;
+    if (!m_output_view) return record_skipped();
 
     // --- 3. Per-frame InputView (distinct texture/subresource each frame) ---
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv_desc{};
@@ -508,7 +533,7 @@ PresentResult VideoRenderer::Present(VideoFrame& frame, bool skip_wait) noexcept
         DUWN_LOG_WARNF("VideoRenderer",
             "subsystem=VideoRenderer function=Present operation=CreateVideoProcessorInputView hr={:#010x} subresource={} thread_id={}",
             static_cast<unsigned>(hr), frame.subresource, ::GetCurrentThreadId());
-        return PresentResult::Skipped;
+        return record_skipped();
     }
 
     // --- 4. Compute rects ---
@@ -570,7 +595,7 @@ PresentResult VideoRenderer::Present(VideoFrame& frame, bool skip_wait) noexcept
             dest_rect.left, dest_rect.top, dest_rect.right, dest_rect.bottom,
             canvas_rect.left, canvas_rect.top, canvas_rect.right, canvas_rect.bottom,
             frame.width, frame.height, ::GetCurrentThreadId());
-        return PresentResult::Skipped;
+        return record_skipped();
     }
 
     D3D11_VIDEO_PROCESSOR_STREAM stream{};
@@ -599,12 +624,12 @@ PresentResult VideoRenderer::Present(VideoFrame& frame, bool skip_wait) noexcept
     }
 
     // --- 6. Render ---
-    frame.vp_begin_qpc = clock::MonotonicClock::NowQpcTicks();
+    const int64_t vp_begin_qpc = clock::MonotonicClock::NowQpcTicks();
     {
         std::unique_lock lock{m_device.ContextMutex(), std::defer_lock};
         if (is_non_blocking) {
             if (!lock.try_lock()) {
-                return PresentResult::Skipped;
+                return record_skipped();
             }
         } else {
             lock.lock();
@@ -630,7 +655,7 @@ PresentResult VideoRenderer::Present(VideoFrame& frame, bool skip_wait) noexcept
         hr = m_video_context->VideoProcessorBlt(
             m_video_processor.Get(), m_output_view.Get(), 0, 1, &stream);
     }
-    frame.vp_end_qpc = clock::MonotonicClock::NowQpcTicks();
+    const int64_t vp_end_qpc = clock::MonotonicClock::NowQpcTicks();
 
     if (FAILED(hr)) {
         if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
@@ -640,52 +665,23 @@ PresentResult VideoRenderer::Present(VideoFrame& frame, bool skip_wait) noexcept
                 "srcTexture={}x{} NV12 visible={}x{} swapchain={}x{} thread_id={}",
                 static_cast<unsigned>(hr), static_cast<unsigned>(removed_reason),
                 frame.width, frame.height, vw, vh, m_swap_width, m_swap_height, ::GetCurrentThreadId());
-            return PresentResult::DeviceLost;
+            return record_error(PresentResult::DeviceLost);
         }
         DUWN_LOG_ERRORF("VideoRenderer",
             "[FATAL] subsystem=VideoRenderer function=Present operation=VideoProcessorBlt hr={:#010x} "
             "srcTexture={}x{} NV12 visible={}x{} swapchain={}x{} thread_id={}",
             static_cast<unsigned>(hr), frame.width, frame.height, vw, vh, m_swap_width, m_swap_height, ::GetCurrentThreadId());
-        return PresentResult::Fatal;
+        return record_error(PresentResult::Fatal);
     }
 
     // --- 7. Present ---
-    frame.present_begin_qpc = frame.vp_end_qpc;
+    const int64_t present_begin_qpc = vp_end_qpc;
     const UINT present_flags = is_non_blocking ? DXGI_PRESENT_DO_NOT_WAIT : 0;
     hr = m_swap_chain->Present(0, present_flags);
-    frame.present_end_qpc = clock::MonotonicClock::NowQpcTicks();
+    const int64_t present_end_qpc = clock::MonotonicClock::NowQpcTicks();
 
     if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
-        return PresentResult::Skipped;
-    }
-
-    if (SUCCEEDED(hr)) {
-        airplay::ConnectionTelemetry::Get().RecordPhase(
-            airplay::ConnectionPhase::FirstPresentedFrame,
-            "Zero-copy DXGI swap chain presented");
-    }
-
-    // Record 8-stage latency telemetry (T0-T7) for primary capture output
-    if (!is_non_blocking) {
-        telemetry::LatencyStageTimestamps stages;
-        stages.t0_rtp_arrival    = frame.rtp_arrival_qpc;
-        stages.t1_au_assembled   = frame.au_received_qpc;
-        stages.t2_decoder_input  = frame.process_input_qpc;
-        stages.t3_decoder_output = frame.process_output_qpc;
-        stages.t4_queue_inserted = frame.queue_push_qpc;
-        stages.t5_frame_selected = frame.queue_pop_qpc;
-        stages.t6_vp_completed   = frame.vp_end_qpc;
-        stages.t7_present_invoked= frame.present_end_qpc;
-        telemetry::LatencyTelemetry::Get().RecordFrameStages(stages);
-    }
-
-    double vp_ms = clock::MonotonicClock::QpcDeltaMs(frame.vp_begin_qpc, frame.vp_end_qpc);
-    double pres_ms = clock::MonotonicClock::QpcDeltaMs(frame.present_begin_qpc, frame.present_end_qpc);
-    duwn::GlobalMetrics().vp_duration_avg_ms.store(vp_ms, std::memory_order_relaxed);
-    duwn::GlobalMetrics().present_duration_avg_ms.store(pres_ms, std::memory_order_relaxed);
-    if (frame.au_received_qpc > 0) {
-        double total_ms = clock::MonotonicClock::QpcDeltaMs(frame.au_received_qpc, frame.present_end_qpc);
-        duwn::GlobalMetrics().total_pipeline_avg_ms.store(total_ms, std::memory_order_relaxed);
+        return record_skipped();
     }
 
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
@@ -693,13 +689,91 @@ PresentResult VideoRenderer::Present(VideoFrame& frame, bool skip_wait) noexcept
         DUWN_LOG_ERRORF("VideoRenderer",
             "[FATAL] subsystem=VideoRenderer function=Present operation=Present (DeviceLost) hr={:#010x} removed_reason={:#010x} swapchain={}x{} thread_id={}",
             static_cast<unsigned>(hr), static_cast<unsigned>(removed_reason), m_swap_width, m_swap_height, ::GetCurrentThreadId());
-        return PresentResult::DeviceLost;
+        return record_error(PresentResult::DeviceLost);
     }
     if (FAILED(hr)) {
         DUWN_LOG_ERRORF("VideoRenderer",
             "[FATAL] subsystem=VideoRenderer function=Present operation=Present hr={:#010x} swapchain={}x{} thread_id={}",
             static_cast<unsigned>(hr), m_swap_width, m_swap_height, ::GetCurrentThreadId());
-        return PresentResult::Fatal;
+        return record_error(PresentResult::Fatal);
+    }
+
+    // --- 8. Telemetry and Timestamps isolation ---
+    if (is_non_blocking) {
+        // Preview presentation successful: update preview-only metrics, do NOT touch frame or Output metrics
+        duwn::GlobalMetrics().preview_present_ok.fetch_add(1, std::memory_order_relaxed);
+        double prev_vp_ms = clock::MonotonicClock::QpcDeltaMs(vp_begin_qpc, vp_end_qpc);
+        double prev_pres_ms = clock::MonotonicClock::QpcDeltaMs(present_begin_qpc, present_end_qpc);
+        duwn::GlobalMetrics().preview_vp_duration_avg_ms.store(prev_vp_ms, std::memory_order_relaxed);
+        duwn::GlobalMetrics().preview_present_duration_avg_ms.store(prev_pres_ms, std::memory_order_relaxed);
+        return PresentResult::Ok;
+    }
+
+    // Primary Output presentation successful:
+    // Update frame QPC timestamps exclusively for primary output
+    frame.vp_begin_qpc      = vp_begin_qpc;
+    frame.vp_end_qpc        = vp_end_qpc;
+    frame.present_begin_qpc = present_begin_qpc;
+    frame.present_end_qpc   = present_end_qpc;
+
+    duwn::GlobalMetrics().video_present_ok.fetch_add(1, std::memory_order_relaxed);
+
+    airplay::ConnectionTelemetry::Get().RecordPhase(
+        airplay::ConnectionPhase::FirstPresentedFrame,
+        "Zero-copy DXGI swap chain presented");
+
+    // Record 8-stage latency telemetry (T0-T7) for primary capture output
+    telemetry::LatencyStageTimestamps stages;
+    stages.t0_rtp_arrival    = frame.rtp_arrival_qpc;
+    stages.t1_au_assembled   = frame.au_received_qpc;
+    stages.t2_decoder_input  = frame.process_input_qpc;
+    stages.t3_decoder_output = frame.process_output_qpc;
+    stages.t4_queue_inserted = frame.queue_push_qpc;
+    stages.t5_frame_selected = frame.queue_pop_qpc;
+    stages.t6_vp_completed   = frame.vp_end_qpc;
+    stages.t7_present_invoked= frame.present_end_qpc;
+    telemetry::LatencyTelemetry::Get().RecordFrameStages(stages);
+
+    const double vp_ms = clock::MonotonicClock::QpcDeltaMs(frame.vp_begin_qpc, frame.vp_end_qpc);
+    const double pres_ms = clock::MonotonicClock::QpcDeltaMs(frame.present_begin_qpc, frame.present_end_qpc);
+    m_vp_samples.push_back(vp_ms);
+    m_present_samples.push_back(pres_ms);
+
+    if (frame.au_received_qpc > 0) {
+        double total_ms = clock::MonotonicClock::QpcDeltaMs(frame.au_received_qpc, frame.present_end_qpc);
+        duwn::GlobalMetrics().total_pipeline_avg_ms.store(total_ms, std::memory_order_relaxed);
+    }
+
+    // 1-Hz windowed percentile calculation for VP and Present (Render-thread owned)
+    const int64_t now_ns = clock::MonotonicClock::Now().time_since_epoch().count();
+    if (m_last_render_stats_time_ns == 0) {
+        m_last_render_stats_time_ns = now_ns;
+    } else if (now_ns - m_last_render_stats_time_ns >= 1'000'000'000LL) {
+        if (!m_vp_samples.empty()) {
+            std::sort(m_vp_samples.begin(), m_vp_samples.end());
+            double sum_vp = 0.0;
+            for (double v : m_vp_samples) sum_vp += v;
+            duwn::GlobalMetrics().vp_duration_avg_ms.store(sum_vp / static_cast<double>(m_vp_samples.size()), std::memory_order_relaxed);
+            duwn::GlobalMetrics().vp_duration_p50_ms.store(m_vp_samples[m_vp_samples.size() / 2], std::memory_order_relaxed);
+            size_t idx95 = static_cast<size_t>(static_cast<double>(m_vp_samples.size()) * 0.95);
+            if (idx95 >= m_vp_samples.size()) idx95 = m_vp_samples.size() - 1;
+            duwn::GlobalMetrics().vp_duration_p95_ms.store(m_vp_samples[idx95], std::memory_order_relaxed);
+            duwn::GlobalMetrics().vp_sample_count.store(m_vp_samples.size(), std::memory_order_relaxed);
+            m_vp_samples.clear();
+        }
+        if (!m_present_samples.empty()) {
+            std::sort(m_present_samples.begin(), m_present_samples.end());
+            double sum_pres = 0.0;
+            for (double p : m_present_samples) sum_pres += p;
+            duwn::GlobalMetrics().present_duration_avg_ms.store(sum_pres / static_cast<double>(m_present_samples.size()), std::memory_order_relaxed);
+            duwn::GlobalMetrics().present_duration_p50_ms.store(m_present_samples[m_present_samples.size() / 2], std::memory_order_relaxed);
+            size_t idx95 = static_cast<size_t>(static_cast<double>(m_present_samples.size()) * 0.95);
+            if (idx95 >= m_present_samples.size()) idx95 = m_present_samples.size() - 1;
+            duwn::GlobalMetrics().present_duration_p95_ms.store(m_present_samples[idx95], std::memory_order_relaxed);
+            duwn::GlobalMetrics().present_sample_count.store(m_present_samples.size(), std::memory_order_relaxed);
+            m_present_samples.clear();
+        }
+        m_last_render_stats_time_ns = now_ns;
     }
 
     return PresentResult::Ok;

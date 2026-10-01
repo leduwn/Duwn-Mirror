@@ -32,11 +32,10 @@ DUWN_TEST(DirectE2E_FullPipelineCaptureToDecoderIntegration) {
     const uint32_t kFps = 60;
     DUWN_ASSERT(decoder.Init(kWidth, kHeight, VideoCodecType::H264));
 
+    DirectReceiver receiver;
     DirectLatencyTracker latency_tracker;
     DirectPipelineBridge bridge(decoder, &latency_tracker);
     bridge.SetStreamFormat(kWidth, kHeight, kFps);
-
-    DirectReceiver receiver;
     bridge.AttachReceiver(receiver);
 
     MockVideoEncoder encoder;
@@ -179,10 +178,9 @@ DUWN_TEST(DirectE2E_Quality_HighMotionGameStress) {
     VideoDecoder decoder(device, [](VideoFrame){});
     DUWN_ASSERT(decoder.Init(1920, 1080, VideoCodecType::H264));
 
+    DirectReceiver receiver;
     DirectPipelineBridge bridge(decoder);
     bridge.SetStreamFormat(1920, 1080, 60);
-
-    DirectReceiver receiver;
     bridge.AttachReceiver(receiver);
 
     DirectPacketizer packetizer(2002, 1400);

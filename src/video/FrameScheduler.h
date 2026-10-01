@@ -113,9 +113,10 @@ private:
     std::mutex                m_decoded_queue_mutex;
     std::deque<VideoFrame>    m_decoded_queue;
     void*                     m_frame_available_event{nullptr}; // Win32 auto-reset event
-    double                    m_observed_display_interval_ms{16.6667}; // Measured DXGI interval (~16.67ms)
+    std::atomic<double>       m_observed_display_interval_ms{16.6667}; // Measured DXGI interval (~16.67ms)
     int64_t                   m_last_dxgi_ready_qpc{0};
     std::vector<double>       m_dxgi_ready_samples;
+    std::vector<double>       m_dxgi_wait_samples;
 
     // PresentationClock mode: de-jitter queue
     std::mutex              m_queue_mutex;
@@ -123,13 +124,15 @@ private:
     std::deque<VideoFrame>  m_queue;
 
     std::atomic_bool        m_running{false};
+    std::atomic<bool>       m_render_reset_requested{false};
     std::jthread            m_thread;
 
     // Active format generation to detect transitions and reject stale frames
-    uint64_t                m_active_generation{0};
-    uint64_t                m_last_presented_sequence{0};
+    std::atomic<uint64_t>   m_active_generation{0};
+    std::atomic<uint64_t>   m_last_presented_sequence{0};
 
     // Source Cadence Classifier with Hysteresis
+    mutable std::mutex      m_cadence_mutex;
     enum class CadenceClass { Unknown, Class30, Class60 };
     CadenceClass            m_current_cadence_class{CadenceClass::Class30};
     CadenceClass            m_candidate_cadence_class{CadenceClass::Unknown};
@@ -141,17 +144,17 @@ private:
     std::atomic_bool        m_clock_anchored{false};
 
     // PTS of previously presented frame (for drift monitoring)
-    int64_t                 m_prev_pts_ns{0};
+    std::atomic<int64_t>    m_prev_pts_ns{0};
     int64_t                 m_render_start_ns{0}; // MonotonicClock at first frame of generation
     int64_t                 m_pts_origin_ns{0};   // PTS of first frame of generation
 
-    // Cadence estimation history (filtered non-outlier deltas)
+    // Cadence estimation history (filtered non-outlier deltas, protected by m_cadence_mutex)
     std::vector<int64_t>    m_cadence_delta_history;
     int64_t                 m_estimated_cadence_ns{33'366'700LL};
     int64_t                 m_last_source_pts_ns{0};
 
     // Windowed diagnostics samples (per 1 second)
-    std::vector<double>     m_pts_delta_samples;
+    std::vector<double>     m_pts_delta_samples; // Protected by m_cadence_mutex
     std::vector<double>     m_wake_error_samples;
     std::vector<double>     m_lateness_samples;
     std::vector<double>     m_decode_to_present_samples;

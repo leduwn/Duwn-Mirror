@@ -6,6 +6,14 @@
 
 #include <chrono>
 
+#include <unordered_map>
+
+#include <thread>
+
+#include <atomic>
+
+#include <mutex>
+
 
 
 using namespace duwn::video;
@@ -1948,6 +1956,117 @@ DUWN_TEST(stale_drop_counter_separate_from_overflow) {
 
     scheduler.Flush();
 
+}
+
+
+
+DUWN_TEST(FrameScheduler_ConcurrentMultiThreadStress) {
+    SchedulerConfig cfg{};
+    cfg.mode = SchedulerMode::GameLowLatency;
+    cfg.frame_duration_ns = 16'666'667LL; // 60 FPS
+
+    std::atomic<uint64_t> frames_received{0};
+    std::atomic<uint64_t> frames_corrupted{0};
+    std::atomic<uint64_t> sequence_inversions{0};
+
+    std::mutex tracker_mutex;
+    std::unordered_map<uint64_t, uint64_t> last_seq_per_gen;
+
+    auto on_present = [&](VideoFrame& f) {
+        frames_received.fetch_add(1, std::memory_order_relaxed);
+
+        if (f.format_generation == 0 || f.pts_ns <= 0) {
+            frames_corrupted.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
+        std::lock_guard lock(tracker_mutex);
+        auto it = last_seq_per_gen.find(f.format_generation);
+        if (it != last_seq_per_gen.end()) {
+            if (f.sequence_number <= it->second) {
+                sequence_inversions.fetch_add(1, std::memory_order_relaxed);
+            }
+            it->second = f.sequence_number;
+        } else {
+            last_seq_per_gen[f.format_generation] = f.sequence_number;
+        }
+    };
+
+    FrameScheduler scheduler(cfg, on_present);
+    scheduler.Start();
+
+    std::atomic<bool> stop_flag{false};
+    constexpr int kTotalFrames = 2000;
+
+    // Thread 1: Decode Producer Thread (pushes frames and triggers format generation transitions)
+    std::thread producer_thread([&]() {
+        using clock = duwn::clock::MonotonicClock;
+        uint64_t cur_gen = 1;
+        for (int i = 1; i <= kTotalFrames && !stop_flag.load(std::memory_order_relaxed); ++i) {
+            if (i % 300 == 0) {
+                cur_gen++;
+            }
+
+            VideoFrame f{};
+            f.sequence_number = static_cast<uint64_t>(i);
+            f.format_generation = cur_gen;
+            f.pts_ns = 1'000'000'000LL + i * 16'666'667LL;
+            f.queue_push_qpc = clock::NowQpcTicks();
+            f.process_output_qpc = f.queue_push_qpc;
+            f.visible_width = 1920;
+            f.visible_height = 1080;
+
+            scheduler.PushFrame(std::move(f));
+
+            if (i % 8 == 0) {
+                std::this_thread::yield();
+            }
+        }
+    });
+
+    // Thread 2: UI Flush Thread (simulates concurrent pipeline flushes)
+    std::thread flush_thread([&]() {
+        int flush_count = 0;
+        while (!stop_flag.load(std::memory_order_relaxed) && flush_count < 20) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            scheduler.Flush();
+            flush_count++;
+        }
+    });
+
+    // Thread 3: UI Policy Switch Thread (simulates concurrent live policy changes)
+    std::thread policy_thread([&]() {
+        int switch_count = 0;
+        while (!stop_flag.load(std::memory_order_relaxed) && switch_count < 30) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            switch (switch_count % 4) {
+            case 0:
+                scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::LowLatency));
+                break;
+            case 1:
+                scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::SmoothLive));
+                break;
+            case 2:
+                scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::Compatibility));
+                break;
+            case 3:
+                scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::Custom, 25, 2));
+                break;
+            }
+            switch_count++;
+        }
+    });
+
+    producer_thread.join();
+    stop_flag.store(true, std::memory_order_release);
+    flush_thread.join();
+    policy_thread.join();
+
+    scheduler.Stop();
+
+    DUWN_ASSERT(frames_corrupted.load() == 0);
+    DUWN_ASSERT(sequence_inversions.load() == 0);
+    DUWN_ASSERT(frames_received.load() > 0);
 }
 
 

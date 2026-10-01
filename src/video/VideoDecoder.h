@@ -71,6 +71,10 @@ private:
     uint16_t                m_last_seq{0};
     int64_t                 m_first_packet_qpc{0};
     uint64_t                m_au_sequence{0};
+
+    // Decode-thread-only windowed decode time samples for 1s percentiles
+    std::vector<double>     m_decode_samples;
+    int64_t                 m_last_decode_stats_time_ns{0};
 };
 
 } // namespace duwn::video

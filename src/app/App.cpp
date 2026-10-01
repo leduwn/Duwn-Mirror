@@ -4,6 +4,8 @@
 
 #include "DiagnosticsCollector.h"
 
+#include "common/Version.h"
+
 #include "common/logging/Logger.h"
 
 #include "common/clock/MonotonicClock.h"
@@ -4299,21 +4301,16 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
         duwn::telemetry::ConnectionTimeline::Get().Record(
             duwn::telemetry::ConnectionMilestone::C13_FirstOutputPresent,
             std::format("{}x{} visible", frame.visible_width, frame.visible_height));
+
+        const int64_t output_present_qpc = frame.present_end_qpc;
+        telemetry::LatencyTelemetry::Get().RecordOutputFrameAge(
+            decoder_output_qpc, output_select_qpc, output_present_qpc);
     }
 
-    const int64_t output_present_qpc = frame.present_end_qpc;
-
-    telemetry::LatencyTelemetry::Get().RecordOutputFrameAge(
-
-        decoder_output_qpc, output_select_qpc, output_present_qpc);
-
-
-
     if (m_preview_renderer && m_preview_window && m_preview_window->IsVisible()) {
-
         const int64_t preview_select_qpc = clock::MonotonicClock::NowQpcTicks();
-
         const video::PresentResult prev_res = m_preview_renderer->Present(frame, true);
+        const int64_t preview_present_qpc = clock::MonotonicClock::NowQpcTicks();
 
         if (prev_res == video::PresentResult::Ok) {
             duwn::telemetry::ConnectionTimeline::Get().Record(
@@ -4321,22 +4318,13 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
                 std::format("{}x{} visible", frame.visible_width, frame.visible_height));
         }
 
-        const int64_t preview_vp_end_qpc   = frame.vp_end_qpc;
-
-        const int64_t preview_present_qpc  = frame.present_end_qpc;
-
         const bool skipped = (prev_res == video::PresentResult::Skipped);
-
         if (skipped) {
-
             GlobalMetrics().preview_skips.fetch_add(1, std::memory_order_relaxed);
-
         }
 
         telemetry::LatencyTelemetry::Get().RecordPreviewFrameAge(
-
-            decoder_output_qpc, preview_select_qpc, preview_vp_end_qpc, preview_present_qpc, skipped);
-
+            decoder_output_qpc, preview_select_qpc, preview_present_qpc, preview_present_qpc, skipped);
     }
 
     m_active_filter_caps.store(m_renderer->FilterCaps(), std::memory_order_relaxed);
@@ -4772,6 +4760,42 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
             v_rtp_rate, v_kb_rate, v_au_rate, v_dec_fps, v_rend_fps, unique_pres_fps, disp_opp_rate, ticks_rate, rep_ticks_rate,
             v_drop_rate, superseded_rate, v_late_rate, cur_pres_late, cur_trans_drop, cur_q_overflow, cur_sess_q_full, cur_q_full_drop, q_depth, cur_gen, coded_w, coded_h, vis_w, vis_h);
 
+        const bool is_wired_mode = m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WiredUsb;
+        const char* transport_str = is_wired_mode ? "WiredUsb"
+            : (m_settings.transport_mode == TransportMode::DirectIpc ? "DirectIpc" : "LocalRtpUdp");
+        const char* stream_mode_str = "Balanced";
+        switch (m_settings.streaming_mode) {
+        case StreamingMode::LowLatency: stream_mode_str = "Fastest"; break;
+        case StreamingMode::Compatibility: stream_mode_str = "Smooth"; break;
+        case StreamingMode::Custom: stream_mode_str = "Custom"; break;
+        default: stream_mode_str = "Balanced"; break;
+        }
+        const auto active_policy = ResolveStreamingPolicy(m_settings.streaming_mode,
+            m_settings.custom_video_freshness_ms, m_settings.custom_video_queue_frames);
+        const auto req_quality_sv = GetReceiverQualityName(m_settings.receiver_quality);
+        const char* codec_str = "Unknown";
+        {
+            std::lock_guard lock(m_decoder_mutex);
+            if (m_video_decoder) {
+                auto c = m_video_decoder->GetActiveCodec();
+                codec_str = (c == video::VideoCodecType::H265) ? "HEVC" : (c == video::VideoCodecType::H264 ? "H264" : "Unknown");
+            }
+        }
+
+        DUWN_LOG_INFOF("Diagnostics",
+            "[METADATA] commit={} | transport={} | stream_mode={} | policy(max_q={}, res_ms={}, cad_pct={}, always_latest={}) | req_quality={} | actual_stream(codec={}, res={}x{}, fps={:.2f})",
+            DUWN_GIT_COMMIT_SHORT[0] != '\0' ? DUWN_GIT_COMMIT_SHORT : "f08ff19",
+            transport_str,
+            stream_mode_str,
+            active_policy.max_decoded_frames,
+            active_policy.max_residence_ms,
+            active_policy.cadence_percent,
+            active_policy.always_latest ? 1 : 0,
+            req_quality_sv,
+            codec_str,
+            coded_w, coded_h,
+            m.source_nominal_fps.load(std::memory_order_relaxed));
+
         if (phase_str == "Streaming" || vis_w > 0) {
             DUWN_LOG_INFO("Diagnostics", m_source_quality_tracker.FormatTelemetryBlock());
         }
@@ -4815,20 +4839,45 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
 
         DUWN_LOG_INFOF("Diagnostics",
-
-            "[STATS] PRESENT: interval_avg={:.2f}ms p95={:.2f}ms | call_avg={:.2f}ms p50={:.2f}ms p95={:.2f}ms | dxgi_wait_avg={:.2f}ms",
-
+            "[STATS] PRESENT: interval_avg={:.2f}ms p95={:.2f}ms | call_avg={:.2f}ms p50={:.2f}ms p95={:.2f}ms | dxgi_wait_avg={:.2f}ms | output(att={}, ok={}, skip={}, err={}) | preview(att={}, ok={}, skip={}, err={})",
             m.video_present_interval_avg_ms.load(std::memory_order_relaxed),
-
             m.video_present_interval_p95_ms.load(std::memory_order_relaxed),
-
             m.video_present_call_avg_ms.load(std::memory_order_relaxed),
-
             m.video_present_call_p50_ms.load(std::memory_order_relaxed),
-
             m.video_present_call_p95_ms.load(std::memory_order_relaxed),
+            m.dxgi_wait_avg_ms.load(std::memory_order_relaxed),
+            m.video_present_attempts.load(std::memory_order_relaxed),
+            m.video_present_ok.load(std::memory_order_relaxed),
+            m.video_present_skipped.load(std::memory_order_relaxed),
+            m.video_present_errors.load(std::memory_order_relaxed),
+            m.preview_present_attempts.load(std::memory_order_relaxed),
+            m.preview_present_ok.load(std::memory_order_relaxed),
+            m.preview_present_skipped.load(std::memory_order_relaxed),
+            m.preview_present_errors.load(std::memory_order_relaxed));
 
-            m.dxgi_wait_avg_ms.load(std::memory_order_relaxed));
+        DUWN_LOG_INFOF("Diagnostics",
+            "[STAGE LATENCY] decode: avg={:.2f}ms p50={:.2f}ms p95={:.2f}ms (n={}) | queue_res: avg={:.2f}ms p50={:.2f}ms p95={:.2f}ms (n={}) | dxgi_wait: avg={:.2f}ms p50={:.2f}ms p95={:.2f}ms max={:.2f}ms (n={}) | vp: avg={:.2f}ms p50={:.2f}ms p95={:.2f}ms (n={}) | present: avg={:.2f}ms p50={:.2f}ms p95={:.2f}ms (n={})",
+            m.video_decode_time_ms.load(std::memory_order_relaxed),
+            m.video_decode_p50_ms.load(std::memory_order_relaxed),
+            m.video_decode_p95_ms.load(std::memory_order_relaxed),
+            m.video_decode_sample_count.load(std::memory_order_relaxed),
+            m.queue_residence_avg_ms.load(std::memory_order_relaxed),
+            m.queue_residence_p50_ms.load(std::memory_order_relaxed),
+            m.queue_residence_p95_ms.load(std::memory_order_relaxed),
+            m.queue_residence_sample_count.load(std::memory_order_relaxed),
+            m.dxgi_wait_avg_ms.load(std::memory_order_relaxed),
+            m.dxgi_wait_p50_ms.load(std::memory_order_relaxed),
+            m.dxgi_wait_p95_ms.load(std::memory_order_relaxed),
+            m.dxgi_wait_max_ms.load(std::memory_order_relaxed),
+            m.dxgi_wait_sample_count.load(std::memory_order_relaxed),
+            m.vp_duration_avg_ms.load(std::memory_order_relaxed),
+            m.vp_duration_p50_ms.load(std::memory_order_relaxed),
+            m.vp_duration_p95_ms.load(std::memory_order_relaxed),
+            m.vp_sample_count.load(std::memory_order_relaxed),
+            m.present_duration_avg_ms.load(std::memory_order_relaxed),
+            m.present_duration_p50_ms.load(std::memory_order_relaxed),
+            m.present_duration_p95_ms.load(std::memory_order_relaxed),
+            m.present_sample_count.load(std::memory_order_relaxed));
 
 
 
@@ -4900,7 +4949,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
         DUWN_LOG_INFOF("Diagnostics",
 
-            "[LATENCY] T0-T7: total={:.2f}ms (T0-T1={:.2f}ms, T1-T2={:.2f}ms, T2-T3={:.2f}ms, T3-T4={:.2f}ms, T4-T5[q_age]={:.2f}ms, T5-T6[vp]={:.2f}ms, T6-T7[pres]={:.2f}ms) | audio_buffered={:.2f}ms (ring={:.2f}ms, wasapi_padding={:.2f}ms) | AV_skew=unavailable",
+            "[LATENCY] T0-T7 (native receiver latency): total={:.2f}ms (T0-T1={:.2f}ms, T1-T2={:.2f}ms, T2-T3={:.2f}ms, T3-T4={:.2f}ms, T4-T5[q_age]={:.2f}ms, T5-T6[vp]={:.2f}ms, T6-T7[pres]={:.2f}ms) | audio_buffered={:.2f}ms (ring={:.2f}ms, wasapi_padding={:.2f}ms) | AV_skew=unavailable",
 
             lat_snap.total_video_pipeline_ms,
 

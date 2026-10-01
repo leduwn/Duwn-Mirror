@@ -154,7 +154,26 @@ void VideoDecoder::FeedAccessUnit(EncodedAccessUnit au) noexcept {
     auto decode_end = std::chrono::steady_clock::now();
 
     double ms = std::chrono::duration<double, std::milli>(decode_end - decode_start).count();
-    duwn::GlobalMetrics().video_decode_time_ms.store(ms, std::memory_order_relaxed);
+    m_decode_samples.push_back(ms);
+
+    const int64_t now_ns = duwn::clock::MonotonicClock::Now().time_since_epoch().count();
+    if (m_last_decode_stats_time_ns == 0) {
+        m_last_decode_stats_time_ns = now_ns;
+    } else if (now_ns - m_last_decode_stats_time_ns >= 1'000'000'000LL) {
+        if (!m_decode_samples.empty()) {
+            std::sort(m_decode_samples.begin(), m_decode_samples.end());
+            double sum = 0.0;
+            for (double s : m_decode_samples) sum += s;
+            duwn::GlobalMetrics().video_decode_time_ms.store(sum / static_cast<double>(m_decode_samples.size()), std::memory_order_relaxed);
+            duwn::GlobalMetrics().video_decode_p50_ms.store(m_decode_samples[m_decode_samples.size() / 2], std::memory_order_relaxed);
+            size_t idx95 = static_cast<size_t>(static_cast<double>(m_decode_samples.size()) * 0.95);
+            if (idx95 >= m_decode_samples.size()) idx95 = m_decode_samples.size() - 1;
+            duwn::GlobalMetrics().video_decode_p95_ms.store(m_decode_samples[idx95], std::memory_order_relaxed);
+            duwn::GlobalMetrics().video_decode_sample_count.store(m_decode_samples.size(), std::memory_order_relaxed);
+            m_decode_samples.clear();
+        }
+        m_last_decode_stats_time_ns = now_ns;
+    }
 }
 
 void VideoDecoder::EmitAccessUnit(int64_t pts_ns, uint16_t seq) noexcept {
@@ -294,6 +313,8 @@ void VideoDecoder::Flush() noexcept {
     m_fu_a_nal_start  = 0;
     m_has_last_rtp_ts = false;
     m_last_rtp_ts     = 0;
+    m_decode_samples.clear();
+    m_last_decode_stats_time_ns = 0;
     if (m_hevc_assembler) {
         m_hevc_assembler->Flush();
     }
