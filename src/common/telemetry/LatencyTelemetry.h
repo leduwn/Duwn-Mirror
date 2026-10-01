@@ -40,6 +40,7 @@ struct PreviewFrameAgeStats {
     FrameAgePercentiles age_at_present;
     uint64_t sample_count{0};
     uint64_t skips{0};
+    uint64_t errors{0};
 };
 
 struct LatencyStageTimestamps {
@@ -87,6 +88,9 @@ public:
     void RecordOutputFrameAge(int64_t decoder_output_qpc, int64_t output_select_qpc, int64_t output_present_qpc) noexcept;
 
     // Record frame age for Preview
+    void RecordPreviewSuccess(int64_t decoder_output_qpc, int64_t preview_select_qpc, int64_t preview_present_qpc) noexcept;
+    void RecordPreviewSkip() noexcept;
+    void RecordPreviewError() noexcept;
     void RecordPreviewFrameAge(int64_t decoder_output_qpc, int64_t preview_select_qpc, int64_t preview_vp_end_qpc, int64_t preview_present_qpc, bool skipped) noexcept;
 
     // Retrieve and reset 1-second frame age stats
@@ -128,6 +132,7 @@ private:
     std::vector<double> m_preview_select_to_present;
     std::vector<double> m_preview_present_age;
     uint64_t m_preview_skips_recent{0};
+    uint64_t m_preview_errors_recent{0};
 };
 
 } // namespace duwn::telemetry

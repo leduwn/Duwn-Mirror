@@ -250,6 +250,9 @@ public:
         }
     }
 
+    bool IsOpen() const noexcept { return m_view != nullptr; }
+    bool IsRunning() const noexcept { return m_running.load(std::memory_order_acquire); }
+
     // Direct synchronous read of available frames (useful for polling or unit tests)
     size_t DrainAvailable() noexcept {
         if (!m_ctrl || !m_data_base) return 0;

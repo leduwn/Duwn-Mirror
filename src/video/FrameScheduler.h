@@ -72,6 +72,10 @@ public:
         m_streaming_policy.store(policy, std::memory_order_release);
     }
 
+    StreamingPolicy GetStreamingPolicy() const noexcept {
+        return m_streaming_policy.load(std::memory_order_acquire);
+    }
+
     // Set provider for DXGI frame-latency waitable object (Phase 6)
     void SetDxgiWaitableProvider(DxgiWaitableProvider provider) noexcept {
         m_dxgi_waitable_provider = std::move(provider);

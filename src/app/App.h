@@ -46,6 +46,20 @@ constexpr UINT WM_DUWN_RESTART_AIRPLAY = WM_APP + 101;
 constexpr UINT WM_DUWN_WIRED_REFRESH = WM_APP + 102;
 constexpr UINT WM_DUWN_NETWORK_CHANGED = WM_APP + 103;
 
+struct SessionMetadataSnapshot {
+    StreamingMode   req_streaming_mode{StreamingMode::SmoothLive};
+    uint32_t        req_custom_freshness_ms{25};
+    uint32_t        req_custom_queue_frames{2};
+    ReceiverQuality req_receiver_quality{ReceiverQuality::Auto};
+    TransportMode   req_transport_mode{TransportMode::RtpUdpLegacy};
+
+    StreamingPolicy active_policy{};
+    StreamingMode   active_streaming_mode{StreamingMode::SmoothLive};
+    ReceiverQuality active_receiver_quality{ReceiverQuality::Auto};
+    bool            receiver_quality_pending{false};
+    std::string     active_transport{"Unknown"};
+};
+
 class App {
 public:
     App() = default;
@@ -106,6 +120,8 @@ private:
 
     // Metrics loop
     void MetricsLoop(std::stop_token stop) noexcept;
+    void PublishMetadataSnapshot() noexcept;
+    SessionMetadataSnapshot GetMetadataSnapshot() const noexcept;
     void UpdateWiredConnection() noexcept;
     void OnNetworkEnvironmentChanged(const network::NetworkEnvironmentInfo& new_env) noexcept;
 
@@ -207,6 +223,11 @@ private:
     std::atomic<bool>      m_audio_min_ready{false};
     std::atomic<bool>      m_noncritical_ready{false};
     std::atomic<bool>      m_media_infrastructure_ready{false};
+
+    // Metadata snapshot published safely from config-owning thread
+    mutable std::mutex       m_metadata_mutex;
+    SessionMetadataSnapshot  m_metadata_snapshot;
+    ReceiverQuality          m_active_receiver_quality{ReceiverQuality::Auto};
 
     // Firewall validation state machine
     std::atomic<network::FirewallValidationState> m_firewall_validation_state{network::FirewallValidationState::Unknown};

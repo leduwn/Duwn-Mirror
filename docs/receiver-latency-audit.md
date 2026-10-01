@@ -60,11 +60,11 @@ Trước đây, khi mở cửa sổ phụ (Preview):
 
 Percentile (`p50`, `p95`) cho 5 chặng xử lý cốt lõi được gom từ các mẫu đo thực tế trong cửa sổ 1 giây, sắp xếp (`std::sort`) để lấy giá trị phân vị thực, thay vì lấy percentile của các giá trị trung bình từng giây:
 
-1. **Decode Time**: Đo bằng Decode thread trong `VideoDecoder::FeedAccessUnit` (`video_decode_time_ms`, `video_decode_p50_ms`, `video_decode_p95_ms`, `video_decode_sample_count`).
+1. **Decoder Feed Call Time (`video_decode_time_ms`)**: Đo thời gian CPU thực thi lời gọi hàm `VideoDecoder::FeedAccessUnit` / `m_mf_decoder.Feed()` trên Decode thread (`video_decode_time_ms`, `video_decode_p50_ms`, `video_decode_p95_ms`, `video_decode_sample_count`). Phân biệt rõ với độ trễ `T2→T3` (`decode_turnaround_ms`) là khoảng thời gian từ khi AU được nạp vào MFT `ProcessInput` đến khi nhận được frame NV12 tại `ProcessOutput`.
 2. **Queue Residence**: Đo bằng Render thread khi lấy frame khỏi hàng đợi (`queue_residence_avg_ms`, `queue_residence_p50_ms`, `queue_residence_p95_ms`, `queue_residence_max_ms`, `queue_residence_sample_count`).
 3. **DXGI Wait**: Đo thời gian thực sự chờ `WaitForSingleObject` trên frame latency waitable handle (`dxgi_wait_avg_ms`, `dxgi_wait_p50_ms`, `dxgi_wait_p95_ms`, `dxgi_wait_max_ms`, `dxgi_wait_sample_count`).
-4. **VideoProcessor Blit**: Đo thời gian GPU VideoProcessor thực hiện CSC/Blt (`vp_duration_avg_ms`, `vp_duration_p50_ms`, `vp_duration_p95_ms`, `vp_duration_max_ms`, `vp_sample_count`).
-5. **Present Duration**: Đo thời gian hàm `IDXGISwapChain1::Present1` thực thi (`present_duration_avg_ms`, `present_duration_p50_ms`, `present_duration_p95_ms`, `present_duration_max_ms`, `present_sample_count`).
+4. **VideoProcessor Blit CPU Dispatch Time (`vp_duration_*_ms`)**: Đo thời gian CPU thực hiện lệnh điều phối `VideoProcessorBlt` (`vp_duration_avg_ms`, `vp_duration_p50_ms`, `vp_duration_p95_ms`, `vp_duration_max_ms`, `vp_sample_count`). Lưu ý: Timestamp QPC quanh `VideoProcessorBlt` chỉ đo thời gian CPU gửi lệnh (dispatch), không chứng minh thời gian GPU thực thi phần cứng bất đồng bộ.
+5. **Present Call Duration (`present_duration_*_ms`)**: Đo thời gian hàm `IDXGISwapChain::Present` thực thi trên CPU (`present_duration_avg_ms`, `present_duration_p50_ms`, `present_duration_p95_ms`, `present_duration_max_ms`, `present_sample_count`). Thời điểm hàm `Present()` trả về trên CPU không phải là thời điểm pixel vật lý đã xuất hiện trên panel hiển thị.
 
 ---
 
@@ -73,13 +73,13 @@ Percentile (`p50`, `p95`) cho 5 chặng xử lý cốt lõi được gom từ c�
 ### 3.1. Độ trễ hiển thị Native Receiver (T0–T7)
 
 - **Điểm bắt đầu T0**: Thời điểm gói tin RTP video đầu tiên của một Access Unit cập bến socket loopback nội bộ của Duwn Mirror (sau khi qua UxPlay).
-- **Điểm kết thúc T7**: Thời điểm lệnh `IDXGISwapChain1::Present1` trả về trên Render thread.
+- **Điểm kết thúc T7**: Thời điểm lệnh `IDXGISwapChain::Present` trả về trên Render thread (thời điểm hoàn thành lời gọi API phía CPU, không phải thời điểm pixel thực tế sáng lên trên màn hình).
 - **Giá trị thông thường**: ~2.5 ms – 4.5 ms trên GPU D3D11 phần cứng.
 - **Giới hạn quan trọng**:
   - T0–T7 **CHỈ ĐO ĐỘ TRỄ NỘI BỘ BỘ NHẬN (NATIVE RECEIVER LATENCY)**.
   - T0–T7 **KHÔNG PHẢI LÀ ĐỘ TRỄ GLASS-TO-GLASS**.
-  - Các chặng trước T0 (Pre-T0: màn hình iPhone chụp frame, phần cứng Apple VideoToolbox nén H.264/HEVC, truyền qua Wi-Fi / USB, và depacketization trong UxPlay) chiếm khoảng 35–55 ms và nằm ngoài tầm quan sát của T0–T7.
-  - Các chặng sau T7 (DWM compositing, VSync flip, và thời gian quét điểm ảnh của panel màn hình PC) chiếm thêm 8–16 ms.
+  - Các chặng trước T0 (Pre-T0: màn hình iPhone chụp frame, phần cứng Apple VideoToolbox nén H.264/HEVC, truyền qua Wi-Fi / USB, và depacketization trong UxPlay): `CHƯA ĐO`. Tuyệt đối không giả định số liệu và không dùng làm ngân sách độ trễ khi chưa có phép đo thực nghiệm hỗ trợ.
+  - Các chặng sau T7 (Post-T7: DWM compositing, scanout VSync flip, và thời gian quét điểm ảnh của panel màn hình PC): `CHƯA ĐO`. Phép đo CPU kết thúc tại T7 khi hàm `Present()` trả về, không phản ánh thời điểm phát xạ photon trên màn hình.
 
 ---
 
@@ -87,10 +87,13 @@ Percentile (`p50`, `p95`) cho 5 chặng xử lý cốt lõi được gom từ c�
 
 Collector đã được tái cấu trúc hoàn chỉnh:
 - **Đọc không khóa**: Dùng `[System.IO.FileStream]` với `FileShare::ReadWrite` qua con trỏ byte offset (`Seek`), không chặn file log của ứng dụng.
-- **Khử trùng lặp (Dedup)**: Chỉ ghi dòng CSV khi có dữ liệu mới phát sinh; loại bỏ tình trạng ghi lặp lại 1800 dòng giống nhau khi log tạm dừng.
-- **Độc lập Audio và Video**: Thu thập đầy đủ số liệu video ngay cả khi không có audio hoặc audio bị tắt; đánh dấu cờ `audio_stale` nếu audio quá 3 giây không cập nhật.
-- **Đầy đủ Metadata & Stage Percentiles**: Ghi nhận `run_id`, `commit`, `transport`, `stream_mode`, cấu hình policy, thông số thực nhận (`codec`, `res`, `fps`), phân loại `output`/`preview` present, và p50/p95 của cả 5 stage.
-- **Nhận diện Reconnect**: Đánh dấu cờ `reconnect_event` khi `format_generation` thay đổi hoặc trạng thái kết nối chuyển từ ngắt sang kết nối.
+- **Khử trùng lặp (Dedup)**: Chỉ ghi dòng CSV khi có dữ liệu mới phát sinh; loại bỏ tình trạng ghi lặp lại khi log tạm dừng.
+- **Độc lập Audio và Video**: Thu thập đầy đủ số liệu video ngay cả khi không có audio hoặc audio bị tắt; đánh dấu cờ `audio_stale` nếu audio không cập nhật, `video_stale` nếu video không cập nhật.
+- **Đầy đủ Metadata & Stage Percentiles**: Ghi nhận `run_id`, `session_id`, `commit` (kèm cờ dirty nếu có), `transport`, `stream_mode`, cấu hình policy, thông số thực nhận (`codec`, `res`, `fps`), phân loại `output`/`preview` present, và p50/p95 của cả 5 stage.
+- **Phân biệt Format Change và Reconnect**: Đánh dấu cờ `format_change` khi chuyển generation (xoay màn hình, đổi độ phân giải) trong phiên đang kết nối; chỉ đánh dấu `reconnect_event` khi thực sự ngắt kết nối rồi kết nối lại.
+- **Xử lý xoay vòng file log (Log Rotation)**: Tự động phát hiện khi log bị xoay (kể cả khi file thay thế có kích thước lớn hơn offset cũ hoặc do NTFS tunneling giữ nguyên creation time qua kiểm tra prefix header) và vét sạch phần còn lại của file backup `.1.log`.
+- **Bảo toàn dữ liệu phân mảnh (Split Lines / Incomplete UTF-8)**: Lưu trữ bộ đệm chuỗi/ký tự chưa hoàn chỉnh cho lần đọc kế tiếp, không làm hỏng cú pháp regex.
+- **Chuẩn hóa định dạng CSV**: Áp dụng cơ chế escape dấu nháy và dấu phẩy chuẩn RFC 4180 cho toàn bộ trường dữ liệu.
 
 ### Cách chạy Collector:
 ```powershell

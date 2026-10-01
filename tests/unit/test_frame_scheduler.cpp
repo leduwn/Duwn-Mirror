@@ -1995,78 +1995,199 @@ DUWN_TEST(FrameScheduler_ConcurrentMultiThreadStress) {
     FrameScheduler scheduler(cfg, on_present);
     scheduler.Start();
 
+    std::atomic<bool> start_all{false};
+    std::atomic<bool> producer_active{false};
     std::atomic<bool> stop_flag{false};
-    constexpr int kTotalFrames = 2000;
+    std::atomic<int> flushes_while_producer_active{0};
+    std::atomic<int> switches_while_producer_active{0};
 
-    // Thread 1: Decode Producer Thread (pushes frames and triggers format generation transitions)
+    constexpr int kPhases = 5;
+    constexpr int kFramesPerPhase = 80;
+
+    // Thread 1: Decode Producer Thread
     std::thread producer_thread([&]() {
+        while (!start_all.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
         using clock = duwn::clock::MonotonicClock;
-        uint64_t cur_gen = 1;
-        for (int i = 1; i <= kTotalFrames && !stop_flag.load(std::memory_order_relaxed); ++i) {
-            if (i % 300 == 0) {
-                cur_gen++;
-            }
+        producer_active.store(true, std::memory_order_release);
 
-            VideoFrame f{};
-            f.sequence_number = static_cast<uint64_t>(i);
-            f.format_generation = cur_gen;
-            f.pts_ns = 1'000'000'000LL + i * 16'666'667LL;
-            f.queue_push_qpc = clock::NowQpcTicks();
-            f.process_output_qpc = f.queue_push_qpc;
-            f.visible_width = 1920;
-            f.visible_height = 1080;
+        for (int phase = 0; phase < kPhases && !stop_flag.load(std::memory_order_relaxed); ++phase) {
+            uint64_t cur_gen = static_cast<uint64_t>(phase + 1);
+            for (int i = 1; i <= kFramesPerPhase && !stop_flag.load(std::memory_order_relaxed); ++i) {
+                VideoFrame f{};
+                f.sequence_number = static_cast<uint64_t>(i);
+                f.format_generation = cur_gen;
+                f.pts_ns = 1'000'000'000LL * cur_gen + i * 16'666'667LL;
+                f.queue_push_qpc = clock::NowQpcTicks();
+                f.process_output_qpc = f.queue_push_qpc;
+                f.visible_width = 1920;
+                f.visible_height = 1080;
 
-            scheduler.PushFrame(std::move(f));
-
-            if (i % 8 == 0) {
-                std::this_thread::yield();
+                scheduler.PushFrame(std::move(f));
+                std::this_thread::sleep_for(std::chrono::microseconds(400));
             }
         }
+
+        producer_active.store(false, std::memory_order_release);
     });
 
-    // Thread 2: UI Flush Thread (simulates concurrent pipeline flushes)
+    // Thread 2: UI Flush Thread
     std::thread flush_thread([&]() {
-        int flush_count = 0;
-        while (!stop_flag.load(std::memory_order_relaxed) && flush_count < 20) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
-            scheduler.Flush();
-            flush_count++;
+        while (!start_all.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
+        while (!stop_flag.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (producer_active.load(std::memory_order_acquire)) {
+                scheduler.Flush();
+                flushes_while_producer_active.fetch_add(1, std::memory_order_relaxed);
+            }
         }
     });
 
-    // Thread 3: UI Policy Switch Thread (simulates concurrent live policy changes)
+    // Thread 3: UI Policy Switch Thread
     std::thread policy_thread([&]() {
+        while (!start_all.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
         int switch_count = 0;
-        while (!stop_flag.load(std::memory_order_relaxed) && switch_count < 30) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            switch (switch_count % 4) {
-            case 0:
-                scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::LowLatency));
-                break;
-            case 1:
-                scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::SmoothLive));
-                break;
-            case 2:
-                scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::Compatibility));
-                break;
-            case 3:
-                scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::Custom, 25, 2));
-                break;
+        while (!stop_flag.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(8));
+            if (producer_active.load(std::memory_order_acquire)) {
+                switch (switch_count % 4) {
+                case 0:
+                    scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::LowLatency));
+                    break;
+                case 1:
+                    scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::SmoothLive));
+                    break;
+                case 2:
+                    scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::Compatibility));
+                    break;
+                case 3:
+                    scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::Custom, 25, 2));
+                    break;
+                }
+                switches_while_producer_active.fetch_add(1, std::memory_order_relaxed);
+                switch_count++;
             }
-            switch_count++;
         }
     });
+
+    // Watchdog to prevent test hang
+    std::atomic<bool> test_timed_out{false};
+    std::thread watchdog([&]() {
+        for (int i = 0; i < 80 && !stop_flag.load(std::memory_order_relaxed); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (!stop_flag.load(std::memory_order_relaxed)) {
+            test_timed_out.store(true, std::memory_order_release);
+            stop_flag.store(true, std::memory_order_release);
+        }
+    });
+
+    // Start all concurrent threads simultaneously
+    start_all.store(true, std::memory_order_release);
 
     producer_thread.join();
     stop_flag.store(true, std::memory_order_release);
     flush_thread.join();
     policy_thread.join();
+    watchdog.join();
 
     scheduler.Stop();
 
+    DUWN_ASSERT(!test_timed_out.load());
+    DUWN_ASSERT(flushes_while_producer_active.load() >= 5);
+    DUWN_ASSERT(switches_while_producer_active.load() >= 5);
     DUWN_ASSERT(frames_corrupted.load() == 0);
     DUWN_ASSERT(sequence_inversions.load() == 0);
     DUWN_ASSERT(frames_received.load() > 0);
+}
+
+DUWN_TEST(FrameScheduler_FormatGenerationChangeAndSequenceRestartAfterFlush) {
+    SchedulerConfig cfg{};
+    cfg.mode = SchedulerMode::GameLowLatency;
+    cfg.frame_duration_ns = 16'666'667LL;
+
+    std::atomic<uint64_t> presented_count{0};
+    std::vector<uint64_t> presented_seqs;
+    std::vector<uint64_t> presented_gens;
+    std::mutex pres_mutex;
+
+    FrameScheduler scheduler(cfg, [&](VideoFrame& f) {
+        std::lock_guard lock(pres_mutex);
+        presented_count.fetch_add(1, std::memory_order_relaxed);
+        presented_seqs.push_back(f.sequence_number);
+        presented_gens.push_back(f.format_generation);
+    });
+    scheduler.Start();
+
+    using clock = duwn::clock::MonotonicClock;
+
+    // Phase 1: Push generation 1, sequences 1, 2, 3
+    for (uint64_t i = 1; i <= 3; ++i) {
+        VideoFrame f{};
+        f.sequence_number = i;
+        f.format_generation = 1;
+        f.pts_ns = 1'000'000'000LL + i * 16'666'667LL;
+        f.queue_push_qpc = clock::NowQpcTicks();
+        f.process_output_qpc = f.queue_push_qpc;
+        f.visible_width = 1920;
+        f.visible_height = 1080;
+        scheduler.PushFrame(std::move(f));
+    }
+
+    auto start_t = std::chrono::steady_clock::now();
+    while (presented_count.load() < 1 &&
+           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_t).count() < 500) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    DUWN_ASSERT(presented_count.load() > 0);
+
+    // Phase 2: Flush contract verification (clears queue, resets sequence anchor)
+    scheduler.Flush();
+
+    // Phase 3: Push generation 2, sequence restarts from 1
+    const auto stale_drops_before = duwn::GlobalMetrics().video_stale_generation_drops.load();
+    for (uint64_t i = 1; i <= 3; ++i) {
+        VideoFrame f{};
+        f.sequence_number = i; // Restarted sequence from 1
+        f.format_generation = 2; // Advanced generation
+        f.pts_ns = 2'000'000'000LL + i * 16'666'667LL;
+        f.queue_push_qpc = clock::NowQpcTicks();
+        f.process_output_qpc = f.queue_push_qpc;
+        f.visible_width = 1920;
+        f.visible_height = 1080;
+        scheduler.PushFrame(std::move(f));
+    }
+
+    start_t = std::chrono::steady_clock::now();
+    const auto count_before_gen2 = presented_count.load();
+    while (presented_count.load() == count_before_gen2 &&
+           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_t).count() < 500) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    DUWN_ASSERT(presented_count.load() > count_before_gen2);
+
+    // Phase 4: Stale generation frame rejection
+    VideoFrame stale_frame{};
+    stale_frame.sequence_number = 99;
+    stale_frame.format_generation = 1; // older than active gen 2
+    stale_frame.pts_ns = 3'000'000'000LL;
+    stale_frame.queue_push_qpc = clock::NowQpcTicks();
+    stale_frame.process_output_qpc = stale_frame.queue_push_qpc;
+    stale_frame.visible_width = 1920;
+    stale_frame.visible_height = 1080;
+    scheduler.PushFrame(std::move(stale_frame));
+
+    DUWN_ASSERT(duwn::GlobalMetrics().video_stale_generation_drops.load() == stale_drops_before + 1);
+
+    scheduler.Stop();
 }
 
 

@@ -107,6 +107,7 @@ void LatencyTelemetry::Reset() noexcept {
     m_preview_select_to_present.clear();
     m_preview_present_age.clear();
     m_preview_skips_recent = 0;
+    m_preview_errors_recent = 0;
 }
 
 static FrameAgePercentiles CalcPercentiles(std::vector<double>& v) noexcept {
@@ -134,9 +135,8 @@ void LatencyTelemetry::RecordOutputFrameAge(int64_t decoder_output_qpc, int64_t 
     m_output_present_age.push_back(age_present);
 }
 
-void LatencyTelemetry::RecordPreviewFrameAge(int64_t decoder_output_qpc, int64_t preview_select_qpc, int64_t preview_vp_end_qpc, int64_t preview_present_qpc, bool skipped) noexcept {
-    (void)preview_vp_end_qpc;
-    if (decoder_output_qpc <= 0 || preview_select_qpc <= 0) return;
+void LatencyTelemetry::RecordPreviewSuccess(int64_t decoder_output_qpc, int64_t preview_select_qpc, int64_t preview_present_qpc) noexcept {
+    if (decoder_output_qpc <= 0 || preview_select_qpc <= 0 || preview_present_qpc <= 0) return;
     const double dec_to_select = SafeDeltaMs(decoder_output_qpc, preview_select_qpc);
     const double sel_to_pres = SafeDeltaMs(preview_select_qpc, preview_present_qpc);
     const double age_present = SafeDeltaMs(decoder_output_qpc, preview_present_qpc);
@@ -145,8 +145,24 @@ void LatencyTelemetry::RecordPreviewFrameAge(int64_t decoder_output_qpc, int64_t
     m_preview_decode_to_select.push_back(dec_to_select);
     m_preview_select_to_present.push_back(sel_to_pres);
     m_preview_present_age.push_back(age_present);
+}
+
+void LatencyTelemetry::RecordPreviewSkip() noexcept {
+    std::lock_guard lock(m_mutex);
+    m_preview_skips_recent++;
+}
+
+void LatencyTelemetry::RecordPreviewError() noexcept {
+    std::lock_guard lock(m_mutex);
+    m_preview_errors_recent++;
+}
+
+void LatencyTelemetry::RecordPreviewFrameAge(int64_t decoder_output_qpc, int64_t preview_select_qpc, int64_t preview_vp_end_qpc, int64_t preview_present_qpc, bool skipped) noexcept {
+    (void)preview_vp_end_qpc;
     if (skipped) {
-        m_preview_skips_recent++;
+        RecordPreviewSkip();
+    } else {
+        RecordPreviewSuccess(decoder_output_qpc, preview_select_qpc, preview_present_qpc);
     }
 }
 
@@ -154,6 +170,7 @@ void LatencyTelemetry::GetFrameAgeStats(OutputFrameAgeStats& out_stats, PreviewF
     std::vector<double> out_sel, out_pres;
     std::vector<double> prev_dec_sel, prev_sel_pres, prev_pres;
     uint64_t skips = 0;
+    uint64_t errors = 0;
 
     {
         std::lock_guard lock(m_mutex);
@@ -164,6 +181,8 @@ void LatencyTelemetry::GetFrameAgeStats(OutputFrameAgeStats& out_stats, PreviewF
         prev_pres.swap(m_preview_present_age);
         skips = m_preview_skips_recent;
         m_preview_skips_recent = 0;
+        errors = m_preview_errors_recent;
+        m_preview_errors_recent = 0;
     }
 
     out_stats.sample_count = out_sel.size();
@@ -172,6 +191,7 @@ void LatencyTelemetry::GetFrameAgeStats(OutputFrameAgeStats& out_stats, PreviewF
 
     prev_stats.sample_count = prev_dec_sel.size();
     prev_stats.skips = skips;
+    prev_stats.errors = errors;
     prev_stats.decode_to_select = CalcPercentiles(prev_dec_sel);
     prev_stats.age_at_select = prev_stats.decode_to_select;
     prev_stats.select_to_present = CalcPercentiles(prev_sel_pres);

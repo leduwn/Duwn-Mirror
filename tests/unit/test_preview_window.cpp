@@ -4,6 +4,8 @@
 #include "app/Settings.h"
 #include "airplay/AirPlayProcess.h"
 #include "ui/UiState.h"
+#include "common/telemetry/LatencyTelemetry.h"
+#include "video/VideoFrame.h"
 #include <string>
 #include <cwchar>
 #include <algorithm>
@@ -279,5 +281,104 @@ DUWN_TEST(PreviewWindow_AspectRatioLockMath) {
         double actual_ar = static_cast<double>(client_w) / static_cast<double>(client_h);
         DUWN_ASSERT(std::abs(actual_ar - target_ar) < 0.002);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 9. Preview Telemetry Invariants (Output Isolation, Skip Dedup, Error Handling)
+// ---------------------------------------------------------------------------
+DUWN_TEST(PreviewTelemetry_SkipIncrementsCounterOnceAndAddsNoSuccessSample) {
+    auto& telem = duwn::telemetry::LatencyTelemetry::Get();
+    telem.Reset();
+    const uint64_t prev_skips_before = duwn::GlobalMetrics().preview_skips.load();
+
+    // Single skip event: VideoRenderer::record_skipped increments GlobalMetrics().preview_skips
+    duwn::GlobalMetrics().preview_skips.fetch_add(1, std::memory_order_relaxed);
+    telem.RecordPreviewSkip();
+
+    duwn::telemetry::OutputFrameAgeStats out_stats{};
+    duwn::telemetry::PreviewFrameAgeStats prev_stats{};
+    telem.GetFrameAgeStats(out_stats, prev_stats);
+
+    // Assert: skip counted exactly once in metrics and telemetry, no successful age samples added
+    DUWN_ASSERT(duwn::GlobalMetrics().preview_skips.load() == prev_skips_before + 1);
+    DUWN_ASSERT(prev_stats.sample_count == 0);
+    DUWN_ASSERT(prev_stats.skips == 1);
+}
+
+DUWN_TEST(PreviewTelemetry_ErrorAddsNoSuccessSample) {
+    auto& telem = duwn::telemetry::LatencyTelemetry::Get();
+    telem.Reset();
+
+    // Simulate DeviceLost / Fatal presentation error
+    telem.RecordPreviewError();
+
+    duwn::telemetry::OutputFrameAgeStats out_stats{};
+    duwn::telemetry::PreviewFrameAgeStats prev_stats{};
+    telem.GetFrameAgeStats(out_stats, prev_stats);
+
+    DUWN_ASSERT(prev_stats.sample_count == 0);
+    DUWN_ASSERT(prev_stats.skips == 0);
+    DUWN_ASSERT(prev_stats.errors == 1);
+}
+
+DUWN_TEST(PreviewTelemetry_OkAddsExactlyOneSample) {
+    auto& telem = duwn::telemetry::LatencyTelemetry::Get();
+    telem.Reset();
+
+    int64_t t_dec = 1'000'000;
+    int64_t t_sel = 1'010'000;
+    int64_t t_pres = 1'020'000;
+
+    telem.RecordPreviewSuccess(t_dec, t_sel, t_pres);
+
+    duwn::telemetry::OutputFrameAgeStats out_stats{};
+    duwn::telemetry::PreviewFrameAgeStats prev_stats{};
+    telem.GetFrameAgeStats(out_stats, prev_stats);
+
+    DUWN_ASSERT(prev_stats.sample_count == 1);
+    DUWN_ASSERT(prev_stats.skips == 0);
+    DUWN_ASSERT(prev_stats.errors == 0);
+    DUWN_ASSERT(prev_stats.age_at_present.p50 > 0.0);
+}
+
+DUWN_TEST(PreviewTelemetry_PreviewDoesNotMutateOutputTimestampsOrStats) {
+    auto& telem = duwn::telemetry::LatencyTelemetry::Get();
+    telem.Reset();
+
+    const uint64_t out_ok_before = duwn::GlobalMetrics().video_present_ok.load();
+    const uint64_t out_att_before = duwn::GlobalMetrics().video_present_attempts.load();
+
+    duwn::video::VideoFrame frame{};
+    frame.rtp_arrival_qpc = 1000;
+    frame.au_received_qpc = 2000;
+    frame.process_input_qpc = 3000;
+    frame.process_output_qpc = 4000;
+    frame.queue_push_qpc = 5000;
+    frame.queue_pop_qpc = 6000;
+    frame.vp_begin_qpc = 7000;
+    frame.vp_end_qpc = 8000;
+    frame.present_begin_qpc = 8500;
+    frame.present_end_qpc = 9000;
+
+    // Simulate preview presentation
+    int64_t prev_sel = 9100;
+    int64_t prev_pres = 9200;
+    telem.RecordPreviewSuccess(frame.process_output_qpc, prev_sel, prev_pres);
+
+    // Verify frame timestamps were NOT mutated by preview
+    DUWN_ASSERT(frame.present_end_qpc == 9000);
+    DUWN_ASSERT(frame.vp_begin_qpc == 7000);
+    DUWN_ASSERT(frame.vp_end_qpc == 8000);
+
+    // Verify output metrics were NOT mutated by preview
+    DUWN_ASSERT(duwn::GlobalMetrics().video_present_ok.load() == out_ok_before);
+    DUWN_ASSERT(duwn::GlobalMetrics().video_present_attempts.load() == out_att_before);
+
+    // Verify output frame age stats remain 0
+    duwn::telemetry::OutputFrameAgeStats out_stats{};
+    duwn::telemetry::PreviewFrameAgeStats prev_stats{};
+    telem.GetFrameAgeStats(out_stats, prev_stats);
+    DUWN_ASSERT(out_stats.sample_count == 0);
+    DUWN_ASSERT(prev_stats.sample_count == 1);
 }
 

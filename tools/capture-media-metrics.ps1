@@ -9,8 +9,17 @@ $ErrorActionPreference = 'Stop'
 $runId = [System.Guid]::NewGuid().ToString('D')
 $deadline = (Get-Date).AddSeconds($DurationSeconds)
 
-$header = @(
-    'run_id', 'collector_time', 'source_time', 'reconnect_event',
+function Escape-CsvField([object]$value) {
+    if ($null -eq $value) { return '' }
+    $s = [string]$value
+    if ($s -match '[",\r\n]') {
+        return '"' + ($s -replace '"', '""') + '"'
+    }
+    return $s
+}
+
+$headerCols = @(
+    'run_id', 'session_id', 'collector_time', 'source_time', 'reconnect_event', 'format_change',
     'commit', 'transport', 'stream_mode', 'policy_max_q', 'policy_res_ms', 'policy_cad_pct', 'policy_always_latest', 'req_quality', 'actual_codec', 'actual_res', 'actual_fps',
     'native_t0_t7_total_ms', 't0_t1_ms', 't1_t2_ms', 't2_t3_ms', 't3_t4_ms', 't4_t5_ms', 't5_t6_ms', 't6_t7_ms',
     'decode_avg_ms', 'decode_p50_ms', 'decode_p95_ms', 'decode_n',
@@ -22,132 +31,310 @@ $header = @(
     'preview_att', 'preview_ok', 'preview_skip', 'preview_err',
     'out_age_count', 'out_sel_p50_ms', 'out_sel_p95_ms', 'out_pres_p50_ms', 'out_pres_p95_ms',
     'prev_age_count', 'prev_skips', 'prev_pres_p50_ms',
-    'v_rtp_rate', 'v_kb_rate', 'v_au_rate', 'v_dec_fps', 'v_rend_fps', 'unique_pres_fps', 'v_drop_rate', 'superseded_rate', 'late_rate', 'queue_depth', 'gen', 'coded_res', 'vis_res',
+    'video_stale', 'v_rtp_rate', 'v_kb_rate', 'v_au_rate', 'v_dec_fps', 'v_rend_fps', 'unique_pres_fps', 'v_drop_rate', 'superseded_rate', 'late_rate', 'queue_depth', 'gen', 'coded_res', 'vis_res',
     'audio_stale', 'a_rtp_rate', 'a_kb_rate', 'audio_buf_ms', 'ring_ms', 'target_ms', 'padding_ms', 'servo_ppm', 'real_underruns', 'overrun_frames', 'backlog_drops', 'recoveries',
     'av_offset_ms', 'drift_ppm', 'sidecar', 'session_state', 'source_conn', 'lifecycle'
-) -join ','
+)
 
 $outDir = Split-Path -Parent $OutputPath
 if ($outDir -and -not (Test-Path -LiteralPath $outDir)) {
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 }
 
-$header | Set-Content -LiteralPath $OutputPath -Encoding utf8
+($headerCols -join ',') | Set-Content -LiteralPath $OutputPath -Encoding utf8
 
 $lastFilePos = 0
+$lastCreationTime = $null
+$fileHeaderPrefix = ''
+$pendingText = ''
+$sessionId = 1
 $lastGen = $null
 $lastSourceConn = $null
 
-# Persistent state tracking across lines
-$state_commit = ''
-$state_transport = ''
-$state_stream_mode = ''
-$state_policy_max_q = ''
-$state_policy_res_ms = ''
-$state_policy_cad_pct = ''
-$state_policy_always_latest = ''
-$state_req_quality = ''
-$state_actual_codec = ''
-$state_actual_res = ''
-$state_actual_fps = ''
+function New-CycleState {
+    return [ordered]@{
+        has_update = $false
+        has_video  = $false
+        has_audio  = $false
+        source_time= ''
 
-$state_t0_t7_total = ''
-$state_t0_t1 = ''
-$state_t1_t2 = ''
-$state_t2_t3 = ''
-$state_t3_t4 = ''
-$state_t4_t5 = ''
-$state_t5_t6 = ''
-$state_t6_t7 = ''
+        commit = ''; transport = ''; stream_mode = ''
+        policy_max_q = ''; policy_res_ms = ''; policy_cad_pct = ''; policy_always_latest = ''
+        req_quality = ''; actual_codec = ''; actual_res = ''; actual_fps = ''
 
-$state_decode_avg = ''
-$state_decode_p50 = ''
-$state_decode_p95 = ''
-$state_decode_n = ''
+        t0_t7_total = ''; t0_t1 = ''; t1_t2 = ''; t2_t3 = ''; t3_t4 = ''; t4_t5 = ''; t5_t6 = ''; t6_t7 = ''
 
-$state_q_res_avg = ''
-$state_q_res_p50 = ''
-$state_q_res_p95 = ''
-$state_q_res_n = ''
+        decode_avg = ''; decode_p50 = ''; decode_p95 = ''; decode_n = ''
+        q_res_avg = ''; q_res_p50 = ''; q_res_p95 = ''; q_res_n = ''
+        dxgi_wait_avg = ''; dxgi_wait_p50 = ''; dxgi_wait_p95 = ''; dxgi_wait_n = ''
+        vp_avg = ''; vp_p50 = ''; vp_p95 = ''; vp_n = ''
+        pres_avg = ''; pres_p50 = ''; pres_p95 = ''; pres_n = ''
 
-$state_dxgi_wait_avg = ''
-$state_dxgi_wait_p50 = ''
-$state_dxgi_wait_p95 = ''
-$state_dxgi_wait_n = ''
+        output_att = ''; output_ok = ''; output_skip = ''; output_err = ''
+        prev_att = ''; prev_ok = ''; prev_skip = ''; prev_err = ''
 
-$state_vp_avg = ''
-$state_vp_p50 = ''
-$state_vp_p95 = ''
-$state_vp_n = ''
+        out_age_count = ''; out_sel_p50 = ''; out_sel_p95 = ''; out_pres_p50 = ''; out_pres_p95 = ''
+        prev_age_count = ''; prev_skips = ''; prev_pres_p50 = ''
 
-$state_pres_avg = ''
-$state_pres_p50 = ''
-$state_pres_p95 = ''
-$state_pres_n = ''
+        v_rtp = ''; v_kb = ''; v_au = ''; v_dec = ''; v_rend = ''; unique_pres = ''
+        v_drop = ''; superseded = ''; v_late = ''; q_depth = ''; gen = ''; coded_res = ''; vis_res = ''
 
-$state_output_att = ''
-$state_output_ok = ''
-$state_output_skip = ''
-$state_output_err = ''
+        a_rtp = ''; a_kb = ''; a_buf = ''; ring = ''; target = ''; padding = ''; servo = ''
+        a_real_underruns = ''; overrun = ''; backlog = ''; recoveries = ''
 
-$state_prev_att = ''
-$state_prev_ok = ''
-$state_prev_skip = ''
-$state_prev_err = ''
+        av_offset = ''; drift = ''; sidecar = ''; session_state = ''; source_conn = ''; lifecycle = ''
+    }
+}
 
-$state_out_age_count = ''
-$state_out_sel_p50 = ''
-$state_out_sel_p95 = ''
-$state_out_pres_p50 = ''
-$state_out_pres_p95 = ''
+$currentCycle = New-CycleState
 
-$state_prev_age_count = ''
-$state_prev_skips = ''
-$state_prev_pres_p50 = ''
+function Emit-Cycle([System.Collections.IDictionary]$cycle) {
+    if (-not $cycle.has_update) { return }
 
-$state_v_rtp = ''
-$state_v_kb = ''
-$state_v_au = ''
-$state_v_dec = ''
-$state_v_rend = ''
-$state_unique_pres = ''
-$state_v_drop = ''
-$state_superseded = ''
-$state_v_late = ''
-$state_q_depth = ''
-$state_gen = ''
-$state_coded_res = ''
-$state_vis_res = ''
+    $reconnectEvent = 0
+    $formatChange = 0
 
-$state_a_rtp = ''
-$state_a_kb = ''
-$state_a_buf = ''
-$state_a_real_underruns = ''
-$state_ring = ''
-$state_target = ''
-$state_padding = ''
-$state_servo = ''
-$state_overrun = ''
-$state_backlog = ''
-$state_recoveries = ''
-$audio_last_updated = $null
+    if ($null -ne $script:lastGen -and $cycle.gen -ne '' -and $cycle.gen -ne $script:lastGen) {
+        $formatChange = 1
+    }
+    if ($cycle.gen -ne '') { $script:lastGen = $cycle.gen }
 
-$state_av_offset = ''
-$state_drift = ''
-$state_sidecar = ''
-$state_session_state = ''
-$state_source_conn = ''
-$state_lifecycle = ''
+    if ($null -ne $script:lastSourceConn -and $cycle.source_conn -eq 'connected' -and $script:lastSourceConn -eq 'disconnected') {
+        $reconnectEvent = 1
+        $script:sessionId++
+    }
+    if ($cycle.source_conn -ne '') { $script:lastSourceConn = $cycle.source_conn }
 
+    $videoStale = if ($cycle.has_video) { 0 } else { 1 }
+    $audioStale = if ($cycle.has_audio) { 0 } else { 1 }
+
+    $collectorTime = (Get-Date).ToString('o')
+    $sourceTime = $cycle.source_time
+
+    $rowValues = @(
+        $runId, $script:sessionId, $collectorTime, $sourceTime, $reconnectEvent, $formatChange,
+        $cycle.commit, $cycle.transport, $cycle.stream_mode, $cycle.policy_max_q, $cycle.policy_res_ms, $cycle.policy_cad_pct, $cycle.policy_always_latest, $cycle.req_quality, $cycle.actual_codec, $cycle.actual_res, $cycle.actual_fps,
+        $cycle.t0_t7_total, $cycle.t0_t1, $cycle.t1_t2, $cycle.t2_t3, $cycle.t3_t4, $cycle.t4_t5, $cycle.t5_t6, $cycle.t6_t7,
+        $cycle.decode_avg, $cycle.decode_p50, $cycle.decode_p95, $cycle.decode_n,
+        $cycle.q_res_avg, $cycle.q_res_p50, $cycle.q_res_p95, $cycle.q_res_n,
+        $cycle.dxgi_wait_avg, $cycle.dxgi_wait_p50, $cycle.dxgi_wait_p95, $cycle.dxgi_wait_n,
+        $cycle.vp_avg, $cycle.vp_p50, $cycle.vp_p95, $cycle.vp_n,
+        $cycle.pres_avg, $cycle.pres_p50, $cycle.pres_p95, $cycle.pres_n,
+        $cycle.output_att, $cycle.output_ok, $cycle.output_skip, $cycle.output_err,
+        $cycle.prev_att, $cycle.prev_ok, $cycle.prev_skip, $cycle.prev_err,
+        $cycle.out_age_count, $cycle.out_sel_p50, $cycle.out_sel_p95, $cycle.out_pres_p50, $cycle.out_pres_p95,
+        $cycle.prev_age_count, $cycle.prev_skips, $cycle.prev_pres_p50,
+        $videoStale, $cycle.v_rtp, $cycle.v_kb, $cycle.v_au, $cycle.v_dec, $cycle.v_rend, $cycle.unique_pres, $cycle.v_drop, $cycle.superseded, $cycle.v_late, $cycle.q_depth, $cycle.gen, $cycle.coded_res, $cycle.vis_res,
+        $audioStale, $cycle.a_rtp, $cycle.a_kb, $cycle.a_buf, $cycle.ring, $cycle.target, $cycle.padding, $cycle.servo, $cycle.a_real_underruns, $cycle.overrun, $cycle.backlog, $cycle.recoveries,
+        $cycle.av_offset, $cycle.drift, $cycle.sidecar, $cycle.session_state, $cycle.source_conn, $cycle.lifecycle
+    )
+
+    $escaped = $rowValues | ForEach-Object { Escape-CsvField $_ }
+    ($escaped -join ',') | Add-Content -LiteralPath $OutputPath -Encoding utf8
+}
+
+function Process-LogLine([string]$line) {
+    if (-not $line) { return }
+
+    if ($line -match '\[METADATA\]') {
+        if ($script:currentCycle.has_update) {
+            Emit-Cycle $script:currentCycle
+            $script:currentCycle = New-CycleState
+        }
+    }
+
+    if ($line -match '^\[(?<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\]') {
+        if ($script:currentCycle.source_time -eq '') {
+            $script:currentCycle.source_time = $Matches.time
+        }
+    }
+
+    if ($line -match '\[METADATA\] commit=(?<commit>[^ ]*) \| transport=(?<transport>[^ ]*) \| stream_mode=(?<mode>[^ ]*) \| policy\(max_q=(?<mq>\d+), res_ms=(?<rms>\d+), cad_pct=(?<cp>\d+), always_latest=(?<al>\d+)\) \| req_quality=(?<rq>[^ |]*) \| actual_stream\(codec=(?<codec>[^,]*), res=(?<res>[^,]*), fps=(?<fps>[^)]*)\)') {
+        $script:currentCycle.commit = $Matches.commit
+        $script:currentCycle.transport = $Matches.transport
+        $script:currentCycle.stream_mode = $Matches.mode
+        $script:currentCycle.policy_max_q = $Matches.mq
+        $script:currentCycle.policy_res_ms = $Matches.rms
+        $script:currentCycle.policy_cad_pct = $Matches.cp
+        $script:currentCycle.policy_always_latest = $Matches.al
+        $script:currentCycle.req_quality = $Matches.rq
+        $script:currentCycle.actual_codec = $Matches.codec
+        $script:currentCycle.actual_res = $Matches.res
+        $script:currentCycle.actual_fps = $Matches.fps
+        $script:currentCycle.has_update = $true
+    }
+    elseif ($line -match '\[STATS\] VIDEO: rtp=(?<rtp>\d+)/s \((?<kb>[\d.]+) KB/s\) \| au=(?<au>\d+)/s \| dec=(?<dec>\d+) fps \| rend=(?<rend>\d+) fps \(unique=(?<up>\d+).*?\) \| .*? \| drop=(?<drop>\d+)/s \(superseded=(?<sup_rate>\d+)/s, late=(?<late_rate>\d+)/s.*?\) \| q=(?<q>\d+) \| gen=(?<gen>\d+) \| coded=(?<coded>\S+) vis=(?<vis>\S+)') {
+        $script:currentCycle.v_rtp = $Matches.rtp
+        $script:currentCycle.v_kb = $Matches.kb
+        $script:currentCycle.v_au = $Matches.au
+        $script:currentCycle.v_dec = $Matches.dec
+        $script:currentCycle.v_rend = $Matches.rend
+        $script:currentCycle.unique_pres = $Matches.up
+        $script:currentCycle.v_drop = $Matches.drop
+        $script:currentCycle.superseded = $Matches.sup_rate
+        $script:currentCycle.v_late = $Matches.late_rate
+        $script:currentCycle.q_depth = $Matches.q
+        $script:currentCycle.gen = $Matches.gen
+        $script:currentCycle.coded_res = $Matches.coded
+        $script:currentCycle.vis_res = $Matches.vis
+        $script:currentCycle.has_video = $true
+        $script:currentCycle.has_update = $true
+    }
+    elseif ($line -match '\[STATS\] PRESENT: interval_avg=.*? \| call_avg=.*? \| dxgi_wait_avg=(?<dwait>[\d.]+)ms(?: \| output\(att=(?<oatt>\d+), ok=(?<ook>\d+), skip=(?<oskip>\d+), err=(?<oerr>\d+)\) \| preview\(att=(?<patt>\d+), ok=(?<pok>\d+), skip=(?<pskip>\d+), err=(?<perr>\d+)\))?') {
+        $script:currentCycle.dxgi_wait_avg = $Matches.dwait
+        if ($Matches.ContainsKey('oatt')) {
+            $script:currentCycle.output_att = $Matches.oatt
+            $script:currentCycle.output_ok = $Matches.ook
+            $script:currentCycle.output_skip = $Matches.oskip
+            $script:currentCycle.output_err = $Matches.oerr
+            $script:currentCycle.prev_att = $Matches.patt
+            $script:currentCycle.prev_ok = $Matches.pok
+            $script:currentCycle.prev_skip = $Matches.pskip
+            $script:currentCycle.prev_err = $Matches.perr
+        }
+        $script:currentCycle.has_video = $true
+        $script:currentCycle.has_update = $true
+    }
+    elseif ($line -match '\[STAGE LATENCY\] decode: avg=(?<d_avg>[\d.]+)ms p50=(?<d_p50>[\d.]+)ms p95=(?<d_p95>[\d.]+)ms \(n=(?<d_n>\d+)\) \| queue_res: avg=(?<qr_avg>[\d.]+)ms p50=(?<qr_p50>[\d.]+)ms p95=(?<qr_p95>[\d.]+)ms \(n=(?<qr_n>\d+)\) \| dxgi_wait: avg=(?<dw_avg>[\d.]+)ms p50=(?<dw_p50>[\d.]+)ms p95=(?<dw_p95>[\d.]+)ms max=(?<dw_max>[\d.]+)ms \(n=(?<dw_n>\d+)\) \| vp: avg=(?<vp_avg>[\d.]+)ms p50=(?<vp_p50>[\d.]+)ms p95=(?<vp_p95>[\d.]+)ms \(n=(?<vp_n>\d+)\) \| present: avg=(?<pr_avg>[\d.]+)ms p50=(?<pr_p50>[\d.]+)ms p95=(?<pr_p95>[\d.]+)ms \(n=(?<pr_n>\d+)\)') {
+        $script:currentCycle.decode_avg = $Matches.d_avg
+        $script:currentCycle.decode_p50 = $Matches.d_p50
+        $script:currentCycle.decode_p95 = $Matches.d_p95
+        $script:currentCycle.decode_n = $Matches.d_n
+        $script:currentCycle.q_res_avg = $Matches.qr_avg
+        $script:currentCycle.q_res_p50 = $Matches.qr_p50
+        $script:currentCycle.q_res_p95 = $Matches.qr_p95
+        $script:currentCycle.q_res_n = $Matches.qr_n
+        $script:currentCycle.dxgi_wait_avg = $Matches.dw_avg
+        $script:currentCycle.dxgi_wait_p50 = $Matches.dw_p50
+        $script:currentCycle.dxgi_wait_p95 = $Matches.dw_p95
+        $script:currentCycle.dxgi_wait_n = $Matches.dw_n
+        $script:currentCycle.vp_avg = $Matches.vp_avg
+        $script:currentCycle.vp_p50 = $Matches.vp_p50
+        $script:currentCycle.vp_p95 = $Matches.vp_p95
+        $script:currentCycle.vp_n = $Matches.vp_n
+        $script:currentCycle.pres_avg = $Matches.pr_avg
+        $script:currentCycle.pres_p50 = $Matches.pr_p50
+        $script:currentCycle.pres_p95 = $Matches.pr_p95
+        $script:currentCycle.pres_n = $Matches.pr_n
+        $script:currentCycle.has_video = $true
+        $script:currentCycle.has_update = $true
+    }
+    elseif ($line -match '\[LATENCY\] T0-T7(?: \(native receiver latency\))?: total=(?<total>[\d.]+)ms \(T0-T1=(?<t01>[\d.]+)ms, T1-T2=(?<t12>[\d.]+)ms, T2-T3=(?<t23>[\d.]+)ms, T3-T4=(?<t34>[\d.]+)ms, T4-T5\[q_age\]=(?<t45>[\d.]+)ms, T5-T6\[vp\]=(?<t56>[\d.]+)ms, T6-T7\[pres\]=(?<t67>[\d.]+)ms\)') {
+        $script:currentCycle.t0_t7_total = $Matches.total
+        $script:currentCycle.t0_t1 = $Matches.t01
+        $script:currentCycle.t1_t2 = $Matches.t12
+        $script:currentCycle.t2_t3 = $Matches.t23
+        $script:currentCycle.t3_t4 = $Matches.t34
+        $script:currentCycle.t4_t5 = $Matches.t45
+        $script:currentCycle.t5_t6 = $Matches.t56
+        $script:currentCycle.t6_t7 = $Matches.t67
+        $script:currentCycle.has_video = $true
+        $script:currentCycle.has_update = $true
+    }
+    elseif ($line -match '\[FRAME AGE OUTPUT\] count=(?<cnt>\d+) \| select: p50=(?<sp50>[\d.]+)ms p95=(?<sp95>[\d.]+)ms.*? \| present: p50=(?<pp50>[\d.]+)ms p95=(?<pp95>[\d.]+)ms') {
+        $script:currentCycle.out_age_count = $Matches.cnt
+        $script:currentCycle.out_sel_p50 = $Matches.sp50
+        $script:currentCycle.out_sel_p95 = $Matches.sp95
+        $script:currentCycle.out_pres_p50 = $Matches.pp50
+        $script:currentCycle.out_pres_p95 = $Matches.pp95
+        $script:currentCycle.has_video = $true
+        $script:currentCycle.has_update = $true
+    }
+    elseif ($line -match '\[FRAME AGE PREVIEW\] count=(?<cnt>\d+) skips=(?<skips>\d+) \|.*? \| present: p50=(?<pp50>[\d.]+)ms') {
+        $script:currentCycle.prev_age_count = $Matches.cnt
+        $script:currentCycle.prev_skips = $Matches.skips
+        $script:currentCycle.prev_pres_p50 = $Matches.pp50
+        $script:currentCycle.has_video = $true
+        $script:currentCycle.has_update = $true
+    }
+    elseif ($line -match '\[STATS\] AUDIO: rtp=(?<artp>\d+)/s \((?<akb>[\d.]+) KB/s\).*? \| buf=(?<abuf>[\d.]+)ms.*? \| real_underruns=\d+/s \(total=(?<underruns>\d+)') {
+        $script:currentCycle.a_rtp = $Matches.artp
+        $script:currentCycle.a_kb = $Matches.akb
+        $script:currentCycle.a_buf = $Matches.abuf
+        $script:currentCycle.a_real_underruns = $Matches.underruns
+        $script:currentCycle.has_audio = $true
+        $script:currentCycle.has_update = $true
+    }
+    elseif ($line -match '\[AUDIO LATENCY\] .*?ring=(?<ring>[\d.]+)ms target=(?<target>[\d.]+)ms.*?padding=(?<padding>[\d.]+)ms.*?servo=(?<servo>-?[\d.]+)ppm.*?overrun_frames=(?<overrun>\d+) backlog_drops=(?<backlog>\d+) recoveries=(?<recoveries>\d+)') {
+        $script:currentCycle.ring = $Matches.ring
+        $script:currentCycle.target = $Matches.target
+        $script:currentCycle.padding = $Matches.padding
+        $script:currentCycle.servo = $Matches.servo
+        $script:currentCycle.overrun = $Matches.overrun
+        $script:currentCycle.backlog = $Matches.backlog
+        $script:currentCycle.recoveries = $Matches.recoveries
+        $script:currentCycle.has_audio = $true
+        $script:currentCycle.has_update = $true
+    }
+    elseif ($line -match '\[STATS\] SYNC/SESSION: A/V=(?<av>-?[\d.]+)ms drift=(?<drift>-?[\d.]+)ms/min \| sidecar=(?<sidecar>[^ |]+) \| state=(?<state>[^ |]+) \| source=(?<source>[^ |]+) \|.*? \| lifecycle=(?<life>.*)') {
+        $script:currentCycle.av_offset = $Matches.av
+        $script:currentCycle.drift = $Matches.drift
+        $script:currentCycle.sidecar = $Matches.sidecar
+        $script:currentCycle.session_state = $Matches.state
+        $script:currentCycle.source_conn = $Matches.source
+        $script:currentCycle.lifecycle = $Matches.life.Trim()
+        $script:currentCycle.has_update = $true
+
+        Emit-Cycle $script:currentCycle
+        $script:currentCycle = New-CycleState
+    }
+}
 while ((Get-Date) -lt $deadline) {
     if (Test-Path -LiteralPath $LogPath) {
-        $lines = @()
         try {
             $fileInfo = New-Object System.IO.FileInfo($LogPath)
+            $creationTime = $fileInfo.CreationTimeUtc
+
+            # Detect log rotation (file truncated OR replacement file created)
+            $isRotated = $false
             if ($fileInfo.Length -lt $lastFilePos) {
-                # Log file was truncated or rotated
-                $lastFilePos = 0
+                $isRotated = $true
+            } elseif ($lastFilePos -gt 0 -and $fileHeaderPrefix -ne '') {
+                try {
+                    $checkStream = [System.IO.FileStream]::new($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                    try {
+                        $checkBuf = New-Object byte[] (64)
+                        $readBytes = $checkStream.Read($checkBuf, 0, 64)
+                        $currPrefix = [System.Text.Encoding]::UTF8.GetString($checkBuf, 0, $readBytes)
+                        if ($currPrefix -ne $fileHeaderPrefix) {
+                            $isRotated = $true
+                        }
+                    } finally {
+                        $checkStream.Dispose()
+                    }
+                } catch {}
             }
+
+            if ($isRotated) {
+                # Drain remaining data from previous log file (.1.log) if present
+                $baseName = [System.IO.Path]::GetFileNameWithoutExtension($LogPath)
+                $backupPath = Join-Path $fileInfo.DirectoryName "$baseName.1.log"
+                if (-not (Test-Path -LiteralPath $backupPath)) {
+                    $backupPath = Join-Path $fileInfo.DirectoryName "duwn-mirror.1.log"
+                }
+                if (Test-Path -LiteralPath $backupPath) {
+                    try {
+                        $bfs = [System.IO.FileStream]::new($backupPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                        try {
+                            if ($bfs.Length -gt $lastFilePos) {
+                                $null = $bfs.Seek($lastFilePos, [System.IO.SeekOrigin]::Begin)
+                                $bsr = [System.IO.StreamReader]::new($bfs, [System.Text.Encoding]::UTF8)
+                                $pendingText += $bsr.ReadToEnd()
+                            }
+                        } finally {
+                            $bfs.Dispose()
+                        }
+                    } catch {}
+                }
+                $lastFilePos = 0
+                $fileHeaderPrefix = ''
+                $lastCreationTime = $creationTime
+            }
+
+            if ($null -eq $lastCreationTime) {
+                $lastCreationTime = $creationTime
+            }
+
             if ($fileInfo.Length -gt $lastFilePos) {
                 $fs = [System.IO.FileStream]::new(
                     $LogPath,
@@ -156,198 +343,42 @@ while ((Get-Date) -lt $deadline) {
                     [System.IO.FileShare]::ReadWrite
                 )
                 try {
+                    if ($lastFilePos -eq 0) {
+                        $pBuf = New-Object byte[] (64)
+                        $rBytes = $fs.Read($pBuf, 0, 64)
+                        $fileHeaderPrefix = [System.Text.Encoding]::UTF8.GetString($pBuf, 0, $rBytes)
+                    }
                     $null = $fs.Seek($lastFilePos, [System.IO.SeekOrigin]::Begin)
                     $sr = [System.IO.StreamReader]::new($fs, [System.Text.Encoding]::UTF8)
-                    while (-not $sr.EndOfStream) {
-                        $l = $sr.ReadLine()
-                        if ($l) { $lines += $l }
-                    }
+                    $newText = $sr.ReadToEnd()
                     $lastFilePos = $fs.Position
+                    $pendingText += $newText
                 } finally {
                     $fs.Dispose()
                 }
             }
         } catch {
-            # Non-fatal read error (e.g. transient file access during log rotation)
+            # Non-fatal read error (e.g. transient file sharing during rotation)
         }
 
-        if ($lines.Count -gt 0) {
-            $hasDiagnosticsUpdate = $false
-            $lastSourceTime = ''
-
-            foreach ($line in $lines) {
-                if ($line -match '^\[(?<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\]') {
-                    $lastSourceTime = $Matches.time
+        # Process complete lines from pendingText buffer, preserve incomplete lines
+        if ($pendingText.Length -gt 0) {
+            $lastNl = $pendingText.LastIndexOf("`n")
+            if ($lastNl -ge 0) {
+                $completeChunk = $pendingText.Substring(0, $lastNl)
+                $pendingText = $pendingText.Substring($lastNl + 1)
+                $chunkLines = $completeChunk -split "`r?`n"
+                foreach ($cl in $chunkLines) {
+                    Process-LogLine $cl
                 }
-
-                if ($line -match '\[METADATA\] commit=(?<commit>[^ ]*) \| transport=(?<transport>[^ ]*) \| stream_mode=(?<mode>[^ ]*) \| policy\(max_q=(?<mq>\d+), res_ms=(?<rms>\d+), cad_pct=(?<cp>\d+), always_latest=(?<al>\d+)\) \| req_quality=(?<rq>[^ |]*) \| actual_stream\(codec=(?<codec>[^,]*), res=(?<res>[^,]*), fps=(?<fps>[^)]*)\)') {
-                    $state_commit = $Matches.commit
-                    $state_transport = $Matches.transport
-                    $state_stream_mode = $Matches.mode
-                    $state_policy_max_q = $Matches.mq
-                    $state_policy_res_ms = $Matches.rms
-                    $state_policy_cad_pct = $Matches.cp
-                    $state_policy_always_latest = $Matches.al
-                    $state_req_quality = $Matches.rq
-                    $state_actual_codec = $Matches.codec
-                    $state_actual_res = $Matches.res
-                    $state_actual_fps = $Matches.fps
-                    $hasDiagnosticsUpdate = $true
-                }
-                elseif ($line -match '\[STATS\] VIDEO: rtp=(?<rtp>\d+)/s \((?<kb>[\d.]+) KB/s\) \| au=(?<au>\d+)/s \| dec=(?<dec>\d+) fps \| rend=(?<rend>\d+) fps \(unique=(?<up>\d+).*?\) \| .*? \| drop=(?<drop>\d+)/s \(superseded=(?<sup_rate>\d+)/s, late=(?<late_rate>\d+)/s.*?\) \| q=(?<q>\d+) \| gen=(?<gen>\d+) \| coded=(?<coded>\S+) vis=(?<vis>\S+)') {
-                    $state_v_rtp = $Matches.rtp
-                    $state_v_kb = $Matches.kb
-                    $state_v_au = $Matches.au
-                    $state_v_dec = $Matches.dec
-                    $state_v_rend = $Matches.rend
-                    $state_unique_pres = $Matches.up
-                    $state_v_drop = $Matches.drop
-                    $state_superseded = $Matches.sup_rate
-                    $state_v_late = $Matches.late_rate
-                    $state_q_depth = $Matches.q
-                    $state_gen = $Matches.gen
-                    $state_coded_res = $Matches.coded
-                    $state_vis_res = $Matches.vis
-                    $hasDiagnosticsUpdate = $true
-                }
-                elseif ($line -match '\[STATS\] PRESENT: interval_avg=.*? \| call_avg=.*? \| dxgi_wait_avg=(?<dwait>[\d.]+)ms(?: \| output\(att=(?<oatt>\d+), ok=(?<ook>\d+), skip=(?<oskip>\d+), err=(?<oerr>\d+)\) \| preview\(att=(?<patt>\d+), ok=(?<pok>\d+), skip=(?<pskip>\d+), err=(?<perr>\d+)\))?') {
-                    $state_dxgi_wait_avg = $Matches.dwait
-                    if ($Matches.ContainsKey('oatt')) {
-                        $state_output_att = $Matches.oatt
-                        $state_output_ok = $Matches.ook
-                        $state_output_skip = $Matches.oskip
-                        $state_output_err = $Matches.oerr
-                        $state_prev_att = $Matches.patt
-                        $state_prev_ok = $Matches.pok
-                        $state_prev_skip = $Matches.pskip
-                        $state_prev_err = $Matches.perr
-                    }
-                    $hasDiagnosticsUpdate = $true
-                }
-                elseif ($line -match '\[STAGE LATENCY\] decode: avg=(?<d_avg>[\d.]+)ms p50=(?<d_p50>[\d.]+)ms p95=(?<d_p95>[\d.]+)ms \(n=(?<d_n>\d+)\) \| queue_res: avg=(?<qr_avg>[\d.]+)ms p50=(?<qr_p50>[\d.]+)ms p95=(?<qr_p95>[\d.]+)ms \(n=(?<qr_n>\d+)\) \| dxgi_wait: avg=(?<dw_avg>[\d.]+)ms p50=(?<dw_p50>[\d.]+)ms p95=(?<dw_p95>[\d.]+)ms max=(?<dw_max>[\d.]+)ms \(n=(?<dw_n>\d+)\) \| vp: avg=(?<vp_avg>[\d.]+)ms p50=(?<vp_p50>[\d.]+)ms p95=(?<vp_p95>[\d.]+)ms \(n=(?<vp_n>\d+)\) \| present: avg=(?<pr_avg>[\d.]+)ms p50=(?<pr_p50>[\d.]+)ms p95=(?<pr_p95>[\d.]+)ms \(n=(?<pr_n>\d+)\)') {
-                    $state_decode_avg = $Matches.d_avg
-                    $state_decode_p50 = $Matches.d_p50
-                    $state_decode_p95 = $Matches.d_p95
-                    $state_decode_n = $Matches.d_n
-                    $state_q_res_avg = $Matches.qr_avg
-                    $state_q_res_p50 = $Matches.qr_p50
-                    $state_q_res_p95 = $Matches.qr_p95
-                    $state_q_res_n = $Matches.qr_n
-                    $state_dxgi_wait_avg = $Matches.dw_avg
-                    $state_dxgi_wait_p50 = $Matches.dw_p50
-                    $state_dxgi_wait_p95 = $Matches.dw_p95
-                    $state_dxgi_wait_n = $Matches.dw_n
-                    $state_vp_avg = $Matches.vp_avg
-                    $state_vp_p50 = $Matches.vp_p50
-                    $state_vp_p95 = $Matches.vp_p95
-                    $state_vp_n = $Matches.vp_n
-                    $state_pres_avg = $Matches.pr_avg
-                    $state_pres_p50 = $Matches.pr_p50
-                    $state_pres_p95 = $Matches.pr_p95
-                    $state_pres_n = $Matches.pr_n
-                    $hasDiagnosticsUpdate = $true
-                }
-                elseif ($line -match '\[LATENCY\] T0-T7(?: \(native receiver latency\))?: total=(?<total>[\d.]+)ms \(T0-T1=(?<t01>[\d.]+)ms, T1-T2=(?<t12>[\d.]+)ms, T2-T3=(?<t23>[\d.]+)ms, T3-T4=(?<t34>[\d.]+)ms, T4-T5\[q_age\]=(?<t45>[\d.]+)ms, T5-T6\[vp\]=(?<t56>[\d.]+)ms, T6-T7\[pres\]=(?<t67>[\d.]+)ms\)') {
-                    $state_t0_t7_total = $Matches.total
-                    $state_t0_t1 = $Matches.t01
-                    $state_t1_t2 = $Matches.t12
-                    $state_t2_t3 = $Matches.t23
-                    $state_t3_t4 = $Matches.t34
-                    $state_t4_t5 = $Matches.t45
-                    $state_t5_t6 = $Matches.t56
-                    $state_t6_t7 = $Matches.t67
-                    $hasDiagnosticsUpdate = $true
-                }
-                elseif ($line -match '\[FRAME AGE OUTPUT\] count=(?<cnt>\d+) \| select: p50=(?<sp50>[\d.]+)ms p95=(?<sp95>[\d.]+)ms.*? \| present: p50=(?<pp50>[\d.]+)ms p95=(?<pp95>[\d.]+)ms') {
-                    $state_out_age_count = $Matches.cnt
-                    $state_out_sel_p50 = $Matches.sp50
-                    $state_out_sel_p95 = $Matches.sp95
-                    $state_out_pres_p50 = $Matches.pp50
-                    $state_out_pres_p95 = $Matches.pp95
-                    $hasDiagnosticsUpdate = $true
-                }
-                elseif ($line -match '\[FRAME AGE PREVIEW\] count=(?<cnt>\d+) skips=(?<skips>\d+) \|.*? \| present: p50=(?<pp50>[\d.]+)ms') {
-                    $state_prev_age_count = $Matches.cnt
-                    $state_prev_skips = $Matches.skips
-                    $state_prev_pres_p50 = $Matches.pp50
-                    $hasDiagnosticsUpdate = $true
-                }
-                elseif ($line -match '\[STATS\] AUDIO: rtp=(?<artp>\d+)/s \((?<akb>[\d.]+) KB/s\).*? \| buf=(?<abuf>[\d.]+)ms.*? \| real_underruns=\d+/s \(total=(?<underruns>\d+)') {
-                    $state_a_rtp = $Matches.artp
-                    $state_a_kb = $Matches.akb
-                    $state_a_buf = $Matches.abuf
-                    $state_a_real_underruns = $Matches.underruns
-                    $hasDiagnosticsUpdate = $true
-                }
-                elseif ($line -match '\[AUDIO LATENCY\] .*?ring=(?<ring>[\d.]+)ms target=(?<target>[\d.]+)ms.*?padding=(?<padding>[\d.]+)ms.*?servo=(?<servo>-?[\d.]+)ppm.*?overrun_frames=(?<overrun>\d+) backlog_drops=(?<backlog>\d+) recoveries=(?<recoveries>\d+)') {
-                    $state_ring = $Matches.ring
-                    $state_target = $Matches.target
-                    $state_padding = $Matches.padding
-                    $state_servo = $Matches.servo
-                    $state_overrun = $Matches.overrun
-                    $state_backlog = $Matches.backlog
-                    $state_recoveries = $Matches.recoveries
-                    $audio_last_updated = Get-Date
-                    $hasDiagnosticsUpdate = $true
-                }
-                elseif ($line -match '\[STATS\] SYNC/SESSION: A/V=(?<av>-?[\d.]+)ms drift=(?<drift>-?[\d.]+)ms/min \| sidecar=(?<sidecar>[^ |]+) \| state=(?<state>[^ |]+) \| source=(?<source>[^ |]+) \|.*? \| lifecycle=(?<life>.*)') {
-                    $state_av_offset = $Matches.av
-                    $state_drift = $Matches.drift
-                    $state_sidecar = $Matches.sidecar
-                    $state_session_state = $Matches.state
-                    $state_source_conn = $Matches.source
-                    $state_lifecycle = $Matches.life.Trim()
-                    $hasDiagnosticsUpdate = $true
-                }
-            }
-
-            if ($hasDiagnosticsUpdate) {
-                # Determine reconnect or format change
-                $reconnectEvent = 0
-                if ($null -ne $lastGen -and $state_gen -ne '' -and $state_gen -ne $lastGen) {
-                    $reconnectEvent = 1
-                }
-                if ($null -ne $lastSourceConn -and $state_source_conn -eq 'connected' -and $lastSourceConn -eq 'disconnected') {
-                    $reconnectEvent = 1
-                }
-                if ($state_gen -ne '') { $lastGen = $state_gen }
-                if ($state_source_conn -ne '') { $lastSourceConn = $state_source_conn }
-
-                # Audio freshness evaluation (mark stale if >3s since last [AUDIO LATENCY] update)
-                $audioStale = 1
-                if ($null -ne $audio_last_updated) {
-                    $audioAgeSec = ((Get-Date) - $audio_last_updated).TotalSeconds
-                    if ($audioAgeSec -le 3.0) {
-                        $audioStale = 0
-                    }
-                }
-
-                $collectorTime = (Get-Date).ToString('o')
-                $sourceTime = if ($lastSourceTime -ne '') { $lastSourceTime } else { (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff') }
-
-                $csvRow = @(
-                    $runId, $collectorTime, $sourceTime, $reconnectEvent,
-                    $state_commit, $state_transport, $state_stream_mode, $state_policy_max_q, $state_policy_res_ms, $state_policy_cad_pct, $state_policy_always_latest, $state_req_quality, $state_actual_codec, $state_actual_res, $state_actual_fps,
-                    $state_t0_t7_total, $state_t0_t1, $state_t1_t2, $state_t2_t3, $state_t3_t4, $state_t4_t5, $state_t5_t6, $state_t6_t7,
-                    $state_decode_avg, $state_decode_p50, $state_decode_p95, $state_decode_n,
-                    $state_q_res_avg, $state_q_res_p50, $state_q_res_p95, $state_q_res_n,
-                    $state_dxgi_wait_avg, $state_dxgi_wait_p50, $state_dxgi_wait_p95, $state_dxgi_wait_n,
-                    $state_vp_avg, $state_vp_p50, $state_vp_p95, $state_vp_n,
-                    $state_pres_avg, $state_pres_p50, $state_pres_p95, $state_pres_n,
-                    $state_output_att, $state_output_ok, $state_output_skip, $state_output_err,
-                    $state_prev_att, $state_prev_ok, $state_prev_skip, $state_prev_err,
-                    $state_out_age_count, $state_out_sel_p50, $state_out_sel_p95, $state_out_pres_p50, $state_out_pres_p95,
-                    $state_prev_age_count, $state_prev_skips, $state_prev_pres_p50,
-                    $state_v_rtp, $state_v_kb, $state_v_au, $state_v_dec, $state_v_rend, $state_unique_pres, $state_v_drop, $state_superseded, $state_v_late, $state_q_depth, $state_gen, $state_coded_res, $state_vis_res,
-                    $audioStale, $state_a_rtp, $state_a_kb, $state_a_buf, $state_ring, $state_target, $state_padding, $state_servo, $state_a_real_underruns, $state_overrun, $state_backlog, $state_recoveries,
-                    $state_av_offset, $state_drift, $state_sidecar, $state_session_state, $state_source_conn, $state_lifecycle
-                ) -join ','
-
-                $csvRow | Add-Content -LiteralPath $OutputPath -Encoding utf8
             }
         }
     }
     Start-Sleep -Seconds 1
 }
 
-(Get-Date).ToString('o') | Set-Content -LiteralPath "$OutputPath.done" -Encoding ascii
+# Flush any trailing cycle at termination
+if ($script:currentCycle.has_update) {
+    Emit-Cycle $script:currentCycle
+    $script:currentCycle = New-CycleState
+}

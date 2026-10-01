@@ -1395,6 +1395,8 @@ bool App::Init() noexcept {
 
 
 
+    PublishMetadataSnapshot();
+
     // Metrics thread
 
     m_metrics_thread = std::jthread([this](std::stop_token st){
@@ -1700,6 +1702,10 @@ void App::RestartAirPlaySidecar() noexcept {
     }
 
 
+
+    m_active_receiver_quality = m_settings.receiver_quality;
+    if (m_window) m_window->State().receiver_quality_pending = false;
+    PublishMetadataSnapshot();
 
     DUWN_LOG_INFOF("App", "AirPlay sidecar restart initiated (config_gen={})", gen);
 
@@ -2101,6 +2107,8 @@ void App::SwitchConnectionMode(ConnectionMode mode) noexcept {
     }
 
     if (m_window) ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+
+    PublishMetadataSnapshot();
 
     DUWN_LOG_INFOF("App", "Connection mode switched to {}",
 
@@ -3560,6 +3568,7 @@ void App::ApplySettingChange(int id, int value) noexcept {
         }
     }
     SyncUiVideoSettings();
+    PublishMetadataSnapshot();
 
     if (id < Control_Set_Brightness || id > Control_Set_Sharpness)
 
@@ -4316,15 +4325,13 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
             duwn::telemetry::ConnectionTimeline::Get().Record(
                 duwn::telemetry::ConnectionMilestone::C12_FirstPreviewPresent,
                 std::format("{}x{} visible", frame.visible_width, frame.visible_height));
+            telemetry::LatencyTelemetry::Get().RecordPreviewSuccess(
+                decoder_output_qpc, preview_select_qpc, preview_present_qpc);
+        } else if (prev_res == video::PresentResult::Skipped) {
+            telemetry::LatencyTelemetry::Get().RecordPreviewSkip();
+        } else {
+            telemetry::LatencyTelemetry::Get().RecordPreviewError();
         }
-
-        const bool skipped = (prev_res == video::PresentResult::Skipped);
-        if (skipped) {
-            GlobalMetrics().preview_skips.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        telemetry::LatencyTelemetry::Get().RecordPreviewFrameAge(
-            decoder_output_qpc, preview_select_qpc, preview_present_qpc, preview_present_qpc, skipped);
     }
 
     m_active_filter_caps.store(m_renderer->FilterCaps(), std::memory_order_relaxed);
@@ -4377,6 +4384,50 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
 
     }
 
+}
+
+
+
+void App::PublishMetadataSnapshot() noexcept {
+    SessionMetadataSnapshot snap;
+    snap.req_streaming_mode = m_settings.streaming_mode;
+    snap.req_custom_freshness_ms = m_settings.custom_video_freshness_ms;
+    snap.req_custom_queue_frames = m_settings.custom_video_queue_frames;
+    snap.req_receiver_quality = m_settings.receiver_quality;
+    snap.req_transport_mode = m_settings.transport_mode;
+
+    const bool is_wired = m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WiredUsb;
+    if (is_wired) {
+        snap.active_transport = "WiredUsb";
+    } else if (m_settings.transport_mode == TransportMode::DirectIpc && m_ipc_consumer && m_ipc_consumer->IsOpen()) {
+        snap.active_transport = "DirectIpc";
+    } else {
+        snap.active_transport = "LocalRtpUdp";
+    }
+
+    if (m_scheduler) {
+        snap.active_policy = m_scheduler->GetStreamingPolicy();
+    } else {
+        snap.active_policy = ResolveStreamingPolicy(m_settings.streaming_mode,
+            m_settings.custom_video_freshness_ms, m_settings.custom_video_queue_frames);
+    }
+    snap.active_streaming_mode = m_settings.streaming_mode;
+
+    if (m_window && m_window->State().receiver_quality_pending) {
+        snap.receiver_quality_pending = true;
+        snap.active_receiver_quality = m_active_receiver_quality;
+    } else {
+        snap.receiver_quality_pending = false;
+        snap.active_receiver_quality = m_settings.receiver_quality;
+    }
+
+    std::lock_guard lock(m_metadata_mutex);
+    m_metadata_snapshot = std::move(snap);
+}
+
+SessionMetadataSnapshot App::GetMetadataSnapshot() const noexcept {
+    std::lock_guard lock(m_metadata_mutex);
+    return m_metadata_snapshot;
 }
 
 
@@ -4760,19 +4811,17 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
             v_rtp_rate, v_kb_rate, v_au_rate, v_dec_fps, v_rend_fps, unique_pres_fps, disp_opp_rate, ticks_rate, rep_ticks_rate,
             v_drop_rate, superseded_rate, v_late_rate, cur_pres_late, cur_trans_drop, cur_q_overflow, cur_sess_q_full, cur_q_full_drop, q_depth, cur_gen, coded_w, coded_h, vis_w, vis_h);
 
-        const bool is_wired_mode = m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WiredUsb;
-        const char* transport_str = is_wired_mode ? "WiredUsb"
-            : (m_settings.transport_mode == TransportMode::DirectIpc ? "DirectIpc" : "LocalRtpUdp");
+        const SessionMetadataSnapshot meta_snap = GetMetadataSnapshot();
+        const char* transport_str = meta_snap.active_transport.c_str();
         const char* stream_mode_str = "Balanced";
-        switch (m_settings.streaming_mode) {
+        switch (meta_snap.active_streaming_mode) {
         case StreamingMode::LowLatency: stream_mode_str = "Fastest"; break;
         case StreamingMode::Compatibility: stream_mode_str = "Smooth"; break;
         case StreamingMode::Custom: stream_mode_str = "Custom"; break;
         default: stream_mode_str = "Balanced"; break;
         }
-        const auto active_policy = ResolveStreamingPolicy(m_settings.streaming_mode,
-            m_settings.custom_video_freshness_ms, m_settings.custom_video_queue_frames);
-        const auto req_quality_sv = GetReceiverQualityName(m_settings.receiver_quality);
+        const auto active_policy = meta_snap.active_policy;
+        const auto req_quality_sv = GetReceiverQualityName(meta_snap.active_receiver_quality);
         const char* codec_str = "Unknown";
         {
             std::lock_guard lock(m_decoder_mutex);
@@ -4782,9 +4831,17 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
             }
         }
 
+        std::string commit_str = "unknown";
+        if (DUWN_GIT_COMMIT_SHORT[0] != '\0' && std::string_view(DUWN_GIT_COMMIT_SHORT) != "unknown") {
+            commit_str = DUWN_GIT_COMMIT_SHORT;
+#if defined(DUWN_GIT_IS_DIRTY) && (DUWN_GIT_IS_DIRTY == 1)
+            commit_str += "-dirty";
+#endif
+        }
+
         DUWN_LOG_INFOF("Diagnostics",
             "[METADATA] commit={} | transport={} | stream_mode={} | policy(max_q={}, res_ms={}, cad_pct={}, always_latest={}) | req_quality={} | actual_stream(codec={}, res={}x{}, fps={:.2f})",
-            DUWN_GIT_COMMIT_SHORT[0] != '\0' ? DUWN_GIT_COMMIT_SHORT : "f08ff19",
+            commit_str,
             transport_str,
             stream_mode_str,
             active_policy.max_decoded_frames,
@@ -5127,7 +5184,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
 
 
-        if (m_settings.transport_mode == TransportMode::DirectIpc) {
+        if (meta_snap.active_transport == "DirectIpc") {
 
             DUWN_LOG_INFOF("Diagnostics",
 
@@ -5376,7 +5433,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
             state.transport_name = wired_mode ? L"AirPlay over Apple USB Ethernet"
 
-                : m_settings.transport_mode == TransportMode::DirectIpc ? L"Direct IPC" : L"Local RTP/UDP";
+                : meta_snap.active_transport == "DirectIpc" ? L"Direct IPC" : L"Local RTP/UDP";
 
             if (wired_mode) {
 
