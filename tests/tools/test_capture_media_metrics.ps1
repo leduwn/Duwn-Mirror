@@ -238,7 +238,165 @@ try {
     }
     Write-Host "  [PASS] Test 8: Incomplete Line & Split Line Stitching"
 
-    Write-Host "`nALL 8 COLLECTOR FIXTURE TESTS PASSED!"
+    # ------------------------------------------------------------------------
+    # Test 9: Legacy order regression fixture (VIDEO -> METADATA -> PRESENT -> SYNC -> T0-T7)
+    # Distinct values per cycle to prove no cross-cycle data corruption/mixing
+    # ------------------------------------------------------------------------
+    $testCsv9 = Join-Path $testTempDir 'output_legacy_order.csv'
+    $legacyOrderLog = Join-Path $testTempDir 'legacy_order.log'
+
+    $legCycle1 = @(
+        "[2026-10-01 12:00:00.001] [Info] [Diagnostics] [STATS] VIDEO: rtp=60/s (1200.5 KB/s) | au=60/s | dec=60 fps | rend=60 fps (unique=60, opp=60/s) | ticks=60/s (hold=0/s) | drop=0/s (superseded=0/s, late=0/s, late_drop=0, trans_drop=0, q_overflow=0, sess_q_full=0, life_q_full=0) | q=1 | gen=1 | coded=1920x1080 vis=1920x1080",
+        "[2026-10-01 12:00:00.002] [Info] [Diagnostics] [METADATA] commit=c1c1c1 | transport=LocalRtpUdp | stream_mode=Balanced | policy(max_q=3, res_ms=50, cad_pct=100, always_latest=0) | req_quality=Auto | actual_stream(codec=H264, res=1920x1080, fps=60.00)",
+        "[2026-10-01 12:00:00.003] [Info] [Diagnostics] [STATS] PRESENT: interval_avg=16.67ms p95=16.70ms | call_avg=1.20ms p50=1.15ms p95=1.35ms | dxgi_wait_avg=15.00ms | output(att=60, ok=60, skip=0, err=0) | preview(att=60, ok=59, skip=1, err=0)",
+        "[2026-10-01 12:00:00.004] [Info] [Diagnostics] [STATS] SYNC/SESSION: A/V=5.2ms drift=0.10ms/min | sidecar=alive | state=Streaming | source=connected | output=1920x1080 preview=640x360 | lifecycle=streaming_active",
+        "[2026-10-01 12:00:00.005] [Info] [Diagnostics] [LATENCY] T0-T7 (native receiver latency): total=3.50ms (T0-T1=0.20ms, T1-T2=0.30ms, T2-T3=1.80ms, T3-T4=0.10ms, T4-T5[q_age]=0.20ms, T5-T6[vp]=0.40ms, T6-T7[pres]=0.50ms) | audio_buffered=24.50ms (ring=12.50ms, wasapi_padding=12.00ms) | AV_skew=unavailable",
+        "[2026-10-01 12:00:00.006] [Info] [Diagnostics] [FRAME AGE OUTPUT] count=60 | select: p50=3.10ms p95=3.50ms p99=4.00ms max=4.50ms | present: p50=4.50ms p95=5.00ms p99=5.50ms max=6.00ms"
+    ) -join "`r`n"
+
+    $legCycle2 = @(
+        "[2026-10-01 12:00:01.001] [Info] [Diagnostics] [STATS] VIDEO: rtp=120/s (2400.0 KB/s) | au=120/s | dec=120 fps | rend=120 fps (unique=120, opp=120/s) | ticks=120/s (hold=0/s) | drop=0/s (superseded=0/s, late=0/s, late_drop=0, trans_drop=0, q_overflow=0, sess_q_full=0, life_q_full=0) | q=2 | gen=2 | coded=1920x1080 vis=1920x1080",
+        "[2026-10-01 12:00:01.002] [Info] [Diagnostics] [METADATA] commit=c2c2c2 | transport=DirectIpc | stream_mode=Fastest | policy(max_q=1, res_ms=16, cad_pct=100, always_latest=1) | req_quality=1080p60 | actual_stream(codec=HEVC, res=1920x1080, fps=120.00)",
+        "[2026-10-01 12:00:01.003] [Info] [Diagnostics] [STATS] PRESENT: interval_avg=8.33ms p95=8.40ms | call_avg=0.90ms p50=0.85ms p95=1.05ms | dxgi_wait_avg=7.00ms | output(att=120, ok=120, skip=0, err=0) | preview(att=120, ok=120, skip=0, err=0)",
+        "[2026-10-01 12:00:01.004] [Info] [Diagnostics] [STATS] SYNC/SESSION: A/V=1.1ms drift=0.01ms/min | sidecar=alive | state=Streaming | source=connected | output=1920x1080 preview=640x360 | lifecycle=streaming_active",
+        "[2026-10-01 12:00:01.005] [Info] [Diagnostics] [LATENCY] T0-T7 (native receiver latency): total=7.80ms (T0-T1=0.30ms, T1-T2=0.40ms, T2-T3=3.20ms, T3-T4=0.20ms, T4-T5[q_age]=0.50ms, T5-T6[vp]=1.20ms, T6-T7[pres]=2.00ms) | audio_buffered=12.00ms (ring=6.00ms, wasapi_padding=6.00ms) | AV_skew=unavailable",
+        "[2026-10-01 12:00:01.006] [Info] [Diagnostics] [FRAME AGE OUTPUT] count=120 | select: p50=2.10ms p95=2.50ms p99=3.00ms max=3.50ms | present: p50=3.50ms p95=4.00ms p99=4.50ms max=5.00ms"
+    ) -join "`r`n"
+
+    ($legCycle1 + "`r`n" + $legCycle2 + "`r`n") | Set-Content -LiteralPath $legacyOrderLog -Encoding utf8
+
+    $job = Start-Job -ScriptBlock {
+        param($col, $out, $log)
+        & $col -OutputPath $out -DurationSeconds 3 -LogPath $log
+    } -ArgumentList $collectorScript, $testCsv9, $legacyOrderLog
+    $job | Wait-Job -Timeout 10 | Out-Null
+    Receive-Job $job | Out-Null
+
+    $rows = @(Import-Csv -LiteralPath $testCsv9)
+    if ($rows.Count -ne 2) {
+        throw "Test 9 FAILED: Expected exactly 2 rows for legacy order, got $($rows.Count)"
+    }
+    if ($rows[0].v_rtp_rate -ne '60' -or $rows[0].commit -ne 'c1c1c1' -or $rows[0].native_t0_t7_total_ms -ne '3.50' -or $rows[0].out_age_count -ne '60') {
+        throw "Test 9 FAILED: Row 0 values mixed! v_rtp=$($rows[0].v_rtp_rate) commit=$($rows[0].commit) t0_t7=$($rows[0].native_t0_t7_total_ms) out_age=$($rows[0].out_age_count)"
+    }
+    if ($rows[1].v_rtp_rate -ne '120' -or $rows[1].commit -ne 'c2c2c2' -or $rows[1].native_t0_t7_total_ms -ne '7.80' -or $rows[1].out_age_count -ne '120') {
+        throw "Test 9 FAILED: Row 1 values mixed! v_rtp=$($rows[1].v_rtp_rate) commit=$($rows[1].commit) t0_t7=$($rows[1].native_t0_t7_total_ms) out_age=$($rows[1].out_age_count)"
+    }
+    Write-Host "  [PASS] Test 9: Legacy Logging Order & Boundary Integrity"
+
+    # ------------------------------------------------------------------------
+    # Test 10: Multi-byte UTF-8 split across byte reads with Vietnamese text
+    # ------------------------------------------------------------------------
+    $testCsv10 = Join-Path $testTempDir 'output_utf8_split.csv'
+    $utf8SplitLog = Join-Path $testTempDir 'utf8_split.log'
+
+    $vnText = "[2026-10-01 12:00:00.001] [Info] [Diagnostics] [METRICS CYCLE BEGIN] cycle=1`r`n[2026-10-01 12:00:00.002] [Info] [Diagnostics] [METADATA] cycle=1 | commit=38b91a5 | transport=LocalRtpUdp | stream_mode=Balanced | policy(max_q=3, res_ms=50, cad_pct=100, always_latest=0) | req_quality=Auto | active_quality=Auto | quality_pending=0 | actual_stream(codec=H264, res=1920x1080, fps=60.00)`r`n[2026-10-01 12:00:00.003] [Info] [Diagnostics] [STATS] SYNC/SESSION: A/V=5.2ms drift=0.10ms/min | sidecar=alive | state=Streaming | source=connected | output=1920x1080 preview=640x360 | lifecycle=Tiếng Việt kiểm thử`r`n[2026-10-01 12:00:00.004] [Info] [Diagnostics] [METRICS CYCLE END] cycle=1`r`n"
+    $vnBytes = [System.Text.Encoding]::UTF8.GetBytes($vnText)
+
+    $targetBytes = [System.Text.Encoding]::UTF8.GetBytes('ế')
+    $splitBytePos = -1
+    for ($i = 0; $i -le ($vnBytes.Length - $targetBytes.Length); $i++) {
+        $matched = $true
+        for ($j = 0; $j -lt $targetBytes.Length; $j++) {
+            if ($vnBytes[$i + $j] -ne $targetBytes[$j]) {
+                $matched = $false
+                break
+            }
+        }
+        if ($matched) {
+            $splitBytePos = $i + 1
+            break
+        }
+    }
+    if ($splitBytePos -le 0) { throw "Test 10 setup error: could not find UTF-8 sequence for 'ế'" }
+
+    $fsOut = [System.IO.FileStream]::new($utf8SplitLog, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+    $fsOut.Write($vnBytes, 0, $splitBytePos)
+    $fsOut.Flush()
+    $fsOut.Dispose()
+
+    $job = Start-Job -ScriptBlock {
+        param($col, $out, $log)
+        & $col -OutputPath $out -DurationSeconds 3 -LogPath $log
+    } -ArgumentList $collectorScript, $testCsv10, $utf8SplitLog
+
+    Start-Sleep -Milliseconds 1200
+
+    $fsOut = [System.IO.FileStream]::new($utf8SplitLog, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write)
+    $fsOut.Write($vnBytes, $splitBytePos, $vnBytes.Length - $splitBytePos)
+    $fsOut.Flush()
+    $fsOut.Dispose()
+
+    $job | Wait-Job -Timeout 10 | Out-Null
+    Receive-Job $job | Out-Null
+
+    $rows = @(Import-Csv -LiteralPath $testCsv10)
+    if ($rows.Count -ne 1) {
+        throw "Test 10 FAILED: Expected exactly 1 row after UTF-8 byte split reconstruction, got $($rows.Count)"
+    }
+    if ($rows[0].lifecycle -ne 'Tiếng Việt kiểm thử') {
+        throw "Test 10 FAILED: UTF-8 corrupted! Got '$($rows[0].lifecycle)'"
+    }
+    if ($rows[0].lifecycle.Contains([char]0xFFFD)) {
+        throw "Test 10 FAILED: Lifecycle string contains replacement character U+FFFD!"
+    }
+    Write-Host "  [PASS] Test 10: Multi-byte UTF-8 Partial Split across reads"
+
+    # ------------------------------------------------------------------------
+    # Test 11: Explicit Cycle Boundaries, req_quality vs active_quality vs pending
+    # ------------------------------------------------------------------------
+    $testCsv11 = Join-Path $testTempDir 'output_quality_transitions.csv'
+    $qualityLog = Join-Path $testTempDir 'quality_transitions.log'
+
+    $qCycle1 = @(
+        "[2026-10-01 12:00:00.001] [Info] [Diagnostics] [METRICS CYCLE BEGIN] cycle=1",
+        "[2026-10-01 12:00:00.002] [Info] [Diagnostics] [METADATA] cycle=1 | commit=7b5a7d2 | transport=LocalRtpUdp | stream_mode=Balanced | policy(max_q=3, res_ms=50, cad_pct=100, always_latest=0) | req_quality=1080p60 | active_quality=1080p60 | quality_pending=0 | actual_stream(codec=H264, res=1920x1080, fps=60.00)",
+        "[2026-10-01 12:00:00.003] [Info] [Diagnostics] [STATS] VIDEO: rtp=60/s (1200.5 KB/s) | au=60/s | dec=60 fps | rend=60 fps (unique=60, opp=60/s) | ticks=60/s (hold=0/s) | drop=0/s (superseded=0/s, late=0/s, late_drop=0, trans_drop=0, q_overflow=0, sess_q_full=0, life_q_full=0) | q=1 | gen=1 | coded=1920x1080 vis=1920x1080",
+        "[2026-10-01 12:00:00.004] [Info] [Diagnostics] [STATS] SYNC/SESSION: A/V=5.2ms drift=0.10ms/min | sidecar=alive | state=Streaming | source=connected | output=1920x1080 preview=640x360 | lifecycle=streaming_active",
+        "[2026-10-01 12:00:00.005] [Info] [Diagnostics] [METRICS CYCLE END] cycle=1"
+    ) -join "`r`n"
+
+    $qCycle2 = @(
+        "[2026-10-01 12:00:01.001] [Info] [Diagnostics] [METRICS CYCLE BEGIN] cycle=2",
+        "[2026-10-01 12:00:01.002] [Info] [Diagnostics] [METADATA] cycle=2 | commit=7b5a7d2 | transport=LocalRtpUdp | stream_mode=Balanced | policy(max_q=3, res_ms=50, cad_pct=100, always_latest=0) | req_quality=720p60 | active_quality=1080p60 | quality_pending=1 | actual_stream(codec=H264, res=1920x1080, fps=60.00)",
+        "[2026-10-01 12:00:01.003] [Info] [Diagnostics] [STATS] VIDEO: rtp=60/s (1200.5 KB/s) | au=60/s | dec=60 fps | rend=60 fps (unique=60, opp=60/s) | ticks=60/s (hold=0/s) | drop=0/s (superseded=0/s, late=0/s, late_drop=0, trans_drop=0, q_overflow=0, sess_q_full=0, life_q_full=0) | q=1 | gen=1 | coded=1920x1080 vis=1920x1080",
+        "[2026-10-01 12:00:01.004] [Info] [Diagnostics] [STATS] SYNC/SESSION: A/V=5.2ms drift=0.10ms/min | sidecar=alive | state=Streaming | source=connected | output=1920x1080 preview=640x360 | lifecycle=streaming_active",
+        "[2026-10-01 12:00:01.005] [Info] [Diagnostics] [METRICS CYCLE END] cycle=2"
+    ) -join "`r`n"
+
+    $qCycle3 = @(
+        "[2026-10-01 12:00:02.001] [Info] [Diagnostics] [METRICS CYCLE BEGIN] cycle=3",
+        "[2026-10-01 12:00:02.002] [Info] [Diagnostics] [METADATA] cycle=3 | commit=7b5a7d2 | transport=LocalRtpUdp | stream_mode=Balanced | policy(max_q=3, res_ms=50, cad_pct=100, always_latest=0) | req_quality=720p60 | active_quality=720p60 | quality_pending=0 | actual_stream(codec=H264, res=1280x720, fps=60.00)",
+        "[2026-10-01 12:00:02.003] [Info] [Diagnostics] [STATS] VIDEO: rtp=60/s (800.0 KB/s) | au=60/s | dec=60 fps | rend=60 fps (unique=60, opp=60/s) | ticks=60/s (hold=0/s) | drop=0/s (superseded=0/s, late=0/s, late_drop=0, trans_drop=0, q_overflow=0, sess_q_full=0, life_q_full=0) | q=1 | gen=2 | coded=1280x720 vis=1280x720",
+        "[2026-10-01 12:00:02.004] [Info] [Diagnostics] [STATS] SYNC/SESSION: A/V=5.2ms drift=0.10ms/min | sidecar=alive | state=Streaming | source=connected | output=1280x720 preview=640x360 | lifecycle=streaming_active",
+        "[2026-10-01 12:00:02.005] [Info] [Diagnostics] [METRICS CYCLE END] cycle=3"
+    ) -join "`r`n"
+
+    ($qCycle1 + "`r`n" + $qCycle2 + "`r`n" + $qCycle3 + "`r`n") | Set-Content -LiteralPath $qualityLog -Encoding utf8
+
+    $job = Start-Job -ScriptBlock {
+        param($col, $out, $log)
+        & $col -OutputPath $out -DurationSeconds 3 -LogPath $log
+    } -ArgumentList $collectorScript, $testCsv11, $qualityLog
+    $job | Wait-Job -Timeout 10 | Out-Null
+    Receive-Job $job | Out-Null
+
+    $rows = @(Import-Csv -LiteralPath $testCsv11)
+    if ($rows.Count -ne 3) {
+        throw "Test 11 FAILED: Expected 3 rows for quality transitions, got $($rows.Count)"
+    }
+    if ($rows[0].req_quality -ne '1080p60' -or $rows[0].active_quality -ne '1080p60' -or $rows[0].quality_pending -ne '0') {
+        throw "Test 11 FAILED: Row 0 initial state wrong. req=$($rows[0].req_quality) act=$($rows[0].active_quality) pend=$($rows[0].quality_pending)"
+    }
+    if ($rows[1].req_quality -ne '720p60' -or $rows[1].active_quality -ne '1080p60' -or $rows[1].quality_pending -ne '1') {
+        throw "Test 11 FAILED: Row 1 pending state wrong. req=$($rows[1].req_quality) act=$($rows[1].active_quality) pend=$($rows[1].quality_pending)"
+    }
+    if ($rows[2].req_quality -ne '720p60' -or $rows[2].active_quality -ne '720p60' -or $rows[2].quality_pending -ne '0') {
+        throw "Test 11 FAILED: Row 2 applied state wrong. req=$($rows[2].req_quality) act=$($rows[2].active_quality) pend=$($rows[2].quality_pending)"
+    }
+    Write-Host "  [PASS] Test 11: Quality Transitions & Explicit Cycle Delimiters"
+
+    Write-Host "`nALL 11 COLLECTOR FIXTURE TESTS PASSED!"
 }
 finally {
     if (Test-Path -LiteralPath $testTempDir) {

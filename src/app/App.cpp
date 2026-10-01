@@ -283,6 +283,10 @@ int App::Run() noexcept {
 
 
     m_settings = Settings::Load();
+    m_active_receiver_quality.store(m_settings.receiver_quality, std::memory_order_release);
+    m_config_generation.store(1, std::memory_order_release);
+    m_sidecar_generation.store(1, std::memory_order_release);
+    m_receiver_config_dirty.store(false, std::memory_order_release);
 
     Logger::SetLevel(m_settings.debug_log ? LogLevel::Debug : LogLevel::Info);
 
@@ -1455,15 +1459,22 @@ video::AspectRatioMode App::GetEffectiveAspectRatioMode() const noexcept {
 
 
 
-video::OutputDimensions App::ComputeCurrentOutputDimensions(uint32_t src_w, uint32_t src_h) const noexcept {
+video::OutputDimensions App::ComputeCurrentOutputDimensions(
+    uint32_t src_w, uint32_t src_h,
+    const SessionMetadataSnapshot* snap) const noexcept {
 
-    if (m_settings.capture_canvas == CaptureCanvas::FollowSource) {
+    const CaptureCanvas canvas = snap ? snap->capture_canvas : m_settings.capture_canvas;
+    const OutputQuality out_qual = snap ? snap->output_quality : m_settings.output_quality;
+    const uint32_t out_w = snap ? snap->output_width : m_settings.output_width;
+    const uint32_t out_h = snap ? snap->output_height : m_settings.output_height;
 
-        uint32_t long_edge = GetOutputQualityLongEdge(m_settings.output_quality);
+    if (canvas == CaptureCanvas::FollowSource) {
 
-        if (m_settings.output_quality == OutputQuality::Custom) {
+        uint32_t long_edge = GetOutputQualityLongEdge(out_qual);
 
-            return {m_settings.output_width, m_settings.output_height};
+        if (out_qual == OutputQuality::Custom) {
+
+            return {out_w, out_h};
 
         }
 
@@ -1473,7 +1484,7 @@ video::OutputDimensions App::ComputeCurrentOutputDimensions(uint32_t src_w, uint
 
 
 
-    switch (m_settings.capture_canvas) {
+    switch (canvas) {
 
     case CaptureCanvas::Canvas_16_9_HD:
 
@@ -1491,7 +1502,7 @@ video::OutputDimensions App::ComputeCurrentOutputDimensions(uint32_t src_w, uint
 
     default:
 
-        return {m_settings.output_width, m_settings.output_height};
+        return {out_w, out_h};
 
     }
 
@@ -1703,8 +1714,13 @@ void App::RestartAirPlaySidecar() noexcept {
 
 
 
-    m_active_receiver_quality = m_settings.receiver_quality;
-    if (m_window) m_window->State().receiver_quality_pending = false;
+    m_active_receiver_quality.store(m_settings.receiver_quality, std::memory_order_release);
+    m_receiver_config_dirty.store(false, std::memory_order_release);
+    m_sidecar_generation.store(gen, std::memory_order_release);
+    if (m_window) {
+        m_window->State().sidecar_generation = gen;
+        m_window->State().receiver_quality_pending = false;
+    }
     PublishMetadataSnapshot();
 
     DUWN_LOG_INFOF("App", "AirPlay sidecar restart initiated (config_gen={})", gen);
@@ -3898,6 +3914,7 @@ void App::OnPhase(airplay::SessionPhase /*prev*/,
             if (sidecar_gen == m_config_generation.load(std::memory_order_acquire)) {
 
                 m_receiver_config_dirty.store(false, std::memory_order_release);
+                m_active_receiver_quality.store(m_settings.receiver_quality, std::memory_order_release);
 
                 if (m_window) {
 
@@ -3908,6 +3925,7 @@ void App::OnPhase(airplay::SessionPhase /*prev*/,
                     ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
 
                 }
+                PublishMetadataSnapshot();
 
             }
 
@@ -3937,6 +3955,8 @@ void App::OnPhase(airplay::SessionPhase /*prev*/,
 
                 !m_receiver_config_dirty.load(std::memory_order_acquire)) {
 
+                m_active_receiver_quality.store(m_settings.receiver_quality, std::memory_order_release);
+
                 if (m_window) {
 
                     m_window->State().sidecar_generation = sidecar_gen;
@@ -3946,6 +3966,7 @@ void App::OnPhase(airplay::SessionPhase /*prev*/,
                     ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
 
                 }
+                PublishMetadataSnapshot();
 
             }
 
@@ -4394,7 +4415,17 @@ void App::PublishMetadataSnapshot() noexcept {
     snap.req_custom_freshness_ms = m_settings.custom_video_freshness_ms;
     snap.req_custom_queue_frames = m_settings.custom_video_queue_frames;
     snap.req_receiver_quality = m_settings.receiver_quality;
+    snap.req_receiver_width = m_settings.receiver_width;
+    snap.req_receiver_height = m_settings.receiver_height;
+    snap.req_receiver_fps = m_settings.receiver_fps;
     snap.req_transport_mode = m_settings.transport_mode;
+    snap.monitor_device_id = m_settings.monitor_device_id;
+
+    snap.capture_canvas = m_settings.capture_canvas;
+    snap.output_quality = m_settings.output_quality;
+    snap.aspect_mode = m_settings.aspect_mode;
+    snap.output_width = m_settings.output_width;
+    snap.output_height = m_settings.output_height;
 
     const bool is_wired = m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WiredUsb;
     if (is_wired) {
@@ -4413,13 +4444,15 @@ void App::PublishMetadataSnapshot() noexcept {
     }
     snap.active_streaming_mode = m_settings.streaming_mode;
 
-    if (m_window && m_window->State().receiver_quality_pending) {
-        snap.receiver_quality_pending = true;
-        snap.active_receiver_quality = m_active_receiver_quality;
-    } else {
-        snap.receiver_quality_pending = false;
-        snap.active_receiver_quality = m_settings.receiver_quality;
-    }
+    const bool is_dirty = m_receiver_config_dirty.load(std::memory_order_acquire);
+    const uint64_t cfg_gen = m_config_generation.load(std::memory_order_acquire);
+    const uint64_t side_gen = m_sidecar_generation.load(std::memory_order_acquire);
+    const bool is_pending = is_dirty || (cfg_gen != side_gen);
+
+    snap.receiver_quality_pending = is_pending;
+    snap.active_receiver_quality = is_pending
+        ? m_active_receiver_quality.load(std::memory_order_acquire)
+        : m_settings.receiver_quality;
 
     std::lock_guard lock(m_metadata_mutex);
     m_metadata_snapshot = std::move(snap);
@@ -4804,12 +4837,9 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
         uint64_t cur_sess_q_full = m.session_q_full.load(std::memory_order_relaxed);
 
-
-
-        DUWN_LOG_INFOF("Diagnostics",
-            "[STATS] VIDEO: rtp={}/s ({:.1f} KB/s) | au={}/s | dec={} fps | rend={} fps (unique={}, opp={}/s) | ticks={}/s (hold={}/s) | drop={}/s (superseded={}/s, late={}/s, late_drop={}, trans_drop={}, q_overflow={}, sess_q_full={}, life_q_full={}) | q={} | gen={} | coded={}x{} vis={}x{}",
-            v_rtp_rate, v_kb_rate, v_au_rate, v_dec_fps, v_rend_fps, unique_pres_fps, disp_opp_rate, ticks_rate, rep_ticks_rate,
-            v_drop_rate, superseded_rate, v_late_rate, cur_pres_late, cur_trans_drop, cur_q_overflow, cur_sess_q_full, cur_q_full_drop, q_depth, cur_gen, coded_w, coded_h, vis_w, vis_h);
+        static uint64_t s_metrics_cycle = 0;
+        ++s_metrics_cycle;
+        DUWN_LOG_INFOF("Diagnostics", "[METRICS CYCLE BEGIN] cycle={}", s_metrics_cycle);
 
         const SessionMetadataSnapshot meta_snap = GetMetadataSnapshot();
         const char* transport_str = meta_snap.active_transport.c_str();
@@ -4821,7 +4851,9 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
         default: stream_mode_str = "Balanced"; break;
         }
         const auto active_policy = meta_snap.active_policy;
-        const auto req_quality_sv = GetReceiverQualityName(meta_snap.active_receiver_quality);
+        const auto req_quality_sv = GetReceiverQualityName(meta_snap.req_receiver_quality);
+        const auto act_quality_sv = GetReceiverQualityName(meta_snap.active_receiver_quality);
+        const int pending_val = meta_snap.receiver_quality_pending ? 1 : 0;
         const char* codec_str = "Unknown";
         {
             std::lock_guard lock(m_decoder_mutex);
@@ -4840,7 +4872,8 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
         }
 
         DUWN_LOG_INFOF("Diagnostics",
-            "[METADATA] commit={} | transport={} | stream_mode={} | policy(max_q={}, res_ms={}, cad_pct={}, always_latest={}) | req_quality={} | actual_stream(codec={}, res={}x{}, fps={:.2f})",
+            "[METADATA] cycle={} | commit={} | transport={} | stream_mode={} | policy(max_q={}, res_ms={}, cad_pct={}, always_latest={}) | req_quality={} | active_quality={} | quality_pending={} | actual_stream(codec={}, res={}x{}, fps={:.2f})",
+            s_metrics_cycle,
             commit_str,
             transport_str,
             stream_mode_str,
@@ -4849,9 +4882,16 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
             active_policy.cadence_percent,
             active_policy.always_latest ? 1 : 0,
             req_quality_sv,
+            act_quality_sv,
+            pending_val,
             codec_str,
             coded_w, coded_h,
             m.source_nominal_fps.load(std::memory_order_relaxed));
+
+        DUWN_LOG_INFOF("Diagnostics",
+            "[STATS] VIDEO: rtp={}/s ({:.1f} KB/s) | au={}/s | dec={} fps | rend={} fps (unique={}, opp={}/s) | ticks={}/s (hold={}/s) | drop={}/s (superseded={}/s, late={}/s, late_drop={}, trans_drop={}, q_overflow={}, sess_q_full={}, life_q_full={}) | q={} | gen={} | coded={}x{} vis={}x{}",
+            v_rtp_rate, v_kb_rate, v_au_rate, v_dec_fps, v_rend_fps, unique_pres_fps, disp_opp_rate, ticks_rate, rep_ticks_rate,
+            v_drop_rate, superseded_rate, v_late_rate, cur_pres_late, cur_trans_drop, cur_q_overflow, cur_sess_q_full, cur_q_full_drop, q_depth, cur_gen, coded_w, coded_h, vis_w, vis_h);
 
         if (phase_str == "Streaming" || vis_w > 0) {
             DUWN_LOG_INFO("Diagnostics", m_source_quality_tracker.FormatTelemetryBlock());
@@ -5228,7 +5268,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
         }
 
-
+        DUWN_LOG_INFOF("Diagnostics", "[METRICS CYCLE END] cycle={}", s_metrics_cycle);
 
         // Drift update
 
@@ -5306,7 +5346,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
             if (cap_w == 0 || cap_h == 0) {
 
-                auto out_dims = ComputeCurrentOutputDimensions(vis_w, vis_h);
+                auto out_dims = ComputeCurrentOutputDimensions(vis_w, vis_h, &meta_snap);
 
                 cap_w = out_dims.width;
 
@@ -5338,9 +5378,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
             state.sidecar_generation = m_sidecar_generation.load(std::memory_order_relaxed);
 
-            state.receiver_quality_pending = (state.config_generation != state.sidecar_generation) ||
-
-                                             m_receiver_config_dirty.load(std::memory_order_relaxed);
+            state.receiver_quality_pending = meta_snap.receiver_quality_pending;
 
             state.coded_width = coded_w;
 
@@ -5351,11 +5389,11 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
             state.sidecar_pid = m_airplay ? static_cast<uint32_t>(m_airplay->GetSidecarPid()) : 0;
 
             video::RequestedReceiverEnvelope req_env;
-            req_env.width = m_settings.receiver_width;
-            req_env.height = m_settings.receiver_height;
-            req_env.fps = m_settings.receiver_fps;
-            req_env.preset_name = std::string(GetReceiverQualityName(m_settings.receiver_quality));
-            req_env.is_original = (m_settings.receiver_quality == ReceiverQuality::Original_60);
+            req_env.width = meta_snap.req_receiver_width;
+            req_env.height = meta_snap.req_receiver_height;
+            req_env.fps = meta_snap.req_receiver_fps;
+            req_env.preset_name = std::string(GetReceiverQualityName(meta_snap.req_receiver_quality));
+            req_env.is_original = (meta_snap.req_receiver_quality == ReceiverQuality::Original_60);
             m_source_quality_tracker.SetRequestedEnvelope(req_env);
 
             auto eff = m_source_quality_tracker.GetEffectiveness();
@@ -5487,7 +5525,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
             state.audio_underrun_count = cur_real_underruns;
 
-            state.audio_device_id      = m_settings.monitor_device_id;
+            state.audio_device_id      = meta_snap.monitor_device_id;
 
             state.resolved_audio_device_name = m_wasapi
 

@@ -2118,12 +2118,14 @@ DUWN_TEST(FrameScheduler_FormatGenerationChangeAndSequenceRestartAfterFlush) {
     std::vector<uint64_t> presented_seqs;
     std::vector<uint64_t> presented_gens;
     std::mutex pres_mutex;
+    std::condition_variable pres_cv;
 
     FrameScheduler scheduler(cfg, [&](VideoFrame& f) {
         std::lock_guard lock(pres_mutex);
         presented_count.fetch_add(1, std::memory_order_relaxed);
         presented_seqs.push_back(f.sequence_number);
         presented_gens.push_back(f.format_generation);
+        pres_cv.notify_all();
     });
     scheduler.Start();
 
@@ -2142,12 +2144,16 @@ DUWN_TEST(FrameScheduler_FormatGenerationChangeAndSequenceRestartAfterFlush) {
         scheduler.PushFrame(std::move(f));
     }
 
-    auto start_t = std::chrono::steady_clock::now();
-    while (presented_count.load() < 1 &&
-           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_t).count() < 500) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    {
+        std::unique_lock lock(pres_mutex);
+        bool gen1_ok = pres_cv.wait_for(lock, std::chrono::milliseconds(500), [&]() {
+            for (auto g : presented_gens) {
+                if (g == 1) return true;
+            }
+            return false;
+        });
+        DUWN_ASSERT(gen1_ok);
     }
-    DUWN_ASSERT(presented_count.load() > 0);
 
     // Phase 2: Flush contract verification (clears queue, resets sequence anchor)
     scheduler.Flush();
@@ -2166,13 +2172,30 @@ DUWN_TEST(FrameScheduler_FormatGenerationChangeAndSequenceRestartAfterFlush) {
         scheduler.PushFrame(std::move(f));
     }
 
-    start_t = std::chrono::steady_clock::now();
-    const auto count_before_gen2 = presented_count.load();
-    while (presented_count.load() == count_before_gen2 &&
-           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_t).count() < 500) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    // Wait specifically for generation 2 presentation with timeout, then verify sequences
+    {
+        std::unique_lock lock(pres_mutex);
+        bool gen2_ok = pres_cv.wait_for(lock, std::chrono::milliseconds(500), [&]() {
+            for (auto g : presented_gens) {
+                if (g == 2) return true;
+            }
+            return false;
+        });
+        DUWN_ASSERT(gen2_ok);
+
+        std::vector<uint64_t> gen2_seqs;
+        for (size_t idx = 0; idx < presented_gens.size(); ++idx) {
+            if (presented_gens[idx] == 2) {
+                gen2_seqs.push_back(presented_seqs[idx]);
+            }
+        }
+        DUWN_ASSERT(!gen2_seqs.empty());
+        // Verify restarted sequence numbers received for generation 2 are ordered and monotonically increasing
+        for (size_t idx = 1; idx < gen2_seqs.size(); ++idx) {
+            DUWN_ASSERT(gen2_seqs[idx] > gen2_seqs[idx - 1]);
+        }
+        DUWN_ASSERT(gen2_seqs.front() >= 1 && gen2_seqs.front() <= 3);
     }
-    DUWN_ASSERT(presented_count.load() > count_before_gen2);
 
     // Phase 4: Stale generation frame rejection
     VideoFrame stale_frame{};

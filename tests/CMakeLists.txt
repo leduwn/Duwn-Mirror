@@ -34,3 +34,4 @@ target_link_libraries(duwn-unit-tests
 target_compile_features(duwn-unit-tests PRIVATE cxx_std_20)
 
 add_test(NAME duwn-unit-tests COMMAND duwn-unit-tests)
+set_tests_properties(duwn-unit-tests PROPERTIES TIMEOUT 120)

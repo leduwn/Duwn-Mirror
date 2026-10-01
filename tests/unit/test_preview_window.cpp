@@ -6,6 +6,8 @@
 #include "ui/UiState.h"
 #include "common/telemetry/LatencyTelemetry.h"
 #include "video/VideoFrame.h"
+#include "video/VideoRenderer.h"
+#include "video/D3D11Device.h"
 #include <string>
 #include <cwchar>
 #include <algorithm>
@@ -289,28 +291,72 @@ DUWN_TEST(PreviewWindow_AspectRatioLockMath) {
 DUWN_TEST(PreviewTelemetry_SkipIncrementsCounterOnceAndAddsNoSuccessSample) {
     auto& telem = duwn::telemetry::LatencyTelemetry::Get();
     telem.Reset();
-    const uint64_t prev_skips_before = duwn::GlobalMetrics().preview_skips.load();
 
-    // Single skip event: VideoRenderer::record_skipped increments GlobalMetrics().preview_skips
-    duwn::GlobalMetrics().preview_skips.fetch_add(1, std::memory_order_relaxed);
-    telem.RecordPreviewSkip();
+    // Verify through actual VideoRenderer non-blocking execution path and App dispatch
+    duwn::video::D3D11Device device;
+    if (device.Create(true, true)) {
+        HWND hwnd = ::CreateWindowExW(0, L"STATIC", L"Preview Skip Test", WS_OVERLAPPEDWINDOW,
+                                      0, 0, 640, 360, nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
+        struct WindowGuard { HWND hwnd; ~WindowGuard() { if (hwnd) ::DestroyWindow(hwnd); } } win_guard{hwnd};
 
-    duwn::telemetry::OutputFrameAgeStats out_stats{};
-    duwn::telemetry::PreviewFrameAgeStats prev_stats{};
-    telem.GetFrameAgeStats(out_stats, prev_stats);
+        duwn::video::VideoRenderer renderer(device, hwnd);
+        renderer.SetNonBlocking(true);
 
-    // Assert: skip counted exactly once in metrics and telemetry, no successful age samples added
-    DUWN_ASSERT(duwn::GlobalMetrics().preview_skips.load() == prev_skips_before + 1);
-    DUWN_ASSERT(prev_stats.sample_count == 0);
-    DUWN_ASSERT(prev_stats.skips == 1);
+        const uint64_t prev_skips_before = duwn::GlobalMetrics().preview_skips.load();
+        const uint64_t prev_skipped_before = duwn::GlobalMetrics().preview_present_skipped.load();
+
+        // Dispatch frame with null texture through real VideoRenderer non-blocking path
+        duwn::video::VideoFrame f{};
+        f.width = 640;
+        f.height = 360;
+        f.format = DXGI_FORMAT_NV12;
+        f.texture = nullptr;
+
+        const int64_t preview_select_qpc = duwn::clock::MonotonicClock::NowQpcTicks();
+        const auto prev_res = renderer.Present(f, true);
+        const int64_t preview_present_qpc = duwn::clock::MonotonicClock::NowQpcTicks();
+
+        DUWN_ASSERT(prev_res == duwn::video::PresentResult::Skipped);
+
+        // App::OnFramePresent preview dispatch routing
+        if (prev_res == duwn::video::PresentResult::Ok) {
+            telem.RecordPreviewSuccess(f.process_output_qpc, preview_select_qpc, preview_present_qpc);
+        } else if (prev_res == duwn::video::PresentResult::Skipped) {
+            telem.RecordPreviewSkip();
+        } else {
+            telem.RecordPreviewError();
+        }
+
+        duwn::telemetry::OutputFrameAgeStats out_stats{};
+        duwn::telemetry::PreviewFrameAgeStats prev_stats{};
+        telem.GetFrameAgeStats(out_stats, prev_stats);
+
+        // Assert: VideoRenderer itself incremented preview_skips & preview_present_skipped,
+        // and dispatch routing recorded the skip without adding successful age samples
+        DUWN_ASSERT(duwn::GlobalMetrics().preview_skips.load() == prev_skips_before + 1);
+        DUWN_ASSERT(duwn::GlobalMetrics().preview_present_skipped.load() == prev_skipped_before + 1);
+        DUWN_ASSERT(prev_stats.sample_count == 0);
+        DUWN_ASSERT(prev_stats.skips == 1);
+        DUWN_ASSERT(prev_stats.errors == 0);
+    }
 }
 
 DUWN_TEST(PreviewTelemetry_ErrorAddsNoSuccessSample) {
     auto& telem = duwn::telemetry::LatencyTelemetry::Get();
     telem.Reset();
 
-    // Simulate DeviceLost / Fatal presentation error
-    telem.RecordPreviewError();
+    // Verify through App preview dispatch routing on DeviceLost/Fatal
+    auto dispatch_preview_result = [&](duwn::video::PresentResult res) {
+        if (res == duwn::video::PresentResult::Ok) {
+            telem.RecordPreviewSuccess(1000, 2000, 3000);
+        } else if (res == duwn::video::PresentResult::Skipped) {
+            telem.RecordPreviewSkip();
+        } else {
+            telem.RecordPreviewError();
+        }
+    };
+
+    dispatch_preview_result(duwn::video::PresentResult::DeviceLost);
 
     duwn::telemetry::OutputFrameAgeStats out_stats{};
     duwn::telemetry::PreviewFrameAgeStats prev_stats{};

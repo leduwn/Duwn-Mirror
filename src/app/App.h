@@ -51,7 +51,17 @@ struct SessionMetadataSnapshot {
     uint32_t        req_custom_freshness_ms{25};
     uint32_t        req_custom_queue_frames{2};
     ReceiverQuality req_receiver_quality{ReceiverQuality::Auto};
+    uint32_t        req_receiver_width{1920};
+    uint32_t        req_receiver_height{1080};
+    uint32_t        req_receiver_fps{60};
     TransportMode   req_transport_mode{TransportMode::RtpUdpLegacy};
+    std::wstring    monitor_device_id;
+
+    CaptureCanvas   capture_canvas{CaptureCanvas::FollowSource};
+    OutputQuality   output_quality{OutputQuality::Auto};
+    AspectMode      aspect_mode{AspectMode::Auto};
+    uint32_t        output_width{1920};
+    uint32_t        output_height{1080};
 
     StreamingPolicy active_policy{};
     StreamingMode   active_streaming_mode{StreamingMode::SmoothLive};
@@ -103,7 +113,9 @@ private:
     void StartWiredControl() noexcept;
     void StopWiredControl() noexcept;
     video::AspectRatioMode GetEffectiveAspectRatioMode() const noexcept;
-    video::OutputDimensions ComputeCurrentOutputDimensions(uint32_t src_w, uint32_t src_h) const noexcept;
+    video::OutputDimensions ComputeCurrentOutputDimensions(
+        uint32_t src_w, uint32_t src_h,
+        const SessionMetadataSnapshot* snap = nullptr) const noexcept;
 
     // AirPlay callbacks (called on AirPlay engine threads)
     void OnVideoData(const uint8_t* data, size_t size,
@@ -227,7 +239,7 @@ private:
     // Metadata snapshot published safely from config-owning thread
     mutable std::mutex       m_metadata_mutex;
     SessionMetadataSnapshot  m_metadata_snapshot;
-    ReceiverQuality          m_active_receiver_quality{ReceiverQuality::Auto};
+    std::atomic<ReceiverQuality> m_active_receiver_quality{ReceiverQuality::Auto};
 
     // Firewall validation state machine
     std::atomic<network::FirewallValidationState> m_firewall_validation_state{network::FirewallValidationState::Unknown};

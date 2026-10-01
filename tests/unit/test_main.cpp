@@ -105,6 +105,15 @@ void AssertTrue(bool cond, const char* expr, const char* file, int line) {
 int main() {
     ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
+    // Process-level watchdog: abort if test process hangs (e.g. deadlocked thread in join/mutex)
+    std::thread suite_watchdog([]() {
+        std::this_thread::sleep_for(std::chrono::seconds(90));
+        fprintf(stderr, "\n[FATAL] Test process watchdog timeout (90s) exceeded! Aborting deadlocked process.\n");
+        fflush(stderr);
+        std::_Exit(2);
+    });
+    suite_watchdog.detach();
+
     // Init MonotonicClock for tests that need timing
     duwn::clock::MonotonicClock::Initialize();
 

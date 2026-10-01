@@ -19,8 +19,9 @@ function Escape-CsvField([object]$value) {
 }
 
 $headerCols = @(
-    'run_id', 'session_id', 'collector_time', 'source_time', 'reconnect_event', 'format_change',
-    'commit', 'transport', 'stream_mode', 'policy_max_q', 'policy_res_ms', 'policy_cad_pct', 'policy_always_latest', 'req_quality', 'actual_codec', 'actual_res', 'actual_fps',
+    'run_id', 'session_id', 'cycle_id', 'collector_time', 'source_time', 'reconnect_event', 'format_change',
+    'commit', 'transport', 'stream_mode', 'policy_max_q', 'policy_res_ms', 'policy_cad_pct', 'policy_always_latest',
+    'req_quality', 'active_quality', 'quality_pending', 'actual_codec', 'actual_res', 'actual_fps',
     'native_t0_t7_total_ms', 't0_t1_ms', 't1_t2_ms', 't2_t3_ms', 't3_t4_ms', 't4_t5_ms', 't5_t6_ms', 't6_t7_ms',
     'decode_avg_ms', 'decode_p50_ms', 'decode_p95_ms', 'decode_n',
     'queue_res_avg_ms', 'queue_res_p50_ms', 'queue_res_p95_ms', 'queue_res_n',
@@ -47,20 +48,98 @@ $lastFilePos = 0
 $lastCreationTime = $null
 $fileHeaderPrefix = ''
 $pendingText = ''
+$pendingBytes = New-Object byte[] (0)
 $sessionId = 1
 $lastGen = $null
 $lastSourceConn = $null
+
+function Get-IncompleteUtf8ByteCount([byte[]]$bytes) {
+    if ($null -eq $bytes -or $bytes.Length -eq 0) { return 0 }
+    $len = $bytes.Length
+    $trailingContinuation = 0
+    $i = $len - 1
+    while ($i -ge 0 -and ($bytes[$i] -band 0xC0) -eq 0x80) {
+        $trailingContinuation++
+        $i--
+        if ($trailingContinuation -gt 3) { break }
+    }
+    if ($i -lt 0) {
+        return $len
+    }
+    $lead = $bytes[$i]
+    $needed = 0
+    if (($lead -band 0x80) -eq 0) {
+        $needed = 0
+    } elseif (($lead -band 0xE0) -eq 0xC0) {
+        $needed = 1
+    } elseif (($lead -band 0xF0) -eq 0xE0) {
+        $needed = 2
+    } elseif (($lead -band 0xF8) -eq 0xF0) {
+        $needed = 3
+    } else {
+        return 0
+    }
+    if ($trailingContinuation -ge $needed) {
+        return 0
+    }
+    return ($trailingContinuation + 1)
+}
+
+function Decode-Bytes([byte[]]$newBytes, [bool]$flush = $false) {
+    if ($null -eq $newBytes -or $newBytes.Length -eq 0) {
+        if ($flush -and $script:pendingBytes.Length -gt 0) {
+            $res = [System.Text.Encoding]::UTF8.GetString($script:pendingBytes)
+            $script:pendingBytes = New-Object byte[] (0)
+            return $res
+        }
+        return ''
+    }
+    $allBytes = if ($script:pendingBytes.Length -gt 0) {
+        $combined = New-Object byte[] ($script:pendingBytes.Length + $newBytes.Length)
+        [System.Array]::Copy($script:pendingBytes, 0, $combined, 0, $script:pendingBytes.Length)
+        [System.Array]::Copy($newBytes, 0, $combined, $script:pendingBytes.Length, $newBytes.Length)
+        $combined
+    } else {
+        $newBytes
+    }
+
+    if ($flush) {
+        $script:pendingBytes = New-Object byte[] (0)
+        return [System.Text.Encoding]::UTF8.GetString($allBytes)
+    }
+
+    $inc = Get-IncompleteUtf8ByteCount $allBytes
+    $compLen = $allBytes.Length - $inc
+    $decoded = if ($compLen -gt 0) {
+        [System.Text.Encoding]::UTF8.GetString($allBytes, 0, $compLen)
+    } else {
+        ''
+    }
+
+    if ($inc -gt 0) {
+        $pb = New-Object byte[] ($inc)
+        [System.Array]::Copy($allBytes, $compLen, $pb, 0, $inc)
+        $script:pendingBytes = $pb
+    } else {
+        $script:pendingBytes = New-Object byte[] (0)
+    }
+
+    return $decoded
+}
 
 function New-CycleState {
     return [ordered]@{
         has_update = $false
         has_video  = $false
         has_audio  = $false
+        has_meta   = $false
         source_time= ''
+        cycle_id   = ''
 
         commit = ''; transport = ''; stream_mode = ''
         policy_max_q = ''; policy_res_ms = ''; policy_cad_pct = ''; policy_always_latest = ''
-        req_quality = ''; actual_codec = ''; actual_res = ''; actual_fps = ''
+        req_quality = ''; active_quality = ''; quality_pending = ''
+        actual_codec = ''; actual_res = ''; actual_fps = ''
 
         t0_t7_total = ''; t0_t1 = ''; t1_t2 = ''; t2_t3 = ''; t3_t4 = ''; t4_t5 = ''; t5_t6 = ''; t6_t7 = ''
 
@@ -112,8 +191,9 @@ function Emit-Cycle([System.Collections.IDictionary]$cycle) {
     $sourceTime = $cycle.source_time
 
     $rowValues = @(
-        $runId, $script:sessionId, $collectorTime, $sourceTime, $reconnectEvent, $formatChange,
-        $cycle.commit, $cycle.transport, $cycle.stream_mode, $cycle.policy_max_q, $cycle.policy_res_ms, $cycle.policy_cad_pct, $cycle.policy_always_latest, $cycle.req_quality, $cycle.actual_codec, $cycle.actual_res, $cycle.actual_fps,
+        $runId, $script:sessionId, $cycle.cycle_id, $collectorTime, $sourceTime, $reconnectEvent, $formatChange,
+        $cycle.commit, $cycle.transport, $cycle.stream_mode, $cycle.policy_max_q, $cycle.policy_res_ms, $cycle.policy_cad_pct, $cycle.policy_always_latest,
+        $cycle.req_quality, $cycle.active_quality, $cycle.quality_pending, $cycle.actual_codec, $cycle.actual_res, $cycle.actual_fps,
         $cycle.t0_t7_total, $cycle.t0_t1, $cycle.t1_t2, $cycle.t2_t3, $cycle.t3_t4, $cycle.t4_t5, $cycle.t5_t6, $cycle.t6_t7,
         $cycle.decode_avg, $cycle.decode_p50, $cycle.decode_p95, $cycle.decode_n,
         $cycle.q_res_avg, $cycle.q_res_p50, $cycle.q_res_p95, $cycle.q_res_n,
@@ -135,9 +215,34 @@ function Emit-Cycle([System.Collections.IDictionary]$cycle) {
 
 function Process-LogLine([string]$line) {
     if (-not $line) { return }
+    $line = $line.TrimStart([char]0xFEFF)
 
-    if ($line -match '\[METADATA\]') {
+    if ($line -match '\[METRICS CYCLE END\](?: cycle=(?<cid>\d+))?') {
+        if ($Matches.ContainsKey('cid') -and $Matches.cid -and -not $script:currentCycle.cycle_id) {
+            $script:currentCycle.cycle_id = $Matches.cid
+        }
+        Emit-Cycle $script:currentCycle
+        $script:currentCycle = New-CycleState
+        return
+    }
+
+    if ($line -match '\[METRICS CYCLE BEGIN\](?: cycle=(?<cid>\d+))?') {
         if ($script:currentCycle.has_update) {
+            Emit-Cycle $script:currentCycle
+            $script:currentCycle = New-CycleState
+        }
+        if ($Matches.ContainsKey('cid') -and $Matches.cid) {
+            $script:currentCycle.cycle_id = $Matches.cid
+        }
+    }
+    elseif ($line -match '\[METADATA\]') {
+        if ($script:currentCycle.has_meta) {
+            Emit-Cycle $script:currentCycle
+            $script:currentCycle = New-CycleState
+        }
+    }
+    elseif ($line -match '\[STATS\] VIDEO:') {
+        if ($script:currentCycle.has_video) {
             Emit-Cycle $script:currentCycle
             $script:currentCycle = New-CycleState
         }
@@ -149,7 +254,10 @@ function Process-LogLine([string]$line) {
         }
     }
 
-    if ($line -match '\[METADATA\] commit=(?<commit>[^ ]*) \| transport=(?<transport>[^ ]*) \| stream_mode=(?<mode>[^ ]*) \| policy\(max_q=(?<mq>\d+), res_ms=(?<rms>\d+), cad_pct=(?<cp>\d+), always_latest=(?<al>\d+)\) \| req_quality=(?<rq>[^ |]*) \| actual_stream\(codec=(?<codec>[^,]*), res=(?<res>[^,]*), fps=(?<fps>[^)]*)\)') {
+    if ($line -match '\[METADATA\](?: cycle=(?<cid>\d+) \|)? commit=(?<commit>[^ ]*) \| transport=(?<transport>[^ ]*) \| stream_mode=(?<mode>[^ ]*) \| policy\(max_q=(?<mq>\d+), res_ms=(?<rms>\d+), cad_pct=(?<cp>\d+), always_latest=(?<al>\d+)\) \| req_quality=(?<rq>[^ |]*)(?: \| active_quality=(?<aq>[^ |]*) \| quality_pending=(?<qp>[^ |]*))? \| actual_stream\(codec=(?<codec>[^,]*), res=(?<res>[^,]*), fps=(?<fps>[^)]*)\)') {
+        if ($Matches.ContainsKey('cid') -and $Matches.cid) {
+            $script:currentCycle.cycle_id = $Matches.cid
+        }
         $script:currentCycle.commit = $Matches.commit
         $script:currentCycle.transport = $Matches.transport
         $script:currentCycle.stream_mode = $Matches.mode
@@ -158,9 +266,20 @@ function Process-LogLine([string]$line) {
         $script:currentCycle.policy_cad_pct = $Matches.cp
         $script:currentCycle.policy_always_latest = $Matches.al
         $script:currentCycle.req_quality = $Matches.rq
+        if ($Matches.ContainsKey('aq') -and $Matches.aq) {
+            $script:currentCycle.active_quality = $Matches.aq
+        } else {
+            $script:currentCycle.active_quality = $Matches.rq
+        }
+        if ($Matches.ContainsKey('qp') -and $Matches.qp) {
+            $script:currentCycle.quality_pending = $Matches.qp
+        } else {
+            $script:currentCycle.quality_pending = '0'
+        }
         $script:currentCycle.actual_codec = $Matches.codec
         $script:currentCycle.actual_res = $Matches.res
         $script:currentCycle.actual_fps = $Matches.fps
+        $script:currentCycle.has_meta = $true
         $script:currentCycle.has_update = $true
     }
     elseif ($line -match '\[STATS\] VIDEO: rtp=(?<rtp>\d+)/s \((?<kb>[\d.]+) KB/s\) \| au=(?<au>\d+)/s \| dec=(?<dec>\d+) fps \| rend=(?<rend>\d+) fps \(unique=(?<up>\d+).*?\) \| .*? \| drop=(?<drop>\d+)/s \(superseded=(?<sup_rate>\d+)/s, late=(?<late_rate>\d+)/s.*?\) \| q=(?<q>\d+) \| gen=(?<gen>\d+) \| coded=(?<coded>\S+) vis=(?<vis>\S+)') {
@@ -274,9 +393,6 @@ function Process-LogLine([string]$line) {
         $script:currentCycle.source_conn = $Matches.source
         $script:currentCycle.lifecycle = $Matches.life.Trim()
         $script:currentCycle.has_update = $true
-
-        Emit-Cycle $script:currentCycle
-        $script:currentCycle = New-CycleState
     }
 }
 while ((Get-Date) -lt $deadline) {
@@ -318,8 +434,22 @@ while ((Get-Date) -lt $deadline) {
                         try {
                             if ($bfs.Length -gt $lastFilePos) {
                                 $null = $bfs.Seek($lastFilePos, [System.IO.SeekOrigin]::Begin)
-                                $bsr = [System.IO.StreamReader]::new($bfs, [System.Text.Encoding]::UTF8)
-                                $pendingText += $bsr.ReadToEnd()
+                                $readLen = [int]($bfs.Length - $lastFilePos)
+                                $rawBytes = New-Object byte[] ($readLen)
+                                $actualRead = 0
+                                while ($actualRead -lt $readLen) {
+                                    $n = $bfs.Read($rawBytes, $actualRead, $readLen - $actualRead)
+                                    if ($n -le 0) { break }
+                                    $actualRead += $n
+                                }
+                                if ($actualRead -gt 0) {
+                                    if ($actualRead -lt $readLen) {
+                                        $trimmedBytes = New-Object byte[] ($actualRead)
+                                        [System.Array]::Copy($rawBytes, 0, $trimmedBytes, 0, $actualRead)
+                                        $rawBytes = $trimmedBytes
+                                    }
+                                    $pendingText += Decode-Bytes $rawBytes
+                                }
                             }
                         } finally {
                             $bfs.Dispose()
@@ -349,10 +479,25 @@ while ((Get-Date) -lt $deadline) {
                         $fileHeaderPrefix = [System.Text.Encoding]::UTF8.GetString($pBuf, 0, $rBytes)
                     }
                     $null = $fs.Seek($lastFilePos, [System.IO.SeekOrigin]::Begin)
-                    $sr = [System.IO.StreamReader]::new($fs, [System.Text.Encoding]::UTF8)
-                    $newText = $sr.ReadToEnd()
-                    $lastFilePos = $fs.Position
-                    $pendingText += $newText
+                    $readLen = [int]($fileInfo.Length - $lastFilePos)
+                    if ($readLen -gt 0) {
+                        $rawBytes = New-Object byte[] ($readLen)
+                        $actualRead = 0
+                        while ($actualRead -lt $readLen) {
+                            $n = $fs.Read($rawBytes, $actualRead, $readLen - $actualRead)
+                            if ($n -le 0) { break }
+                            $actualRead += $n
+                        }
+                        $lastFilePos = $fs.Position
+                        if ($actualRead -gt 0) {
+                            if ($actualRead -lt $readLen) {
+                                $trimmedBytes = New-Object byte[] ($actualRead)
+                                [System.Array]::Copy($rawBytes, 0, $trimmedBytes, 0, $actualRead)
+                                $rawBytes = $trimmedBytes
+                            }
+                            $pendingText += Decode-Bytes $rawBytes
+                        }
+                    }
                 } finally {
                     $fs.Dispose()
                 }
@@ -377,7 +522,20 @@ while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 1
 }
 
-# Flush any trailing cycle at termination
+# Flush any pending bytes and lines at termination
+$flushText = Decode-Bytes @() -flush $true
+if ($flushText.Length -gt 0) {
+    $pendingText += $flushText
+}
+
+if ($pendingText.Length -gt 0) {
+    $chunkLines = $pendingText -split "`r?`n"
+    foreach ($cl in $chunkLines) {
+        Process-LogLine $cl
+    }
+    $pendingText = ''
+}
+
 if ($script:currentCycle.has_update) {
     Emit-Cycle $script:currentCycle
     $script:currentCycle = New-CycleState
