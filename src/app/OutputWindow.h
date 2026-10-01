@@ -36,6 +36,7 @@ public:
     void Show() noexcept;
     void ShowNoActivate() noexcept;
     void Hide() noexcept;
+    void EnsureAccessiblePlacement() noexcept;
 
     void SetOnVisibilityChanged(VisibilityCallback cb) noexcept {
         m_on_visibility = std::move(cb);

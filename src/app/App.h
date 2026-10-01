@@ -47,6 +47,7 @@ constexpr UINT WM_DUWN_RESTART_AIRPLAY = WM_APP + 101;
 constexpr UINT WM_DUWN_WIRED_REFRESH = WM_APP + 102;
 constexpr UINT WM_DUWN_NETWORK_CHANGED = WM_APP + 103;
 constexpr UINT WM_DUWN_SESSION_PHASE = WM_APP + 104;
+constexpr UINT WM_DUWN_FIRST_FRAME = WM_APP + 105;
 
 class App {
 public:
@@ -183,6 +184,10 @@ private:
 
     // Direct IPC Video Consumer
     std::unique_ptr<ipc::VideoIpcConsumer> m_ipc_consumer;
+    std::atomic<bool>      m_direct_ipc_active{false};
+    void TryStartIpcConsumer() noexcept;
+    void StopIpcConsumer() noexcept;
+    void ResetSessionFirstEvents() noexcept;
 
     // AirPlay Process / Sidecar Generation and Metadata Synchronization
     SessionMetadataCoordinator m_meta_coord;
@@ -196,8 +201,13 @@ private:
     uint32_t               m_pending_aspect_h{0};
     uint32_t               m_pending_aspect_count{0};
 
-    // Preview presentation state
-    std::atomic<bool>      m_preview_shown{false};
+    // Preview and frame presentation lifecycle state
+    std::atomic<bool>      m_session_first_frame_handled{false};
+    std::atomic<bool>      m_first_video_rtp_recorded{false};
+    std::atomic<bool>      m_first_au_recorded{false};
+    std::atomic<bool>      m_first_output_present_recorded{false};
+    std::atomic<bool>      m_first_preview_present_recorded{false};
+    std::atomic<int>       m_probe_packet_count{0};
     uint32_t               m_last_preview_src_w{0};
     uint32_t               m_last_preview_src_h{0};
     std::atomic<uint64_t>  m_render_generation{0};

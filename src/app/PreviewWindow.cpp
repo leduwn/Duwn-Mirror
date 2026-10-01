@@ -88,15 +88,47 @@ bool PreviewWindow::Create(uint32_t initial_w, uint32_t initial_h,
     return true;
 }
 
+void PreviewWindow::EnsureAccessiblePlacement() noexcept {
+    if (!m_hwnd || m_fullscreen) return;
+    RECT rc{};
+    if (!::GetWindowRect(m_hwnd, &rc)) return;
+    HMONITOR hMon = ::MonitorFromRect(&rc, MONITOR_DEFAULTTONULL);
+    if (!hMon) {
+        hMon = ::MonitorFromWindow(::GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO mi{sizeof(mi)};
+        if (::GetMonitorInfoW(hMon, &mi)) {
+            int w = rc.right - rc.left;
+            int h = rc.bottom - rc.top;
+            const int work_w = mi.rcWork.right - mi.rcWork.left;
+            const int work_h = mi.rcWork.bottom - mi.rcWork.top;
+            if (w > work_w) w = work_w;
+            if (h > work_h) h = work_h;
+            int x = mi.rcWork.left + (work_w - w) / 2;
+            int y = mi.rcWork.top + (work_h - h) / 2;
+            ::SetWindowPos(m_hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+}
+
 void PreviewWindow::Show() noexcept {
     if (m_hwnd) {
-        ::ShowWindow(m_hwnd, SW_SHOW);
+        if (::IsIconic(m_hwnd)) {
+            ::ShowWindow(m_hwnd, SW_RESTORE);
+        } else {
+            ::ShowWindow(m_hwnd, SW_SHOW);
+        }
+        EnsureAccessiblePlacement();
     }
 }
 
 void PreviewWindow::ShowNoActivate() noexcept {
     if (m_hwnd) {
-        ::ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
+        if (::IsIconic(m_hwnd)) {
+            ::ShowWindow(m_hwnd, SW_RESTORE);
+        } else {
+            ::ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
+        }
+        EnsureAccessiblePlacement();
     }
 }
 

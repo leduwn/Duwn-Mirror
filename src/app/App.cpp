@@ -426,6 +426,54 @@ int App::Run() noexcept {
 
             }
 
+            if (msg.message == WM_DUWN_FIRST_FRAME) {
+
+                uint32_t fw = static_cast<uint32_t>(msg.wParam);
+
+                uint32_t fh = static_cast<uint32_t>(msg.lParam);
+
+                if (m_output_window && m_settings.auto_open_output_window) {
+
+                    m_output_window->ShowNoActivate();
+
+                    if (m_window) {
+
+                        m_window->SetOutputControlsState(true, m_output_window->IsFullscreen(),
+
+                            m_output_window->IsAspectLocked(), m_output_window->IsAlwaysOnTop());
+
+                    }
+
+                }
+
+                if (m_preview_window) {
+
+                    m_preview_window->SetVideoGeometry(fw, fh);
+
+                    if (m_settings.show_preview_on_connect) {
+
+                        m_preview_window->ApplyComfortableSize(fw, fh);
+
+                        m_preview_window->ShowNoActivate();
+
+                        if (m_window) {
+
+                            m_window->State().preview_visible = true;
+
+                            ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+
+                        }
+
+                        PublishMetadataSnapshot();
+
+                    }
+
+                }
+
+                continue;
+
+            }
+
             if (msg.message == WM_DUWN_NETWORK_CHANGED) {
 
                 OnNetworkEnvironmentChanged(m_net_monitor ? m_net_monitor->CurrentEnvironment() : network::NetworkEnvironmentInfo::Probe());
@@ -566,11 +614,17 @@ bool App::Init() noexcept {
 
             else m_output_window->Show();
 
-            m_window->SetOutputControlsState(!vis, m_output_window->IsFullscreen(),
+            const bool now_vis = !vis;
+
+            m_window->SetOutputControlsState(now_vis, m_output_window->IsFullscreen(),
 
                                              m_output_window->IsAspectLocked(),
 
                                              m_output_window->IsAlwaysOnTop());
+
+            m_window->State().output_window_visible = now_vis;
+
+            ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
 
         }
 
@@ -636,9 +690,9 @@ bool App::Init() noexcept {
 
             m_preview_window->ToggleVisibility();
 
-            m_window->State().preview_visible = m_preview_window->IsVisible();
+            const bool prev_vis = m_preview_window->IsVisible();
 
-            m_preview_shown.store(m_preview_window->IsVisible(), std::memory_order_relaxed);
+            m_window->State().preview_visible = prev_vis;
 
             ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
 
@@ -1327,68 +1381,7 @@ bool App::Init() noexcept {
 
 
     // Direct IPC Transport initialization (if configured or enabled)
-
-    if (m_settings.transport_mode == TransportMode::DirectIpc) {
-
-        m_ipc_consumer = std::make_unique<ipc::VideoIpcConsumer>();
-
-        if (m_settings.connection_mode == ConnectionMode::WirelessAirPlay && m_ipc_consumer->Open()) {
-
-            DUWN_LOG_INFO("App", "Direct IPC Video Consumer attached to shared memory ring");
-
-            m_ipc_consumer->Start([this](const ipc::IpcAccessUnitHeader& hdr, const uint8_t* payload, size_t size) {
-
-                GlobalMetrics().ipc_frames_consumed.fetch_add(1, std::memory_order_relaxed);
-
-                if (hdr.producer_send_ns > 0) {
-
-                    int64_t now_ns = clock::MonotonicClock::Now().time_since_epoch().count();
-
-                    double lat_ms = static_cast<double>(now_ns - hdr.producer_send_ns) / 1'000'000.0;
-
-                    GlobalMetrics().ipc_transport_latency_ms.store(lat_ms, std::memory_order_relaxed);
-
-                }
-
-
-
-                if (!m_decoder_ready.load(std::memory_order_acquire)) return;
-
-                video::EncodedAccessUnit au;
-
-                au.data.assign(payload, payload + size);
-
-                au.pts_ns = hdr.pts_ns;
-
-                au.dts_ns = hdr.dts_ns;
-
-                au.sequence_number = hdr.sequence_number;
-
-                au.format_generation = hdr.format_generation;
-
-                au.has_idr = (hdr.flags & ipc::IpcVideoFlags::Keyframe) != 0;
-
-                au.has_sps = (hdr.flags & ipc::IpcVideoFlags::HasSps) != 0;
-
-                au.has_pps = (hdr.flags & ipc::IpcVideoFlags::HasPps) != 0;
-
-                au.width_hint = hdr.width;
-
-                au.height_hint = hdr.height;
-
-                au.au_received_qpc = clock::MonotonicClock::NowQpcTicks();
-
-                m_video_decoder->FeedAccessUnit(std::move(au));
-
-            });
-
-        } else {
-
-            DUWN_LOG_WARN("App", "Direct IPC shared memory ring not ready, falling back to RTP legacy");
-
-        }
-
-    }
+    TryStartIpcConsumer();
 
 
 
@@ -1688,6 +1681,8 @@ void App::RestartAirPlaySidecar() noexcept {
 
 
     m_airplay->Stop();
+    StopIpcConsumer();
+    ResetSessionFirstEvents();
 
     m_airplay->ConfigureReceiverQuality(
 
@@ -1720,6 +1715,8 @@ void App::RestartAirPlaySidecar() noexcept {
     }
 
 
+
+    TryStartIpcConsumer();
 
     m_meta_coord.MarkSidecarRestarted(gen, m_settings.receiver_quality);
     if (m_window) {
@@ -1800,7 +1797,7 @@ void App::UpdateWiredConnection() noexcept {
 
             }
 
-            m_preview_shown.store(false, std::memory_order_relaxed);
+            ResetSessionFirstEvents();
 
             m_last_preview_src_w = 0;
 
@@ -1976,7 +1973,7 @@ void App::SwitchConnectionMode(ConnectionMode mode) noexcept {
 
     if (m_airplay) m_airplay->Stop();
 
-    if (m_ipc_consumer) m_ipc_consumer->Stop();
+    StopIpcConsumer();
 
     if (m_scheduler) { m_scheduler->Stop(); m_scheduler->Flush(); }
 
@@ -1998,7 +1995,7 @@ void App::SwitchConnectionMode(ConnectionMode mode) noexcept {
 
     if (m_preview_renderer) m_preview_renderer->PresentBlack();
 
-    m_preview_shown.store(false, std::memory_order_relaxed);
+    ResetSessionFirstEvents();
 
     m_last_preview_src_w = 0;
 
@@ -2075,43 +2072,7 @@ void App::SwitchConnectionMode(ConnectionMode mode) noexcept {
 
             DUWN_LOG_ERROR("App", "Wireless mode selected but AirPlay service failed to start");
 
-        if (m_ipc_consumer && m_settings.transport_mode == TransportMode::DirectIpc && m_ipc_consumer->Open()) {
-
-            m_ipc_consumer->Start([this](const ipc::IpcAccessUnitHeader& hdr, const uint8_t* payload, size_t size) {
-
-                if (m_connection_mode.load(std::memory_order_acquire) != ConnectionMode::WirelessAirPlay ||
-
-                    !m_decoder_ready.load(std::memory_order_acquire)) return;
-
-                video::EncodedAccessUnit au;
-
-                au.data.assign(payload, payload + size);
-
-                au.pts_ns = hdr.pts_ns;
-
-                au.dts_ns = hdr.dts_ns;
-
-                au.sequence_number = hdr.sequence_number;
-
-                au.format_generation = hdr.format_generation;
-
-                au.has_idr = (hdr.flags & ipc::IpcVideoFlags::Keyframe) != 0;
-
-                au.has_sps = (hdr.flags & ipc::IpcVideoFlags::HasSps) != 0;
-
-                au.has_pps = (hdr.flags & ipc::IpcVideoFlags::HasPps) != 0;
-
-                au.width_hint = hdr.width;
-
-                au.height_hint = hdr.height;
-
-                au.au_received_qpc = clock::MonotonicClock::NowQpcTicks();
-
-                m_video_decoder->FeedAccessUnit(std::move(au));
-
-            });
-
-        }
+        TryStartIpcConsumer();
 
     } else {
 
@@ -2145,7 +2106,7 @@ bool App::RecreateVideoPipeline() noexcept {
 
     if (m_airplay) m_airplay->Stop();
 
-    if (m_ipc_consumer) m_ipc_consumer->Stop();
+    StopIpcConsumer();
 
     if (m_scheduler) { m_scheduler->Stop(); m_scheduler->Flush(); }
 
@@ -2282,43 +2243,7 @@ bool App::RecreateVideoPipeline() noexcept {
 
     m_scheduler->Start();
 
-    if (m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WirelessAirPlay &&
-
-        m_ipc_consumer && m_settings.transport_mode == TransportMode::DirectIpc && m_ipc_consumer->Open()) {
-
-        m_ipc_consumer->Start([this](const ipc::IpcAccessUnitHeader& hdr, const uint8_t* payload, size_t size) {
-
-            if (!m_decoder_ready.load(std::memory_order_acquire)) return;
-
-            video::EncodedAccessUnit au;
-
-            au.data.assign(payload, payload + size);
-
-            au.pts_ns = hdr.pts_ns;
-
-            au.dts_ns = hdr.dts_ns;
-
-            au.sequence_number = hdr.sequence_number;
-
-            au.format_generation = hdr.format_generation;
-
-            au.has_idr = (hdr.flags & ipc::IpcVideoFlags::Keyframe) != 0;
-
-            au.has_sps = (hdr.flags & ipc::IpcVideoFlags::HasSps) != 0;
-
-            au.has_pps = (hdr.flags & ipc::IpcVideoFlags::HasPps) != 0;
-
-            au.width_hint = hdr.width;
-
-            au.height_hint = hdr.height;
-
-            au.au_received_qpc = clock::MonotonicClock::NowQpcTicks();
-
-            m_video_decoder->FeedAccessUnit(std::move(au));
-
-        });
-
-    }
+    TryStartIpcConsumer();
 
     if (m_airplay) m_airplay->ConfigureReceiverQuality(
 
@@ -3677,7 +3602,7 @@ void App::Shutdown() noexcept {
 
     if (m_net_monitor)  m_net_monitor->Stop();
 
-    if (m_ipc_consumer) m_ipc_consumer->Stop();
+    StopIpcConsumer();
 
     if (m_airplay)      m_airplay->Stop();
 
@@ -3746,6 +3671,72 @@ bool App::WaitForMediaReadiness(uint32_t timeout_ms) const noexcept {
     return true;
 }
 
+void App::ResetSessionFirstEvents() noexcept {
+    m_session_first_frame_handled.store(false, std::memory_order_release);
+    m_first_video_rtp_recorded.store(false, std::memory_order_release);
+    m_first_au_recorded.store(false, std::memory_order_release);
+    m_first_output_present_recorded.store(false, std::memory_order_release);
+    m_first_preview_present_recorded.store(false, std::memory_order_release);
+    m_probe_packet_count.store(0, std::memory_order_relaxed);
+}
+
+void App::TryStartIpcConsumer() noexcept {
+    if (m_connection_mode.load(std::memory_order_acquire) != ConnectionMode::WirelessAirPlay ||
+        m_settings.transport_mode != TransportMode::DirectIpc) {
+        StopIpcConsumer();
+        return;
+    }
+
+    if (!m_ipc_consumer) {
+        m_ipc_consumer = std::make_unique<ipc::VideoIpcConsumer>();
+    }
+
+    if (m_ipc_consumer->IsOpen() || m_ipc_consumer->Open()) {
+        m_direct_ipc_active.store(true, std::memory_order_release);
+        DUWN_LOG_INFO("App", "Direct IPC Video Consumer attached to shared memory ring");
+
+        m_ipc_consumer->Start([this](const ipc::IpcAccessUnitHeader& hdr, const uint8_t* payload, size_t size) {
+            GlobalMetrics().ipc_frames_consumed.fetch_add(1, std::memory_order_relaxed);
+            if (hdr.producer_send_ns > 0) {
+                int64_t now_ns = clock::MonotonicClock::Now().time_since_epoch().count();
+                double lat_ms = static_cast<double>(now_ns - hdr.producer_send_ns) / 1'000'000.0;
+                GlobalMetrics().ipc_transport_latency_ms.store(lat_ms, std::memory_order_relaxed);
+            }
+
+            if (m_connection_mode.load(std::memory_order_acquire) != ConnectionMode::WirelessAirPlay ||
+                !m_decoder_ready.load(std::memory_order_acquire)) return;
+
+            video::EncodedAccessUnit au;
+            au.data.assign(payload, payload + size);
+            au.pts_ns = hdr.pts_ns;
+            au.dts_ns = hdr.dts_ns;
+            au.sequence_number = hdr.sequence_number;
+            au.format_generation = hdr.format_generation;
+            au.has_idr = (hdr.flags & ipc::IpcVideoFlags::Keyframe) != 0;
+            au.has_sps = (hdr.flags & ipc::IpcVideoFlags::HasSps) != 0;
+            au.has_pps = (hdr.flags & ipc::IpcVideoFlags::HasPps) != 0;
+            au.width_hint = hdr.width;
+            au.height_hint = hdr.height;
+            au.au_received_qpc = clock::MonotonicClock::NowQpcTicks();
+
+            std::lock_guard<std::mutex> lock(m_decoder_mutex);
+            if (m_video_decoder) {
+                m_video_decoder->FeedAccessUnit(std::move(au));
+            }
+        });
+    } else {
+        m_direct_ipc_active.store(false, std::memory_order_release);
+        DUWN_LOG_WARN("App", "Direct IPC shared memory ring not ready, falling back to RTP legacy");
+    }
+}
+
+void App::StopIpcConsumer() noexcept {
+    m_direct_ipc_active.store(false, std::memory_order_release);
+    if (m_ipc_consumer) {
+        m_ipc_consumer->Stop();
+    }
+}
+
 
 
 void App::OnVideoData(const uint8_t* data, size_t size,
@@ -3760,9 +3751,7 @@ void App::OnVideoData(const uint8_t* data, size_t size,
 
 
 
-    static std::atomic<bool> s_first_video_rtp{false};
-
-    if (!s_first_video_rtp.exchange(true, std::memory_order_relaxed)) {
+    if (!m_first_video_rtp_recorded.exchange(true, std::memory_order_relaxed)) {
 
         duwn::telemetry::ConnectionTimeline::Get().Record(
             duwn::telemetry::ConnectionMilestone::C8_FirstVideoRtp,
@@ -3776,9 +3765,8 @@ void App::OnVideoData(const uint8_t* data, size_t size,
 
     }
 
-    static std::atomic<int> s_probe_packet_count{0};
-    if (s_probe_packet_count.load(std::memory_order_relaxed) < 10) {
-        int count = s_probe_packet_count.fetch_add(1, std::memory_order_relaxed);
+    if (m_probe_packet_count.load(std::memory_order_relaxed) < 10) {
+        int count = m_probe_packet_count.fetch_add(1, std::memory_order_relaxed);
         if (count < 10) {
             auto classification = video::ClassifyRtpPayload(std::span<const uint8_t>(data, size));
             int64_t qpc = clock::MonotonicClock::Now().time_since_epoch().count();
@@ -3792,22 +3780,43 @@ void App::OnVideoData(const uint8_t* data, size_t size,
         }
     }
 
-    if (!m_video_min_ready.load(std::memory_order_acquire) ||
-        !m_decoder_ready.load(std::memory_order_acquire)) {
-        // Video pipeline not yet ready or decoder not configured — skip without blocking RTP thread
+    if (!m_video_min_ready.load(std::memory_order_acquire)) {
         return;
     }
 
-
-
     // If Direct IPC is active and receiving frames, avoid decoding redundant legacy RTP
-
     if (m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WirelessAirPlay &&
-
-        m_settings.transport_mode == TransportMode::DirectIpc && m_ipc_consumer) {
-
+        m_direct_ipc_active.load(std::memory_order_acquire)) {
         return;
+    }
 
+    // Decoder auto-recovery on incoming RTP when decoder is not yet ready (e.g. after reconnect or late metadata)
+    if (!m_decoder_ready.load(std::memory_order_acquire)) {
+        auto classification = video::ClassifyRtpPayload(std::span<const uint8_t>(data, size));
+        if (classification.codec != video::DetectedCodec::Unknown) {
+            const auto codec_type = (classification.codec == video::DetectedCodec::H265)
+                ? video::VideoCodecType::H265
+                : video::VideoCodecType::H264;
+            const uint32_t init_w = (m_stream_width.load(std::memory_order_relaxed) > 0)
+                ? m_stream_width.load(std::memory_order_relaxed)
+                : (m_settings.receiver_width > 0 ? m_settings.receiver_width : 1920);
+            const uint32_t init_h = (m_stream_height.load(std::memory_order_relaxed) > 0)
+                ? m_stream_height.load(std::memory_order_relaxed)
+                : (m_settings.receiver_height > 0 ? m_settings.receiver_height : 1080);
+
+            std::lock_guard<std::mutex> lock(m_decoder_mutex);
+            if (m_video_decoder && m_video_decoder->Init(init_w, init_h, codec_type)) {
+                m_stream_width.store(init_w, std::memory_order_relaxed);
+                m_stream_height.store(init_h, std::memory_order_relaxed);
+                m_decoder_ready.store(true, std::memory_order_release);
+                DUWN_LOG_INFOF("App", "Video decoder ready for {}x{} ({}) via RTP payload classification",
+                    init_w, init_h, codec_type == video::VideoCodecType::H265 ? "HEVC" : "H.264");
+            }
+        }
+    }
+
+    if (!m_decoder_ready.load(std::memory_order_acquire)) {
+        return;
     }
 
 
@@ -3880,7 +3889,7 @@ void App::OnPhase(airplay::SessionPhase prev,
     case P::Advertising:
         if (m_renderer) m_renderer->PresentBlack();
         if (m_preview_renderer) m_preview_renderer->PresentBlack();
-        m_preview_shown.store(false, std::memory_order_relaxed);
+        ResetSessionFirstEvents();
         m_last_preview_src_w = 0;
         m_last_preview_src_h = 0;
         break;
@@ -3895,7 +3904,8 @@ void App::OnPhase(airplay::SessionPhase prev,
         if (m_audio_engine)  m_audio_engine->Flush();
         if (m_renderer)      m_renderer->PresentBlack();
         if (m_preview_renderer) m_preview_renderer->PresentBlack();
-        m_preview_shown.store(false, std::memory_order_relaxed);
+        StopIpcConsumer();
+        ResetSessionFirstEvents();
         m_last_preview_src_w = 0;
         m_last_preview_src_h = 0;
 
@@ -4000,87 +4010,70 @@ void App::HandleSessionPhaseOnMainThread(const SessionPhaseEvent& ev, bool quali
 
 void App::OnMetadata(const airplay::StreamMetadata& meta) noexcept {
 
-    if (!meta.IsValid()) return;
-
     if (!WaitForMediaReadiness(2500)) {
         DUWN_LOG_ERROR("App", "Timed out waiting for media infrastructure readiness during metadata setup");
         return;
     }
 
-
-
-    if (m_window) {
-
-        m_window->UpdateStreamMetadata(meta);
-
+    // 1. Audio setup: always initialize audio if audio properties present, independent of video validity
+    if (meta.audio_sample_rate > 0 && m_audio_engine) {
+        m_audio_engine->Init(meta);
     }
 
+    // 2. Video setup: only process when video metadata is actually valid
+    if (meta.video_codec != airplay::VideoCodec::Unknown && meta.video_width > 0 && meta.video_height > 0) {
+        if (m_window) {
+            m_window->UpdateStreamMetadata(meta);
+        }
 
+        const uint32_t w = meta.video_width;
+        const uint32_t h = meta.video_height;
+        const auto codec_type = (meta.video_codec == airplay::VideoCodec::H265)
+            ? video::VideoCodecType::H265
+            : video::VideoCodecType::H264;
 
-    uint32_t w = meta.video_width;
+        const bool is_ready = m_decoder_ready.load(std::memory_order_acquire);
+        const bool same_config = is_ready &&
+                                 (m_stream_width.load(std::memory_order_relaxed) == w) &&
+                                 (m_stream_height.load(std::memory_order_relaxed) == h) &&
+                                 (m_video_decoder && m_video_decoder->GetActiveCodec() == codec_type);
 
-    uint32_t h = meta.video_height;
-
-
-
-    m_stream_width.store(w, std::memory_order_relaxed);
-
-    m_stream_height.store(h, std::memory_order_relaxed);
-
-    const auto codec_type = (meta.video_codec == airplay::VideoCodec::H265)
-        ? video::VideoCodecType::H265
-        : video::VideoCodecType::H264;
-
-    // (Re)initialise decoder for new dimensions and codec
-    if (m_video_decoder) {
-        m_decoder_ready.store(false, std::memory_order_release);
-        std::lock_guard<std::mutex> lock(m_decoder_mutex);
-        m_video_decoder->Flush();
-        if (m_video_decoder->Init(w, h, codec_type)) {
-            m_decoder_ready.store(true, std::memory_order_release);
-            DUWN_LOG_INFOF("App", "Video decoder ready for {}x{} ({})",
-                w, h, codec_type == video::VideoCodecType::H265 ? "HEVC" : "H.264");
-        } else {
-            if (codec_type == video::VideoCodecType::H265) {
-                m_window->SetStatusText(ui::loc::Get(ui::loc::S::Video_HevcUnavailable));
-            } else {
-                m_window->SetStatusText(ui::loc::Get(ui::loc::S::Video_DecoderInitFailure));
+        if (!same_config) {
+            if (m_video_decoder) {
+                m_decoder_ready.store(false, std::memory_order_release);
+                std::lock_guard<std::mutex> lock(m_decoder_mutex);
+                m_video_decoder->Flush();
+                if (m_video_decoder->Init(w, h, codec_type)) {
+                    m_stream_width.store(w, std::memory_order_relaxed);
+                    m_stream_height.store(h, std::memory_order_relaxed);
+                    m_decoder_ready.store(true, std::memory_order_release);
+                    DUWN_LOG_INFOF("App", "Video decoder ready for {}x{} ({})",
+                        w, h, codec_type == video::VideoCodecType::H265 ? "HEVC" : "H.264");
+                } else {
+                    if (codec_type == video::VideoCodecType::H265) {
+                        m_window->SetStatusText(ui::loc::Get(ui::loc::S::Video_HevcUnavailable));
+                    } else {
+                        m_window->SetStatusText(ui::loc::Get(ui::loc::S::Video_DecoderInitFailure));
+                    }
+                }
             }
         }
+
+        if (m_preview_window) {
+            m_preview_window->SetVideoGeometry(w, h);
+        }
+
+        // Update window title
+        auto title = std::format(
+            L"Duwn Mirror — {}×{}@{:.0f} | {} | {}",
+            w, h, meta.video_fps,
+            meta.video_codec == airplay::VideoCodec::H265 ? L"H.265" : L"H.264",
+            m_d3d && m_d3d->IsHardware() ? L"HW Decode" : L"SW Decode");
+
+        if (m_window) {
+            m_window->SetTitle(title);
+        }
     }
-
-    if (m_preview_window) {
-
-        m_preview_window->SetVideoGeometry(w, h);
-
-    }
-
-
-
-    // Initialise audio engine for negotiated format
-
-    if (m_audio_engine && meta.audio_codec != airplay::AudioCodec::Unknown) {
-
-        m_audio_engine->Init(meta);
-
-    }
-
-
-
-    // Update window title
-
-    auto title = std::format(
-
-        L"Duwn Mirror — {}×{}@{:.0f} | {} | {}",
-
-        w, h, meta.video_fps,
-
-        meta.video_codec == airplay::VideoCodec::H265 ? L"H.265" : L"H.264",
-
-        m_d3d && m_d3d->IsHardware() ? L"HW Decode" : L"SW Decode");
-
-    m_window->SetTitle(title);
-
 }
 
 
@@ -4123,25 +4116,39 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
 
     if (frame.visible_width > 0 && frame.visible_height > 0) {
 
-        bool was_shown = m_preview_shown.exchange(true, std::memory_order_relaxed);
+        bool was_handled = m_session_first_frame_handled.exchange(true, std::memory_order_relaxed);
 
-        if (!was_shown) {
+        if (!was_handled) {
 
-            if (m_output_window && m_settings.auto_open_output_window) {
+            HWND main_hwnd = m_main_hwnd.load(std::memory_order_acquire);
 
-                m_output_window->ShowNoActivate();
+            if (main_hwnd) {
 
-            }
+                ::PostMessageW(main_hwnd, WM_DUWN_FIRST_FRAME,
 
-            if (m_preview_window) {
+                    static_cast<WPARAM>(frame.visible_width),
 
-                m_preview_window->SetVideoGeometry(frame.visible_width, frame.visible_height);
+                    static_cast<LPARAM>(frame.visible_height));
 
-                if (m_settings.show_preview_on_connect) {
+            } else {
 
-                    m_preview_window->ApplyComfortableSize(frame.visible_width, frame.visible_height);
+                if (m_output_window && m_settings.auto_open_output_window) {
 
-                    m_preview_window->ShowNoActivate();
+                    m_output_window->ShowNoActivate();
+
+                }
+
+                if (m_preview_window) {
+
+                    m_preview_window->SetVideoGeometry(frame.visible_width, frame.visible_height);
+
+                    if (m_settings.show_preview_on_connect) {
+
+                        m_preview_window->ApplyComfortableSize(frame.visible_width, frame.visible_height);
+
+                        m_preview_window->ShowNoActivate();
+
+                    }
 
                 }
 
@@ -4264,9 +4271,14 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
     const video::PresentResult result = m_renderer->Present(frame, skip_wait);
 
     if (result == video::PresentResult::Ok) {
-        duwn::telemetry::ConnectionTimeline::Get().Record(
-            duwn::telemetry::ConnectionMilestone::C13_FirstOutputPresent,
-            std::format("{}x{} visible", frame.visible_width, frame.visible_height));
+        if (!m_first_output_present_recorded.exchange(true, std::memory_order_relaxed)) {
+            duwn::telemetry::ConnectionTimeline::Get().Record(
+                duwn::telemetry::ConnectionMilestone::C13_FirstOutputPresent,
+                std::format("{}x{} visible", frame.visible_width, frame.visible_height));
+            DUWN_LOG_INFOF("Diagnostics",
+                "FIRST EVENT: Output frame presented successfully ({}x{})",
+                frame.visible_width, frame.visible_height);
+        }
 
         const int64_t output_present_qpc = frame.present_end_qpc;
         telemetry::LatencyTelemetry::Get().RecordOutputFrameAge(
@@ -4279,9 +4291,14 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
         const int64_t preview_present_qpc = clock::MonotonicClock::NowQpcTicks();
 
         if (prev_res == video::PresentResult::Ok) {
-            duwn::telemetry::ConnectionTimeline::Get().Record(
-                duwn::telemetry::ConnectionMilestone::C12_FirstPreviewPresent,
-                std::format("{}x{} visible", frame.visible_width, frame.visible_height));
+            if (!m_first_preview_present_recorded.exchange(true, std::memory_order_relaxed)) {
+                duwn::telemetry::ConnectionTimeline::Get().Record(
+                    duwn::telemetry::ConnectionMilestone::C12_FirstPreviewPresent,
+                    std::format("{}x{} visible", frame.visible_width, frame.visible_height));
+                DUWN_LOG_INFOF("Diagnostics",
+                    "FIRST EVENT: Preview frame presented successfully ({}x{})",
+                    frame.visible_width, frame.visible_height);
+            }
             telemetry::LatencyTelemetry::Get().RecordPreviewSuccess(
                 decoder_output_qpc, preview_select_qpc, preview_present_qpc);
         } else if (prev_res == video::PresentResult::Skipped) {
@@ -4348,7 +4365,7 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
 std::string App::GetActiveTransportString() const noexcept {
     const bool is_wired = m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WiredUsb;
     if (is_wired) return "WiredUsb";
-    if (m_settings.transport_mode == TransportMode::DirectIpc && m_ipc_consumer && m_ipc_consumer->IsOpen()) {
+    if (m_settings.transport_mode == TransportMode::DirectIpc && m_direct_ipc_active.load(std::memory_order_acquire)) {
         return "DirectIpc";
     }
     return "LocalRtpUdp";
@@ -5280,6 +5297,10 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
             state.output_width = cap_w;
 
             state.output_height = cap_h;
+
+            state.preview_visible = m_preview_window ? m_preview_window->IsVisible() : false;
+
+            state.output_window_visible = m_output_window ? (::IsWindowVisible(m_output_window->Hwnd()) != 0) : false;
 
             state.nominal_fps = m.source_nominal_fps.load(std::memory_order_relaxed);
 

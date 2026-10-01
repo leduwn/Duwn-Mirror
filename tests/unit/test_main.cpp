@@ -89,6 +89,7 @@ void AssertTrue(bool cond, const char* expr, const char* file, int line);
 #include "test_direct_hevc_path.cpp"
 #include "test_direct_capture_architecture.cpp"
 #include "test_metadata_concurrency.cpp"
+#include "test_video_pipeline_recovery.cpp"
 
 #include <objbase.h>
 

@@ -63,6 +63,7 @@ public:
     // Set video aspect ratio and calculate/apply initial comfortable placement if desired
     void SetVideoGeometry(uint32_t video_w, uint32_t video_h) noexcept;
     void ApplyComfortableSize(uint32_t video_w, uint32_t video_h) noexcept;
+    void EnsureAccessiblePlacement() noexcept;
 
     static void CalculateComfortableInitialRect(HWND target_hwnd,
                                               uint32_t video_w, uint32_t video_h,
