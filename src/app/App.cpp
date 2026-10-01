@@ -283,10 +283,7 @@ int App::Run() noexcept {
 
 
     m_settings = Settings::Load();
-    m_active_receiver_quality.store(m_settings.receiver_quality, std::memory_order_release);
-    m_config_generation.store(1, std::memory_order_release);
-    m_sidecar_generation.store(1, std::memory_order_release);
-    m_receiver_config_dirty.store(false, std::memory_order_release);
+    m_meta_coord.Initialize(m_settings);
 
     Logger::SetLevel(m_settings.debug_log ? LogLevel::Debug : LogLevel::Info);
 
@@ -416,6 +413,14 @@ int App::Run() noexcept {
             if (msg.message == WM_DUWN_WIRED_REFRESH) {
 
                 UpdateWiredConnection();
+
+                continue;
+
+            }
+
+            if (msg.message == WM_DUWN_SESSION_PHASE) {
+
+                ProcessPendingSessionEvents();
 
                 continue;
 
@@ -897,7 +902,7 @@ bool App::Init() noexcept {
     ap_cfg.max_fps               = m_settings.receiver_fps;
     ap_cfg.receiver_width        = m_settings.receiver_width;
     ap_cfg.receiver_height       = m_settings.receiver_height;
-    ap_cfg.config_generation     = m_config_generation.load(std::memory_order_relaxed);
+    ap_cfg.config_generation     = m_meta_coord.GetConfigGeneration();
     ap_cfg.receiver_quality_name = std::string(GetReceiverQualityName(m_settings.receiver_quality));
     ap_cfg.enable_fps_data       = true;
     ap_cfg.debug_log             = m_settings.debug_log;
@@ -944,7 +949,7 @@ bool App::Init() noexcept {
                 m_decoder_ready.store(true, std::memory_order_release);
             }
 
-            if (m_receiver_config_dirty.load(std::memory_order_acquire)) {
+            if (m_meta_coord.IsReceiverConfigDirty()) {
                 bool expected = false;
                 if (m_sidecar_restart_posted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
                     HWND hwnd = m_main_hwnd.load(std::memory_order_acquire);
@@ -1630,11 +1635,11 @@ void App::SyncUiVideoSettings() noexcept {
 
     s.gpu_name = m_d3d ? m_d3d->AdapterName() : L"—";
 
-    s.config_generation = m_config_generation.load(std::memory_order_relaxed);
+    s.config_generation = m_meta_coord.GetConfigGeneration();
 
-    s.sidecar_generation = m_sidecar_generation.load(std::memory_order_relaxed);
+    s.sidecar_generation = m_meta_coord.GetSidecarGeneration();
 
-    s.receiver_quality_pending = (s.config_generation != s.sidecar_generation) || m_receiver_config_dirty.load(std::memory_order_relaxed);
+    s.receiver_quality_pending = m_meta_coord.IsQualityPending();
 
     if (m_renderer)
 
@@ -1660,7 +1665,7 @@ void App::RestartAirPlaySidecar() noexcept {
 
 
 
-    const uint64_t gen = m_config_generation.load(std::memory_order_acquire);
+    const uint64_t gen = m_meta_coord.GetConfigGeneration();
 
     const std::string_view q_name = GetReceiverQualityName(m_settings.receiver_quality);
 
@@ -1714,9 +1719,7 @@ void App::RestartAirPlaySidecar() noexcept {
 
 
 
-    m_active_receiver_quality.store(m_settings.receiver_quality, std::memory_order_release);
-    m_receiver_config_dirty.store(false, std::memory_order_release);
-    m_sidecar_generation.store(gen, std::memory_order_release);
+    m_meta_coord.MarkSidecarRestarted(gen, m_settings.receiver_quality);
     if (m_window) {
         m_window->State().sidecar_generation = gen;
         m_window->State().receiver_quality_pending = false;
@@ -2060,11 +2063,11 @@ void App::SwitchConnectionMode(ConnectionMode mode) noexcept {
 
             m_settings.receiver_width, m_settings.receiver_height, m_settings.receiver_fps,
 
-            m_config_generation.load(std::memory_order_acquire),
+            m_meta_coord.GetConfigGeneration(),
 
             GetReceiverQualityName(m_settings.receiver_quality));
 
-        m_receiver_config_dirty.store(false, std::memory_order_release);
+        m_meta_coord.MarkSidecarRestarted(m_meta_coord.GetConfigGeneration(), m_settings.receiver_quality);
 
         if (m_airplay && !m_airplay->Start())
 
@@ -2319,7 +2322,7 @@ bool App::RecreateVideoPipeline() noexcept {
 
         m_settings.receiver_width, m_settings.receiver_height, m_settings.receiver_fps,
 
-        m_config_generation.load(std::memory_order_acquire),
+        m_meta_coord.GetConfigGeneration(),
 
         GetReceiverQualityName(m_settings.receiver_quality));
 
@@ -3523,12 +3526,9 @@ void App::ApplySettingChange(int id, int value) noexcept {
     }
 
     const bool quality_changed = (old_quality != m_settings.receiver_quality);
+    m_meta_coord.UpdateRequestedSettings(m_settings, quality_changed);
 
     if (quality_changed) {
-
-        m_config_generation.fetch_add(1, std::memory_order_relaxed);
-
-        m_receiver_config_dirty.store(true, std::memory_order_release);
 
         if (m_window) m_window->State().receiver_quality_pending = true;
 
@@ -3871,193 +3871,127 @@ void App::OnAudioData(const uint8_t* data, size_t size,
 
 
 
-void App::OnPhase(airplay::SessionPhase /*prev*/,
-
+void App::OnPhase(airplay::SessionPhase prev,
                   airplay::SessionPhase next) noexcept {
-
-    if (m_window) {
-
-        m_window->UpdateSessionPhase(next);
-
-    }
-
-
-
     using P = airplay::SessionPhase;
-
     switch (next) {
-
     case P::Advertising:
-
         if (m_renderer) m_renderer->PresentBlack();
-
         if (m_preview_renderer) m_preview_renderer->PresentBlack();
-
-        if (m_settings.hide_preview_on_disconnect && m_preview_window) {
-
-            m_preview_window->Hide();
-
-        }
-
         m_preview_shown.store(false, std::memory_order_relaxed);
-
         m_last_preview_src_w = 0;
-
         m_last_preview_src_h = 0;
-
-        if (m_airplay) {
-
-            uint64_t sidecar_gen = m_airplay->GetSidecarGeneration();
-
-            m_sidecar_generation.store(sidecar_gen, std::memory_order_release);
-
-            if (sidecar_gen == m_config_generation.load(std::memory_order_acquire)) {
-
-                m_receiver_config_dirty.store(false, std::memory_order_release);
-                m_active_receiver_quality.store(m_settings.receiver_quality, std::memory_order_release);
-
-                if (m_window) {
-
-                    m_window->State().sidecar_generation = sidecar_gen;
-
-                    m_window->State().receiver_quality_pending = false;
-
-                    ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
-
-                }
-                PublishMetadataSnapshot();
-
-            }
-
-        }
-
-        m_window->SetStatusText(m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WiredUsb
-
-            ? L"USB Screen Mirroring ready" : L"Ready — open AirPlay on iPhone");
-
-        break;
-
-    case P::Connecting:
-
-        m_window->SetStatusText(L"Connecting…");
-
-        break;
-
-    case P::Streaming:
-
-        if (m_airplay) {
-
-            uint64_t sidecar_gen = m_airplay->GetSidecarGeneration();
-
-            m_sidecar_generation.store(sidecar_gen, std::memory_order_release);
-
-            if (sidecar_gen == m_config_generation.load(std::memory_order_acquire) &&
-
-                !m_receiver_config_dirty.load(std::memory_order_acquire)) {
-
-                m_active_receiver_quality.store(m_settings.receiver_quality, std::memory_order_release);
-
-                if (m_window) {
-
-                    m_window->State().sidecar_generation = sidecar_gen;
-
-                    m_window->State().receiver_quality_pending = false;
-
-                    ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
-
-                }
-                PublishMetadataSnapshot();
-
-            }
-
-        }
-
-        m_window->SetStatusText(L"Streaming");
-
-        DUWN_LOG_INFO("App", "AirPlay streaming session active — media pipeline configuration:");
-
-        LogCapabilityReport();
-
         break;
 
     case P::Reconnecting:
-
-        m_window->SetStatusText(L"Reconnecting…");
-
         m_decoder_ready.store(false, std::memory_order_release);
-
         {
-
             std::lock_guard<std::mutex> lock(m_decoder_mutex);
-
             if (m_video_decoder) m_video_decoder->ResetCodecState();
-
         }
-
         if (m_scheduler)     m_scheduler->Flush();
-
         if (m_audio_engine)  m_audio_engine->Flush();
-
-        // Clear OutputWindow and preview to black — last frame stays frozen otherwise.
-
-        if (m_renderer)         m_renderer->PresentBlack();
-
+        if (m_renderer)      m_renderer->PresentBlack();
         if (m_preview_renderer) m_preview_renderer->PresentBlack();
-
-        if (m_settings.hide_preview_on_disconnect && m_preview_window) {
-
-            m_preview_window->Hide();
-
-        }
-
         m_preview_shown.store(false, std::memory_order_relaxed);
-
         m_last_preview_src_w = 0;
-
         m_last_preview_src_h = 0;
 
-        if (m_receiver_config_dirty.load(std::memory_order_acquire)) {
-
+        if (m_meta_coord.IsReceiverConfigDirty()) {
             bool expected = false;
-
             if (m_sidecar_restart_posted.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-
                 HWND hwnd = m_main_hwnd.load(std::memory_order_acquire);
-
                 if (hwnd) {
-
                     ::PostMessageW(hwnd, WM_DUWN_RESTART_AIRPLAY, 0, 0);
-
                 } else {
-
                     m_sidecar_restart_posted.store(false, std::memory_order_release);
-
                 }
-
             }
-
         }
-
-        break;
-
-    case P::SidecarMissing:
-
-        m_window->SetStatusText(L"Error: uxplay.exe missing in duwn-airplay");
-
-        break;
-
-    case P::AdvertisingFailed:
-
-        m_window->SetStatusText(L"Error: AirPlay failed to start");
-
         break;
 
     default:
-
         break;
-
     }
 
+    uint64_t sidecar_gen = m_airplay ? m_airplay->GetSidecarGeneration() : 0;
+    m_meta_coord.PostPhaseEvent(prev, next, sidecar_gen);
+
+    HWND hwnd = m_main_hwnd.load(std::memory_order_acquire);
+    if (hwnd) {
+        ::PostMessageW(hwnd, WM_DUWN_SESSION_PHASE, 0, 0);
+    }
+}
+
+void App::ProcessPendingSessionEvents() noexcept {
+    m_meta_coord.ProcessPendingEvents([this](const SessionPhaseEvent& ev, bool quality_applied) {
+        HandleSessionPhaseOnMainThread(ev, quality_applied);
+    });
+    PublishMetadataSnapshot();
+}
+
+void App::HandleSessionPhaseOnMainThread(const SessionPhaseEvent& ev, bool quality_applied) noexcept {
+    if (m_window) {
+        m_window->UpdateSessionPhase(ev.next);
+        if (ev.generation > 0) {
+            m_window->State().sidecar_generation = ev.generation;
+        }
+        if (quality_applied) {
+            m_window->State().receiver_quality_pending = false;
+            ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+        }
+    }
+
+    using P = airplay::SessionPhase;
+    switch (ev.next) {
+    case P::Advertising:
+        if (m_settings.hide_preview_on_disconnect && m_preview_window) {
+            m_preview_window->Hide();
+        }
+        if (m_window) {
+            m_window->SetStatusText(m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WiredUsb
+                ? L"USB Screen Mirroring ready" : L"Ready — open AirPlay on iPhone");
+        }
+        break;
+
+    case P::Connecting:
+        if (m_window) {
+            m_window->SetStatusText(L"Connecting…");
+        }
+        break;
+
+    case P::Streaming:
+        if (m_window) {
+            m_window->SetStatusText(L"Streaming");
+        }
+        DUWN_LOG_INFO("App", "AirPlay streaming session active — media pipeline configuration:");
+        LogCapabilityReport();
+        break;
+
+    case P::Reconnecting:
+        if (m_window) {
+            m_window->SetStatusText(L"Reconnecting…");
+        }
+        if (m_settings.hide_preview_on_disconnect && m_preview_window) {
+            m_preview_window->Hide();
+        }
+        break;
+
+    case P::SidecarMissing:
+        if (m_window) {
+            m_window->SetStatusText(L"Error: uxplay.exe missing in duwn-airplay");
+        }
+        break;
+
+    case P::AdvertisingFailed:
+        if (m_window) {
+            m_window->SetStatusText(L"Error: AirPlay failed to start");
+        }
+        break;
+
+    default:
+        break;
+    }
 }
 
 
@@ -4409,58 +4343,29 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
 
 
 
-void App::PublishMetadataSnapshot() noexcept {
-    SessionMetadataSnapshot snap;
-    snap.req_streaming_mode = m_settings.streaming_mode;
-    snap.req_custom_freshness_ms = m_settings.custom_video_freshness_ms;
-    snap.req_custom_queue_frames = m_settings.custom_video_queue_frames;
-    snap.req_receiver_quality = m_settings.receiver_quality;
-    snap.req_receiver_width = m_settings.receiver_width;
-    snap.req_receiver_height = m_settings.receiver_height;
-    snap.req_receiver_fps = m_settings.receiver_fps;
-    snap.req_transport_mode = m_settings.transport_mode;
-    snap.monitor_device_id = m_settings.monitor_device_id;
-
-    snap.capture_canvas = m_settings.capture_canvas;
-    snap.output_quality = m_settings.output_quality;
-    snap.aspect_mode = m_settings.aspect_mode;
-    snap.output_width = m_settings.output_width;
-    snap.output_height = m_settings.output_height;
-
+std::string App::GetActiveTransportString() const noexcept {
     const bool is_wired = m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WiredUsb;
-    if (is_wired) {
-        snap.active_transport = "WiredUsb";
-    } else if (m_settings.transport_mode == TransportMode::DirectIpc && m_ipc_consumer && m_ipc_consumer->IsOpen()) {
-        snap.active_transport = "DirectIpc";
-    } else {
-        snap.active_transport = "LocalRtpUdp";
+    if (is_wired) return "WiredUsb";
+    if (m_settings.transport_mode == TransportMode::DirectIpc && m_ipc_consumer && m_ipc_consumer->IsOpen()) {
+        return "DirectIpc";
     }
+    return "LocalRtpUdp";
+}
 
+StreamingPolicy App::GetActiveStreamingPolicy() const noexcept {
     if (m_scheduler) {
-        snap.active_policy = m_scheduler->GetStreamingPolicy();
-    } else {
-        snap.active_policy = ResolveStreamingPolicy(m_settings.streaming_mode,
-            m_settings.custom_video_freshness_ms, m_settings.custom_video_queue_frames);
+        return m_scheduler->GetStreamingPolicy();
     }
-    snap.active_streaming_mode = m_settings.streaming_mode;
+    return ResolveStreamingPolicy(m_settings.streaming_mode,
+        m_settings.custom_video_freshness_ms, m_settings.custom_video_queue_frames);
+}
 
-    const bool is_dirty = m_receiver_config_dirty.load(std::memory_order_acquire);
-    const uint64_t cfg_gen = m_config_generation.load(std::memory_order_acquire);
-    const uint64_t side_gen = m_sidecar_generation.load(std::memory_order_acquire);
-    const bool is_pending = is_dirty || (cfg_gen != side_gen);
-
-    snap.receiver_quality_pending = is_pending;
-    snap.active_receiver_quality = is_pending
-        ? m_active_receiver_quality.load(std::memory_order_acquire)
-        : m_settings.receiver_quality;
-
-    std::lock_guard lock(m_metadata_mutex);
-    m_metadata_snapshot = std::move(snap);
+void App::PublishMetadataSnapshot() noexcept {
+    m_meta_coord.PublishSnapshot(GetActiveTransportString(), GetActiveStreamingPolicy());
 }
 
 SessionMetadataSnapshot App::GetMetadataSnapshot() const noexcept {
-    std::lock_guard lock(m_metadata_mutex);
-    return m_metadata_snapshot;
+    return m_meta_coord.GetSnapshot();
 }
 
 
@@ -5374,9 +5279,9 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
             state.nominal_fps = m.source_nominal_fps.load(std::memory_order_relaxed);
 
-            state.config_generation = m_config_generation.load(std::memory_order_relaxed);
+            state.config_generation = m_meta_coord.GetConfigGeneration();
 
-            state.sidecar_generation = m_sidecar_generation.load(std::memory_order_relaxed);
+            state.sidecar_generation = m_meta_coord.GetSidecarGeneration();
 
             state.receiver_quality_pending = meta_snap.receiver_quality_pending;
 

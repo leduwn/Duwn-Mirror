@@ -88,6 +88,8 @@ void AssertTrue(bool cond, const char* expr, const char* file, int line);
 #include "test_direct_adaptive_controller.cpp"
 #include "test_direct_hevc_path.cpp"
 #include "test_direct_capture_architecture.cpp"
+#include "test_metadata_concurrency.cpp"
+
 #include <objbase.h>
 
 namespace test_framework {

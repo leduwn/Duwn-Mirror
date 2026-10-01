@@ -28,6 +28,7 @@
 #include "sync/MasterClock.h"
 #include "sync/AvSynchronizer.h"
 #include "sync/DriftController.h"
+#include "SessionMetadataCoordinator.h"
 #include <memory>
 #include <atomic>
 #include <thread>
@@ -45,30 +46,7 @@ constexpr UINT WM_DUWN_FATAL = WM_APP + 100;
 constexpr UINT WM_DUWN_RESTART_AIRPLAY = WM_APP + 101;
 constexpr UINT WM_DUWN_WIRED_REFRESH = WM_APP + 102;
 constexpr UINT WM_DUWN_NETWORK_CHANGED = WM_APP + 103;
-
-struct SessionMetadataSnapshot {
-    StreamingMode   req_streaming_mode{StreamingMode::SmoothLive};
-    uint32_t        req_custom_freshness_ms{25};
-    uint32_t        req_custom_queue_frames{2};
-    ReceiverQuality req_receiver_quality{ReceiverQuality::Auto};
-    uint32_t        req_receiver_width{1920};
-    uint32_t        req_receiver_height{1080};
-    uint32_t        req_receiver_fps{60};
-    TransportMode   req_transport_mode{TransportMode::RtpUdpLegacy};
-    std::wstring    monitor_device_id;
-
-    CaptureCanvas   capture_canvas{CaptureCanvas::FollowSource};
-    OutputQuality   output_quality{OutputQuality::Auto};
-    AspectMode      aspect_mode{AspectMode::Auto};
-    uint32_t        output_width{1920};
-    uint32_t        output_height{1080};
-
-    StreamingPolicy active_policy{};
-    StreamingMode   active_streaming_mode{StreamingMode::SmoothLive};
-    ReceiverQuality active_receiver_quality{ReceiverQuality::Auto};
-    bool            receiver_quality_pending{false};
-    std::string     active_transport{"Unknown"};
-};
+constexpr UINT WM_DUWN_SESSION_PHASE = WM_APP + 104;
 
 class App {
 public:
@@ -130,10 +108,14 @@ private:
     // Must NOT call PostQuitMessage() — use PostMessageW(m_main_hwnd, WM_DUWN_FATAL).
     void OnFramePresent(video::VideoFrame& frame) noexcept;
 
-    // Metrics loop
+    // Metrics and session metadata
     void MetricsLoop(std::stop_token stop) noexcept;
     void PublishMetadataSnapshot() noexcept;
     SessionMetadataSnapshot GetMetadataSnapshot() const noexcept;
+    void ProcessPendingSessionEvents() noexcept;
+    void HandleSessionPhaseOnMainThread(const SessionPhaseEvent& ev, bool quality_applied) noexcept;
+    std::string GetActiveTransportString() const noexcept;
+    StreamingPolicy GetActiveStreamingPolicy() const noexcept;
     void UpdateWiredConnection() noexcept;
     void OnNetworkEnvironmentChanged(const network::NetworkEnvironmentInfo& new_env) noexcept;
 
@@ -202,10 +184,8 @@ private:
     // Direct IPC Video Consumer
     std::unique_ptr<ipc::VideoIpcConsumer> m_ipc_consumer;
 
-    // AirPlay Process / Sidecar Generation Synchronization
-    std::atomic<uint64_t>  m_config_generation{1};
-    std::atomic<uint64_t>  m_sidecar_generation{0};
-    std::atomic<bool>      m_receiver_config_dirty{false};
+    // AirPlay Process / Sidecar Generation and Metadata Synchronization
+    SessionMetadataCoordinator m_meta_coord;
     std::atomic<bool>      m_sidecar_restart_posted{false};
 
     // Output window aspect stabilization state
@@ -235,11 +215,6 @@ private:
     std::atomic<bool>      m_audio_min_ready{false};
     std::atomic<bool>      m_noncritical_ready{false};
     std::atomic<bool>      m_media_infrastructure_ready{false};
-
-    // Metadata snapshot published safely from config-owning thread
-    mutable std::mutex       m_metadata_mutex;
-    SessionMetadataSnapshot  m_metadata_snapshot;
-    std::atomic<ReceiverQuality> m_active_receiver_quality{ReceiverQuality::Auto};
 
     // Firewall validation state machine
     std::atomic<network::FirewallValidationState> m_firewall_validation_state{network::FirewallValidationState::Unknown};
