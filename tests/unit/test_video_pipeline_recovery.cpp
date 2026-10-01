@@ -232,3 +232,65 @@ DUWN_TEST(VideoPipeline_DynamicCodecSwitching_H264ToHevc) {
     }
 }
 
+// 8. SessionState callback dual-synchronization and decoder Init/Reset strictness
+DUWN_TEST(VideoPipeline_SessionState_CallbackDualSync_AndDecoderStrictness) {
+    using namespace duwn::airplay;
+
+    duwn::airplay::SessionState state;
+    std::atomic<int> state_cb_count{0};
+    std::atomic<int> phase_cb_count{0};
+    AirPlaySessionState last_state = AirPlaySessionState::Idle;
+    SessionPhase last_phase = SessionPhase::Idle;
+
+    state.SetStateCallback([&](AirPlaySessionState prev, AirPlaySessionState next) {
+        state_cb_count.fetch_add(1, std::memory_order_relaxed);
+        last_state = next;
+    });
+
+    state.SetCallback([&](SessionPhase prev, SessionPhase next) {
+        phase_cb_count.fetch_add(1, std::memory_order_relaxed);
+        last_phase = next;
+    });
+
+    // 1. TransitionState should trigger BOTH callbacks
+    state.TransitionState(AirPlaySessionState::Connecting);
+    DUWN_ASSERT(state_cb_count.load() == 1);
+    DUWN_ASSERT(phase_cb_count.load() == 1);
+    DUWN_ASSERT(last_state == AirPlaySessionState::Connecting);
+    DUWN_ASSERT(last_phase == SessionPhase::Connecting);
+
+    state.TransitionState(AirPlaySessionState::Streaming);
+    DUWN_ASSERT(state_cb_count.load() == 2);
+    DUWN_ASSERT(phase_cb_count.load() == 2);
+    DUWN_ASSERT(last_state == AirPlaySessionState::Streaming);
+    DUWN_ASSERT(last_phase == SessionPhase::Streaming);
+
+    state.TransitionState(AirPlaySessionState::Disconnecting);
+    DUWN_ASSERT(state_cb_count.load() == 3);
+    DUWN_ASSERT(phase_cb_count.load() == 3);
+    DUWN_ASSERT(last_state == AirPlaySessionState::Disconnecting);
+    DUWN_ASSERT(last_phase == SessionPhase::Reconnecting);
+
+    // 2. Transition should trigger BOTH callbacks
+    state.Transition(SessionPhase::Advertising);
+    DUWN_ASSERT(state_cb_count.load() == 4);
+    DUWN_ASSERT(phase_cb_count.load() == 4);
+    DUWN_ASSERT(last_state == AirPlaySessionState::Idle);
+    DUWN_ASSERT(last_phase == SessionPhase::Advertising);
+
+    // 3. Decoder Init/Reset strictness
+    duwn::video::D3D11Device d3d;
+    if (d3d.Create(true, false)) {
+        duwn::video::VideoDecoder decoder(d3d, [](duwn::video::VideoFrame) {});
+        std::atomic<bool> decoder_ready{true};
+
+        // Failure case: 0x0 resolution must return false and NOT set ready to true
+        bool init_bad = decoder.Init(0, 0, duwn::video::VideoCodecType::H264);
+        if (!init_bad) {
+            decoder_ready.store(false, std::memory_order_release);
+        }
+        DUWN_ASSERT(!init_bad);
+        DUWN_ASSERT(!decoder_ready.load(std::memory_order_acquire));
+    }
+}
+

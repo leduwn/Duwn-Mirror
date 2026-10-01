@@ -1589,6 +1589,10 @@ void AirPlayProcess::ParseLine(std::string_view line) noexcept {
             m_codec_evidence.clear();
         }
         m_state.TransitionState(AirPlaySessionState::Disconnecting);
+        if (m_running.load(std::memory_order_acquire) && IsAlive()) {
+            m_state.Transition(SessionPhase::Advertising);
+            m_state.TransitionState(AirPlaySessionState::Idle);
+        }
         return;
     }
 }

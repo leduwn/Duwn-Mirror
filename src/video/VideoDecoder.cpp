@@ -77,6 +77,7 @@ VideoDecoder::VideoDecoder(D3D11Device& device, FrameReadyCallback on_frame) noe
 VideoDecoder::~VideoDecoder() = default;
 
 bool VideoDecoder::Init(uint32_t width, uint32_t height, VideoCodecType codec) noexcept {
+    if (width == 0 || height == 0) return false;
     if (codec != VideoCodecType::H264 && codec != VideoCodecType::H265) return false;
     DecoderConfig cfg;
     cfg.width  = width;

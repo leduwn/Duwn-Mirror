@@ -23,9 +23,11 @@ void SessionState::TransitionState(AirPlaySessionState next) noexcept {
     case AirPlaySessionState::Disconnecting: leg = SessionPhase::Reconnecting; break;
     case AirPlaySessionState::Error:         leg = SessionPhase::AdvertisingFailed; break;
     }
-    m_phase.store(static_cast<int>(leg), std::memory_order_release);
+    int prev_leg_int = m_phase.exchange(static_cast<int>(leg), std::memory_order_acq_rel);
+    auto prev_leg    = static_cast<SessionPhase>(prev_leg_int);
 
     if (m_state_callback) m_state_callback(prev, next);
+    if (m_phase_callback && prev_leg != leg) m_phase_callback(prev_leg, leg);
 }
 
 void SessionState::Transition(SessionPhase next) noexcept {
@@ -47,9 +49,11 @@ void SessionState::Transition(SessionPhase next) noexcept {
     case SessionPhase::SidecarMissing:    st = AirPlaySessionState::Error; break;
     case SessionPhase::AdvertisingFailed: st = AirPlaySessionState::Error; break;
     }
-    m_state.store(static_cast<int>(st), std::memory_order_release);
+    int prev_st_int = m_state.exchange(static_cast<int>(st), std::memory_order_acq_rel);
+    auto prev_st    = static_cast<AirPlaySessionState>(prev_st_int);
 
     if (m_phase_callback) m_phase_callback(prev, next);
+    if (m_state_callback && prev_st != st) m_state_callback(prev_st, st);
 }
 
 void SessionState::SetClientInfo(const AirPlayClientInfo& info) noexcept {

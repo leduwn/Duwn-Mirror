@@ -39,6 +39,7 @@ public:
     void Stop() noexcept;
 
     uint16_t Port() const noexcept { return m_port; }
+    bool IsRunning() const noexcept { return m_running.load(std::memory_order_acquire); }
 
     const PacketStatistics& Stats() const noexcept { return m_stats; }
 

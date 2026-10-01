@@ -10,6 +10,10 @@
 #include <array>
 #include <cstring>
 
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "avrt.lib")
 
@@ -105,6 +109,12 @@ uint16_t RtpReceiver::Start() noexcept {
                        recvbuf, actual_buf);
     }
 
+    // Disable SIO_UDP_CONNRESET to ignore spurious ICMP port unreachable errors on UDP socket
+    DWORD bytes_returned = 0;
+    BOOL new_behavior = FALSE;
+    ::WSAIoctl(sock, SIO_UDP_CONNRESET, &new_behavior, sizeof(new_behavior),
+               nullptr, 0, &bytes_returned, nullptr, nullptr);
+
     // Bind to loopback, port 0 (OS picks a free port)
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
@@ -160,7 +170,40 @@ void RtpReceiver::RecvLoop() noexcept {
     while (m_running.load(std::memory_order_acquire)) {
         int n = ::recv(sock, reinterpret_cast<char*>(buf.data()),
                        static_cast<int>(buf.size()), 0);
-        if (n <= 0) break; // socket closed or error
+        if (n <= 0) {
+            if (!m_running.load(std::memory_order_acquire)) {
+                DUWN_LOG_INFOF("RtpReceiver", "RecvLoop stopped normally on port {}", m_port);
+                break;
+            }
+            int err = ::WSAGetLastError();
+            if (err == WSAECONNRESET) {
+                static std::atomic<uint32_t> s_connreset_limit{0};
+                if (s_connreset_limit.fetch_add(1, std::memory_order_relaxed) < 5) {
+                    DUWN_LOG_WARNF("RtpReceiver",
+                        "recv returned WSAECONNRESET (10054) on port {}; ignoring spurious ICMP Port Unreachable",
+                        m_port);
+                }
+                continue;
+            }
+            if (err == WSAEINTR) {
+                continue;
+            }
+            if (err == WSAEMSGSIZE) {
+                m_stats.raw_udp.fetch_add(1, std::memory_order_relaxed);
+                GlobalMetrics().network_raw_udp_packets.fetch_add(1, std::memory_order_relaxed);
+                m_stats.malformed.fetch_add(1, std::memory_order_relaxed);
+                GlobalMetrics().network_malformed_packets.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+
+            DUWN_LOG_ERRORF("RtpReceiver",
+                "RecvLoop fatal error on port {}: n={}, WSAGetLastError={}; thread exiting",
+                m_port, n, err);
+            break;
+        }
+
+        m_stats.raw_udp.fetch_add(1, std::memory_order_relaxed);
+        GlobalMetrics().network_raw_udp_packets.fetch_add(1, std::memory_order_relaxed);
 
         int64_t now_ns = clock::Now().time_since_epoch().count();
 

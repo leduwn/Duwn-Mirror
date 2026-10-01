@@ -93,7 +93,8 @@ void RotateLogsIfNeededLocked() {
     auto size = fs::file_size(g_log.mainLogPath, ec);
     if (ec || size < MAX_LOG_SIZE) return;
 
-    // Close current file
+    // Flush and close current file
+    g_log.file.flush();
     g_log.file.close();
 
     // Rotate existing backups: .5 removed, .4 -> .5, ... .1 -> .2, main -> .1
@@ -104,15 +105,22 @@ void RotateLogsIfNeededLocked() {
         fs::path src = g_log.logDir / std::format(L"duwn-mirror.{}.log", i);
         fs::path dst = g_log.logDir / std::format(L"duwn-mirror.{}.log", i + 1);
         if (fs::exists(src, ec)) {
-            fs::rename(src, dst, ec);
+            fs::remove(dst, ec);
+            ::MoveFileExW(src.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
         }
     }
 
     fs::path first_backup = g_log.logDir / L"duwn-mirror.1.log";
-    fs::rename(g_log.mainLogPath, first_backup, ec);
+    fs::remove(first_backup, ec);
+    BOOL moved = ::MoveFileExW(g_log.mainLogPath.c_str(), first_backup.c_str(),
+                               MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
 
-    // Reopen main file
-    g_log.file.open(g_log.mainLogPath, std::ios::out | std::ios::trunc);
+    // Reopen main file: if move succeeded, start fresh; if move failed, append so logs are NOT lost!
+    if (moved) {
+        g_log.file.open(g_log.mainLogPath, std::ios::out | std::ios::trunc);
+    } else {
+        g_log.file.open(g_log.mainLogPath, std::ios::out | std::ios::app);
+    }
 }
 
 } // namespace

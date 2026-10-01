@@ -5,6 +5,7 @@
 namespace duwn::network {
 
 struct PacketStatistics {
+    std::atomic<uint64_t> raw_udp{0};
     std::atomic<uint64_t> received{0};
     std::atomic<uint64_t> lost{0};
     std::atomic<uint64_t> reordered{0};

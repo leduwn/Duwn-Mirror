@@ -450,7 +450,37 @@ try {
     }
     Write-Host "  [PASS] Test 12: StartByteOffset Isolation, Raw Log Output, & preview_visible"
 
-    Write-Host "`nALL 12 COLLECTOR FIXTURE TESTS PASSED!"
+    # ------------------------------------------------------------------------
+    # Test 13: VIDEO with malf parameter parsing
+    # ------------------------------------------------------------------------
+    $testCsv13 = Join-Path $testTempDir 'output13.csv'
+    $malfLog = Join-Path $testTempDir 'malf.log'
+    $malfCycle = @(
+        "[2026-10-01 12:00:00.001] [Info] [Diagnostics] [METRICS CYCLE BEGIN] cycle=1",
+        "[2026-10-01 12:00:00.002] [Info] [Diagnostics] [METADATA] cycle=1 | commit=333333 | transport=LocalRtpUdp | stream_mode=Balanced | policy(max_q=3, res_ms=50, cad_pct=100, always_latest=0) | req_quality=1080p60 | active_quality=1080p60 | quality_pending=0 | preview_visible=1 | actual_stream(codec=H264, res=1920x1080, fps=60.00)",
+        "[2026-10-01 12:00:00.003] [Info] [Diagnostics] [STATS] VIDEO: rtp=60/s (1200.5 KB/s, malf=3) | au=60/s | dec=60 fps | rend=60 fps (unique=60, opp=60/s) | ticks=60/s (hold=0/s) | drop=0/s (superseded=0/s, late=0/s, min_rdy=0, ipc=0, dec_unrdy=0, late_drop=0, trans_drop=0, q_overflow=0, sess_q_full=0, life_q_full=0) | q=1 | gen=1 | coded=1920x1080 vis=1920x1080",
+        "[2026-10-01 12:00:00.004] [Info] [Diagnostics] [STATS] SYNC/SESSION: A/V=5.2ms drift=0.10ms/min | sidecar=alive | state=Streaming | source=connected | output=1920x1080 preview=640x360 | lifecycle=streaming_active",
+        "[2026-10-01 12:00:00.005] [Info] [Diagnostics] [METRICS CYCLE END] cycle=1`r`n"
+    ) -join "`r`n"
+    $malfCycle | Set-Content -LiteralPath $malfLog -Encoding utf8
+
+    $job = Start-Job -ScriptBlock {
+        param($col, $out, $log)
+        & $col -OutputPath $out -DurationSeconds 3 -LogPath $log
+    } -ArgumentList $collectorScript, $testCsv13, $malfLog
+    $job | Wait-Job -Timeout 10 | Out-Null
+    Receive-Job $job | Out-Null
+
+    $rows = @(Import-Csv -LiteralPath $testCsv13)
+    if ($rows.Count -ne 1) {
+        throw "Test 13 FAILED: Expected exactly 1 row, got $($rows.Count)"
+    }
+    if ($rows[0].v_rtp_rate -ne '60' -or $rows[0].v_kb_rate -ne '1200.5') {
+        throw "Test 13 FAILED: v_rtp_rate=$($rows[0].v_rtp_rate), v_kb_rate=$($rows[0].v_kb_rate)"
+    }
+    Write-Host "  [PASS] Test 13: VIDEO line with ', malf=...' parsed successfully"
+
+    Write-Host "`nALL 13 COLLECTOR FIXTURE TESTS PASSED!"
 }
 finally {
     if (Test-Path -LiteralPath $testTempDir) {

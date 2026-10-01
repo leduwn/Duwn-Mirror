@@ -352,7 +352,7 @@ function Process-LogLine([string]$line) {
         $script:currentCycle.has_meta = $true
         $script:currentCycle.has_update = $true
     }
-    elseif ($line -match '\[STATS\] VIDEO: rtp=(?<rtp>\d+)/s \((?<kb>[\d.]+) KB/s\) \| au=(?<au>\d+)/s \| dec=(?<dec>\d+) fps \| rend=(?<rend>\d+) fps \(unique=(?<up>\d+).*?\) \| .*? \| drop=(?<drop>\d+)/s \(superseded=(?<sup_rate>\d+)/s, late=(?<late_rate>\d+)/s.*?\) \| q=(?<q>\d+) \| gen=(?<gen>\d+) \| coded=(?<coded>\S+) vis=(?<vis>\S+)') {
+    elseif ($line -match '\[STATS\] VIDEO: rtp=(?<rtp>\d+)/s \((?<kb>[\d.]+) KB/s(?:, malf=(?<malf>\d+))?\) \| au=(?<au>\d+)/s \| dec=(?<dec>\d+) fps \| rend=(?<rend>\d+) fps \(unique=(?<up>\d+).*?\) \| .*? \| drop=(?<drop>\d+)/s \(superseded=(?<sup_rate>\d+)/s, late=(?<late_rate>\d+)/s.*?\) \| q=(?<q>\d+) \| gen=(?<gen>\d+) \| coded=(?<coded>\S+) vis=(?<vis>\S+)') {
         $script:currentCycle.v_rtp = $Matches.rtp
         $script:currentCycle.v_kb = $Matches.kb
         $script:currentCycle.v_au = $Matches.au

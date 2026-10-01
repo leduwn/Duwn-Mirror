@@ -1005,8 +1005,11 @@ bool App::Init() noexcept {
                 std::lock_guard<std::mutex> lock(m_decoder_mutex);
                 m_video_decoder->Flush();
                 m_video_decoder->ResetHevcAssembler();
-                m_video_decoder->Init(1920, 1080, video::VideoCodecType::H264);
-                m_decoder_ready.store(true, std::memory_order_release);
+                if (m_video_decoder->Init(1920, 1080, video::VideoCodecType::H264)) {
+                    m_decoder_ready.store(true, std::memory_order_release);
+                } else {
+                    m_decoder_ready.store(false, std::memory_order_release);
+                }
             }
 
             if (m_meta_coord.IsReceiverConfigDirty()) {
@@ -1105,11 +1108,15 @@ bool App::Init() noexcept {
 
         DUWN_LOG_INFO("App", "Video decoder pre-initialized for 1920x1080");
 
-    }
+    } else {
 
-    else if (force_hardware) {
+        m_decoder_ready.store(false, std::memory_order_release);
 
-        m_window->SetStatusText(L"Hardware renderer unavailable. Choose Auto or Compatibility.");
+        if (force_hardware) {
+
+            m_window->SetStatusText(L"Hardware renderer unavailable. Choose Auto or Compatibility.");
+
+        }
 
     }
 
@@ -3815,6 +3822,7 @@ void App::OnVideoData(const uint8_t* data, size_t size,
                 ? m_stream_height.load(std::memory_order_relaxed)
                 : (m_settings.receiver_height > 0 ? m_settings.receiver_height : 1080);
 
+            m_decoder_ready.store(false, std::memory_order_release);
             std::lock_guard<std::mutex> lock(m_decoder_mutex);
             if (m_video_decoder) {
                 m_video_decoder->Flush();
@@ -3824,6 +3832,11 @@ void App::OnVideoData(const uint8_t* data, size_t size,
                     m_stream_height.store(init_h, std::memory_order_relaxed);
                     m_decoder_ready.store(true, std::memory_order_release);
                     DUWN_LOG_INFOF("App", "Video decoder configured for {}x{} ({}) via {}",
+                        init_w, init_h, codec_type == video::VideoCodecType::H265 ? "HEVC" : "H.264",
+                        classification.evidence);
+                } else {
+                    m_decoder_ready.store(false, std::memory_order_release);
+                    DUWN_LOG_ERRORF("App", "Failed to configure video decoder for {}x{} ({}) via {}",
                         init_w, init_h, codec_type == video::VideoCodecType::H265 ? "HEVC" : "H.264",
                         classification.evidence);
                 }
@@ -3901,6 +3914,14 @@ void App::OnAudioData(const uint8_t* data, size_t size,
 
 void App::OnPhase(airplay::SessionPhase prev,
                   airplay::SessionPhase next) noexcept {
+    uint64_t sidecar_gen = m_airplay ? m_airplay->GetSidecarGeneration() : 0;
+    const uint64_t current_side_gen = m_meta_coord.GetSidecarGeneration();
+    if (sidecar_gen < current_side_gen && sidecar_gen != 0) {
+        DUWN_LOG_WARNF("App", "Ignoring stale OnPhase event {} -> {} from sidecar generation {} (current={})",
+                       airplay::PhaseString(prev), airplay::PhaseString(next), sidecar_gen, current_side_gen);
+        return;
+    }
+
     using P = airplay::SessionPhase;
     switch (next) {
     case P::Advertising:
@@ -3943,7 +3964,6 @@ void App::OnPhase(airplay::SessionPhase prev,
         break;
     }
 
-    uint64_t sidecar_gen = m_airplay ? m_airplay->GetSidecarGeneration() : 0;
     m_meta_coord.PostPhaseEvent(prev, next, sidecar_gen);
 
     HWND hwnd = m_main_hwnd.load(std::memory_order_acquire);

@@ -13,6 +13,7 @@ namespace duwn {
 // slight inconsistency between fields is acceptable for display purposes.
 struct alignas(64) Metrics {
     // Network & Video RTP
+    std::atomic<uint64_t> network_raw_udp_packets{0};
     std::atomic<uint64_t> network_received_packets{0};
     std::atomic<uint64_t> network_lost_packets{0};
     std::atomic<uint64_t> network_reordered_packets{0};
