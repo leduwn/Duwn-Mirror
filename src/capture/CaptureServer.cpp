@@ -37,13 +37,16 @@ bool CaptureServer::Start(std::wstring_view session_name) noexcept {
         return false;
     }
 
+    ++m_generation;
     std::memset(m_header, 0, sizeof(CaptureMemoryHeader));
     std::memcpy(m_header->magic, "DUWNCAP", 8);
-    m_header->version = 1;
-    const char kDefName[] = "Duwn Mirror Clean Output";
+    m_header->protocol_version = 2;
+    m_header->generation = m_generation;
+    const char kDefName[] = "Duwn Mirror Video";
     std::memcpy(m_header->source_name, kDefName, sizeof(kDefName));
 
-    m_frame_event = ::CreateEventW(nullptr, FALSE, FALSE, event_name.c_str());
+    // Manual-reset event ensures broadcast notification to ALL waiting consumers
+    m_frame_event = ::CreateEventW(nullptr, TRUE, FALSE, event_name.c_str());
     if (!m_frame_event) {
         DUWN_LOG_ERRORF("CaptureServer", "CreateEvent failed ({:#010x})", ::GetLastError());
         Stop();
@@ -51,7 +54,8 @@ bool CaptureServer::Start(std::wstring_view session_name) noexcept {
     }
 
     m_running = true;
-    DUWN_LOG_INFOF("CaptureServer", "Export server active: ipc_name={}", WideToUtf8(m_session_name));
+    DUWN_LOG_INFOF("CaptureServer", "Export server active: ipc_name={} (gen={})",
+                   WideToUtf8(m_session_name), m_generation);
     return true;
 }
 
@@ -72,21 +76,53 @@ void CaptureServer::Stop() noexcept {
     m_session_name.clear();
 }
 
-bool CaptureServer::PublishFrame(HANDLE shared_handle, uint32_t width, uint32_t height,
-                                  uint32_t dxgi_format, uint64_t frame_index, int64_t timestamp_qpc) noexcept {
+bool CaptureServer::PublishFrame(const HANDLE* ring_handles, uint32_t ring_count, uint32_t active_index,
+                                 uint32_t width, uint32_t height, uint32_t dxgi_format,
+                                 uint32_t resource_gen, LUID adapter_luid,
+                                 uint64_t frame_index, int64_t timestamp_qpc) noexcept {
     if (!m_running || !m_header) return false;
 
-    m_header->width         = width;
-    m_header->height        = height;
-    m_header->dxgi_format   = dxgi_format;
-    m_header->shared_handle = reinterpret_cast<uint64_t>(shared_handle);
-    m_header->frame_index   = frame_index;
-    m_header->timestamp_qpc = timestamp_qpc;
+    // Reset event before updating header
+    if (m_frame_event) {
+        ::ResetEvent(m_frame_event);
+    }
 
+    // Seqlock write start: odd indicates write in progress
+    ::InterlockedIncrement(&m_header->seqlock);
+    ::MemoryBarrier();
+
+    m_header->resource_generation = resource_gen;
+    m_header->adapter_luid_low    = adapter_luid.LowPart;
+    m_header->adapter_luid_high   = adapter_luid.HighPart;
+    m_header->width               = width;
+    m_header->height              = height;
+    m_header->dxgi_format         = dxgi_format;
+    m_header->ring_buffer_count   = ring_count;
+    m_header->active_buffer_index = active_index;
+
+    for (uint32_t i = 0; i < ring_count && i < 4; ++i) {
+        m_header->shared_handles[i] = reinterpret_cast<uint64_t>(ring_handles[i]);
+    }
+
+    m_header->frame_index         = frame_index;
+    m_header->timestamp_qpc       = timestamp_qpc;
+
+    // Seqlock write finish: even indicates consistent snapshot
+    ::MemoryBarrier();
+    ::InterlockedIncrement(&m_header->seqlock);
+
+    // Broadcast wake up to all waiting consumers
     if (m_frame_event) {
         ::SetEvent(m_frame_event);
     }
     return true;
+}
+
+bool CaptureServer::PublishFrame(HANDLE shared_handle, uint32_t width, uint32_t height,
+                                 uint32_t dxgi_format, uint64_t frame_index, int64_t timestamp_qpc) noexcept {
+    HANDLE handles[1] = { shared_handle };
+    LUID dummy_luid{0, 0};
+    return PublishFrame(handles, 1, 0, width, height, dxgi_format, 1, dummy_luid, frame_index, timestamp_qpc);
 }
 
 } // namespace duwn::capture

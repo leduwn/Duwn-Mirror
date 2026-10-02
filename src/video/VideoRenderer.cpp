@@ -663,6 +663,14 @@ PresentResult VideoRenderer::Present(VideoFrame& frame, bool skip_wait) noexcept
 
         hr = m_video_context->VideoProcessorBlt(
             m_video_processor.Get(), m_output_view.Get(), 0, 1, &stream);
+
+        // Pre-Present copy: capture exact rendered backbuffer before flip swaps buffers
+        if (SUCCEEDED(hr) && m_export_target) {
+            ComPtr<ID3D11Texture2D> bb;
+            if (SUCCEEDED(m_swap_chain->GetBuffer(0, IID_PPV_ARGS(&bb))) && bb) {
+                m_device.Context()->CopyResource(m_export_target, bb.Get());
+            }
+        }
     }
     const int64_t vp_end_qpc = clock::MonotonicClock::NowQpcTicks();
 

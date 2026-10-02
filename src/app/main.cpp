@@ -42,6 +42,42 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             return duwn::network::ExecuteFirewallCliCommand(action);
         }
         for (int i = 1; i < argc; ++i) {
+            if (_wcsicmp(argv[i], L"--register-vcam") == 0) {
+                WCHAR path[MAX_PATH];
+                ::GetModuleFileNameW(nullptr, path, MAX_PATH);
+                std::wstring dir = path;
+                size_t pos = dir.find_last_of(L"\\/");
+                std::wstring dll_path = (pos != std::wstring::npos ? dir.substr(0, pos + 1) : L"") + L"duwn-virtualcam.dll";
+                HMODULE h = ::LoadLibraryW(dll_path.c_str());
+                if (!h) h = ::LoadLibraryW(L"duwn-virtualcam.dll");
+                int ret = 1;
+                if (h) {
+                    using DllRegFn = HRESULT(STDAPICALLTYPE*)();
+                    auto pfn = reinterpret_cast<DllRegFn>(::GetProcAddress(h, "DllRegisterServer"));
+                    if (pfn && SUCCEEDED(pfn())) ret = 0;
+                    ::FreeLibrary(h);
+                }
+                ::LocalFree(argv);
+                return ret;
+            }
+            if (_wcsicmp(argv[i], L"--unregister-vcam") == 0) {
+                WCHAR path[MAX_PATH];
+                ::GetModuleFileNameW(nullptr, path, MAX_PATH);
+                std::wstring dir = path;
+                size_t pos = dir.find_last_of(L"\\/");
+                std::wstring dll_path = (pos != std::wstring::npos ? dir.substr(0, pos + 1) : L"") + L"duwn-virtualcam.dll";
+                HMODULE h = ::LoadLibraryW(dll_path.c_str());
+                if (!h) h = ::LoadLibraryW(L"duwn-virtualcam.dll");
+                int ret = 1;
+                if (h) {
+                    using DllRegFn = HRESULT(STDAPICALLTYPE*)();
+                    auto pfn = reinterpret_cast<DllRegFn>(::GetProcAddress(h, "DllUnregisterServer"));
+                    if (pfn && SUCCEEDED(pfn())) ret = 0;
+                    ::FreeLibrary(h);
+                }
+                ::LocalFree(argv);
+                return ret;
+            }
             if (_wcsicmp(argv[i], L"--test-motion") == 0 || _wcsicmp(argv[i], L"-test-motion") == 0) {
                 test_motion = true;
             }

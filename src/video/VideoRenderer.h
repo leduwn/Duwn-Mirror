@@ -157,6 +157,7 @@ public:
     uint32_t SwapWidth()  const noexcept override { return m_swap_width; }
     uint32_t SwapHeight() const noexcept override { return m_swap_height; }
 
+    void SetExportTarget(ID3D11Texture2D* dst) noexcept override { m_export_target = dst; }
     void CopyBackBufferTo(ID3D11Texture2D* dst) noexcept override;
 
     void LogSwapChainConfig(const char* label) const noexcept override;
@@ -237,6 +238,7 @@ private:
     HANDLE   m_frame_latency_waitable{nullptr};
     std::atomic<bool> m_use_present_00{true}; // Default to app-controlled pacing via Present(0,0) + waitable object
     std::atomic<bool> m_non_blocking{false};
+    ID3D11Texture2D*  m_export_target{nullptr};
 
     // Render-thread-only windowed duration samples for 1s percentiles
     std::vector<double> m_vp_samples;

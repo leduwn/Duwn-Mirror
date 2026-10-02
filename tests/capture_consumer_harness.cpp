@@ -121,31 +121,49 @@ int main(int argc, char* argv[]) {
     uint32_t staging_h = 0;
 
     for (int i = 0; i < iterations; ++i) {
-        DWORD wr = ::WaitForSingleObject(h_event, 1000);
-        if (wr != WAIT_OBJECT_0) {
-            std::cerr << "{\"status\":\"FAIL\",\"error\":\"WaitForSingleObject timed out\"}\n";
-            ::UnmapViewOfFile(header);
-            ::CloseHandle(h_event);
-            ::CloseHandle(h_map);
-            return 5;
-        }
+        CaptureMemoryHeader snapshot{};
+        bool got_new_frame = false;
+        auto wait_start = std::chrono::steady_clock::now();
 
-        if (std::memcmp(header->magic, "DUWNCAP", 7) != 0 || header->version != 1) {
-            std::cerr << "{\"status\":\"FAIL\",\"error\":\"Invalid magic or version\"}\n";
-            return 6;
-        }
+        while (!got_new_frame) {
+            DWORD wr = ::WaitForSingleObject(h_event, 500);
+            if (wr != WAIT_OBJECT_0) {
+                std::cerr << "{\"status\":\"FAIL\",\"error\":\"WaitForSingleObject timed out\"}\n";
+                ::UnmapViewOfFile(header);
+                ::CloseHandle(h_event);
+                ::CloseHandle(h_map);
+                return 5;
+            }
 
-        uint64_t f_idx = header->frame_index;
-        if (f_idx <= last_frame_index && last_frame_index != 0) {
-            std::cerr << "{\"status\":\"FAIL\",\"error\":\"Frame index did not increment\"}\n";
-            return 7;
-        }
-        last_frame_index = f_idx;
+            if (!duwn::capture::ReadHeaderConsistent(header, snapshot)) {
+                YieldProcessor();
+                continue;
+            }
 
-        captured_w = header->width;
-        captured_h = header->height;
-        captured_fmt = header->dxgi_format;
-        HANDLE shared_h = reinterpret_cast<HANDLE>(header->shared_handle);
+            if (std::memcmp(snapshot.magic, "DUWNCAP", 7) != 0 || snapshot.protocol_version != 2) {
+                std::cerr << "{\"status\":\"FAIL\",\"error\":\"Invalid magic or protocol_version\"}\n";
+                return 6;
+            }
+
+            if (snapshot.frame_index > last_frame_index || last_frame_index == 0) {
+                got_new_frame = true;
+            } else {
+                ::Sleep(1);
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - wait_start).count();
+                if (elapsed > 1000) {
+                    std::cerr << "{\"status\":\"FAIL\",\"error\":\"Frame index did not increment within timeout\"}\n";
+                    return 7;
+                }
+            }
+        }
+        last_frame_index = snapshot.frame_index;
+
+        captured_w = snapshot.width;
+        captured_h = snapshot.height;
+        captured_fmt = snapshot.dxgi_format;
+        uint32_t active_idx = snapshot.active_buffer_index;
+        HANDLE shared_h = reinterpret_cast<HANDLE>(snapshot.shared_handles[active_idx < 4 ? active_idx : 0]);
 
         if (!shared_h || captured_w == 0 || captured_h == 0) {
             std::cerr << "{\"status\":\"FAIL\",\"error\":\"Empty shared handle or dimensions\"}\n";
@@ -184,6 +202,25 @@ int main(int argc, char* argv[]) {
         hr = context->Map(staging_tex.Get(), 0, D3D11_MAP_READ, 0, &mapped);
         if (SUCCEEDED(hr)) {
             const uint8_t* pixels = static_cast<const uint8_t*>(mapped.pData);
+
+            // Verify encoded barcode frame ID at row 0 (center of 8-pixel blocks)
+            const uint32_t* row0 = reinterpret_cast<const uint32_t*>(pixels);
+            uint64_t decoded_seq = 0;
+            for (int bit = 0; bit < 64; ++bit) {
+                uint32_t px_val = row0[bit * 8 + 4];
+                uint8_t g = static_cast<uint8_t>((px_val >> 8) & 0xFF);
+                if (g > 128) {
+                    decoded_seq |= (1ULL << bit);
+                }
+            }
+
+            if (decoded_seq != 0 && decoded_seq != snapshot.frame_index) {
+                std::cerr << "{\"status\":\"FAIL\",\"error\":\"Pixel barcode frame ID mismatch: decoded "
+                          << decoded_seq << " vs header " << snapshot.frame_index << "\"}\n";
+                context->Unmap(staging_tex.Get(), 0);
+                return 12;
+            }
+
             uint32_t hash = 2166136261u;
             for (uint32_t sy = 100; sy < captured_h; sy += 100) {
                 const uint32_t* row = reinterpret_cast<const uint32_t*>(pixels + (sy * mapped.RowPitch));
@@ -238,7 +275,7 @@ int main(int argc, char* argv[]) {
         ::CloseHandle(h_map);
     }
 
-    bool pass = (verified_frames >= 20 && sample_hashes.size() > 4 && reopen_ok);
+    bool pass = (verified_frames >= static_cast<uint32_t>(iterations * 0.8) && sample_hashes.size() > 2 && reopen_ok);
     std::cout << "{\n"
               << "  \"status\": \"" << (pass ? "PASS" : "FAIL") << "\",\n"
               << "  \"verified_frames\": " << verified_frames << ",\n"

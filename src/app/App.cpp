@@ -4317,6 +4317,20 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
 
     const bool skip_wait = (m_renderer && m_renderer->GetFrameLatencyWaitableObject() != nullptr);
 
+    // Prepare pre-present export target so VideoProcessorBlt writes directly to shared ring buffer before Present() flips
+    uint32_t active_ring_idx = 0;
+    if (m_shared_texture && m_capture_server && m_capture_server->IsRunning() && m_d3d && m_renderer) {
+        uint32_t sw = m_renderer->SwapWidth();
+        uint32_t sh = m_renderer->SwapHeight();
+        if (sw > 0 && sh > 0) {
+            if (m_shared_texture->Width() != sw || m_shared_texture->Height() != sh) {
+                m_shared_texture->Create(m_d3d->Device(), sw, sh);
+            }
+            active_ring_idx = static_cast<uint32_t>(m_export_frame_index.load(std::memory_order_relaxed) % m_shared_texture->RingSize());
+            m_renderer->SetExportTarget(m_shared_texture->Texture(active_ring_idx));
+        }
+    }
+
     const video::PresentResult result = m_renderer->Present(frame, skip_wait);
 
     if (result == video::PresentResult::Ok) {
@@ -4337,17 +4351,20 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
         if (m_shared_texture && m_capture_server && m_capture_server->IsRunning() && m_d3d) {
             uint32_t sw = m_renderer->SwapWidth();
             uint32_t sh = m_renderer->SwapHeight();
-            if (sw > 0 && sh > 0) {
-                if (m_shared_texture->Width() != sw || m_shared_texture->Height() != sh) {
-                    m_shared_texture->Create(m_d3d->Device(), sw, sh);
-                }
-                if (m_shared_texture->Texture()) {
-                    m_renderer->CopyBackBufferTo(m_shared_texture->Texture());
-                    m_capture_server->PublishFrame(
-                        m_shared_texture->SharedHandle(), sw, sh,
-                        DXGI_FORMAT_B8G8R8A8_UNORM, ++m_export_frame_index,
-                        frame.present_end_qpc);
-                }
+            if (sw > 0 && sh > 0 && m_shared_texture->Texture(active_ring_idx)) {
+                m_shared_texture->SyncGpu(m_d3d->Context(), active_ring_idx);
+                const uint64_t new_idx = frame.sequence_number > 0 ? frame.sequence_number : (++m_export_frame_index);
+                m_export_frame_index.store(new_idx, std::memory_order_relaxed);
+                m_capture_server->PublishFrame(
+                    m_shared_texture->SharedHandles(),
+                    m_shared_texture->RingSize(),
+                    active_ring_idx,
+                    sw, sh,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    m_shared_texture->ResourceGeneration(),
+                    m_shared_texture->AdapterLuid(),
+                    new_idx,
+                    frame.present_end_qpc);
             }
         }
     }
@@ -4476,6 +4493,7 @@ void App::TestMotionLoop(std::stop_token st) noexcept {
     DUWN_LOG_INFO("App", "TestMotionLoop started streaming 1920x1080 synthetic motion frames @ ~60fps");
 
     while (!st.stop_requested() && m_running.load(std::memory_order_acquire)) {
+        ++seq;
         box_x += dir_x;
         box_y += dir_y;
         if (box_x <= 20 || box_x + kBoxW >= static_cast<int>(kW) - 20) {
@@ -4502,9 +4520,20 @@ void App::TestMotionLoop(std::stop_token st) noexcept {
             }
         }
 
-        int scan_y = static_cast<int>((seq * 12) % kH);
+        int scan_y = 1 + static_cast<int>((seq * 12) % (kH - 1));
         uint8_t* scan_row = nv12.data() + (scan_y * kW);
         std::fill(scan_row, scan_row + kW, static_cast<uint8_t>(235));
+
+        // Encode 64-bit frame sequence into row 0 barcode (64 bits x 8 pixels = 512 pixels)
+        // High contrast (235=White, 16=Black) survives color matrix and scaling without bit error
+        uint8_t* row0 = nv12.data();
+        for (int bit = 0; bit < 64; ++bit) {
+            const bool bit_val = ((seq >> bit) & 1ULL) != 0;
+            const uint8_t lum = bit_val ? 235 : 16;
+            for (int px = 0; px < 8; ++px) {
+                row0[bit * 8 + px] = lum;
+            }
+        }
 
         uint8_t* uv_base = nv12.data() + kYSize;
         uint8_t u_val = static_cast<uint8_t>((seq * 3) % 256);
@@ -4541,7 +4570,7 @@ void App::TestMotionLoop(std::stop_token st) noexcept {
         vf.color_range = 1;
         vf.format = DXGI_FORMAT_NV12;
         vf.format_generation = 1;
-        vf.sequence_number = ++seq;
+        vf.sequence_number = seq;
         vf.present_end_qpc = clock::MonotonicClock::NowQpcTicks();
 
         m_scheduler->PushFrame(std::move(vf));

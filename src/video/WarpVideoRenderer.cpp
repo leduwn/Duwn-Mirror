@@ -321,6 +321,14 @@ PresentResult WarpVideoRenderer::Present(VideoFrame& frame, bool skip_wait) noex
         ctx->Draw(3, 0);
         ID3D11ShaderResourceView* empty[2]{};
         ctx->PSSetShaderResources(0, 2, empty);
+
+        // Pre-Present copy: capture exact rendered backbuffer before flip swaps buffers
+        if (m_export_target) {
+            ComPtr<ID3D11Texture2D> bb;
+            if (SUCCEEDED(m_swap_chain->GetBuffer(0, IID_PPV_ARGS(&bb))) && bb) {
+                ctx->CopyResource(m_export_target, bb.Get());
+            }
+        }
     }
     frame.vp_end_qpc = clock::MonotonicClock::NowQpcTicks();
     frame.present_begin_qpc = frame.vp_end_qpc;

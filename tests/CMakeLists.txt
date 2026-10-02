@@ -48,4 +48,17 @@ target_link_libraries(duwn-capture-consumer
             dxgi
 )
 target_compile_features(duwn-capture-consumer PRIVATE cxx_std_20)
+add_executable(duwn-virtualcam-test
+    virtualcam_test.cpp
+)
+target_include_directories(duwn-virtualcam-test
+    PRIVATE "${CMAKE_SOURCE_DIR}/src"
+)
+target_link_libraries(duwn-virtualcam-test
+    PRIVATE strmiids
+            ole32
+            oleaut32
+)
+target_compile_features(duwn-virtualcam-test PRIVATE cxx_std_20)
+
 

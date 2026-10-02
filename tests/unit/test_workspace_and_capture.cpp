@@ -37,6 +37,7 @@ DUWN_TEST(CaptureServer_LifecycleAndHeader) {
     bool ok = server.Start(test_session);
     DUWN_ASSERT(ok);
     DUWN_ASSERT(server.IsRunning());
+    DUWN_ASSERT(server.Generation() == 1);
 
     // Open file mapping as client
     std::wstring map_name = L"Local\\" + test_session;
@@ -48,7 +49,8 @@ DUWN_TEST(CaptureServer_LifecycleAndHeader) {
     DUWN_ASSERT(header != nullptr);
 
     DUWN_ASSERT(std::memcmp(header->magic, "DUWNCAP", 7) == 0);
-    DUWN_ASSERT(header->version == 1);
+    DUWN_ASSERT(header->protocol_version == 2);
+    DUWN_ASSERT(header->generation == 1);
     DUWN_ASSERT(header->source_name[0] != '\0');
 
     ::UnmapViewOfFile(header);
@@ -56,6 +58,11 @@ DUWN_TEST(CaptureServer_LifecycleAndHeader) {
 
     server.Stop();
     DUWN_ASSERT(!server.IsRunning());
+
+    // Restart check: generation increments
+    DUWN_ASSERT(server.Start(test_session));
+    DUWN_ASSERT(server.Generation() == 2);
+    server.Stop();
 }
 
 // ---------------------------------------------------------------------------
@@ -75,15 +82,20 @@ DUWN_TEST(CaptureServer_PublishFrame_UpdatesSharedMemory) {
     DWORD wait_res = ::WaitForSingleObject(h_event, 0);
     DUWN_ASSERT(wait_res == WAIT_TIMEOUT);
 
-    // Publish frame
-    HANDLE dummy_handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0xCAFEFEED));
-    server.PublishFrame(dummy_handle, 1920, 1080, DXGI_FORMAT_B8G8R8A8_UNORM, 42, 9876543210LL);
+    // Publish frame with ring buffers
+    HANDLE dummy_handles[3] = {
+        reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0xCAFE0001)),
+        reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0xCAFE0002)),
+        reinterpret_cast<HANDLE>(static_cast<uintptr_t>(0xCAFE0003))
+    };
+    LUID luid{123, 456};
+    server.PublishFrame(dummy_handles, 3, 1, 1920, 1080, DXGI_FORMAT_B8G8R8A8_UNORM, 7, luid, 42, 9876543210LL);
 
     // Event should now be signaled
     wait_res = ::WaitForSingleObject(h_event, 100);
     DUWN_ASSERT(wait_res == WAIT_OBJECT_0);
 
-    // Read back header
+    // Read back header using Seqlock
     std::wstring map_name = L"Local\\" + test_session;
     HANDLE h_map = ::OpenFileMappingW(FILE_MAP_READ, FALSE, map_name.c_str());
     DUWN_ASSERT(h_map != nullptr);
@@ -92,12 +104,22 @@ DUWN_TEST(CaptureServer_PublishFrame_UpdatesSharedMemory) {
         ::MapViewOfFile(h_map, FILE_MAP_READ, 0, 0, sizeof(CaptureMemoryHeader)));
     DUWN_ASSERT(header != nullptr);
 
-    DUWN_ASSERT(header->shared_handle == reinterpret_cast<uint64_t>(dummy_handle));
-    DUWN_ASSERT(header->width == 1920);
-    DUWN_ASSERT(header->height == 1080);
-    DUWN_ASSERT(header->dxgi_format == DXGI_FORMAT_B8G8R8A8_UNORM);
-    DUWN_ASSERT(header->frame_index == 42);
-    DUWN_ASSERT(header->timestamp_qpc == 9876543210LL);
+    CaptureMemoryHeader snapshot{};
+    DUWN_ASSERT(ReadHeaderConsistent(header, snapshot));
+
+    DUWN_ASSERT(snapshot.ring_buffer_count == 3);
+    DUWN_ASSERT(snapshot.active_buffer_index == 1);
+    DUWN_ASSERT(snapshot.shared_handles[0] == 0xCAFE0001);
+    DUWN_ASSERT(snapshot.shared_handles[1] == 0xCAFE0002);
+    DUWN_ASSERT(snapshot.shared_handles[2] == 0xCAFE0003);
+    DUWN_ASSERT(snapshot.width == 1920);
+    DUWN_ASSERT(snapshot.height == 1080);
+    DUWN_ASSERT(snapshot.dxgi_format == DXGI_FORMAT_B8G8R8A8_UNORM);
+    DUWN_ASSERT(snapshot.resource_generation == 7);
+    DUWN_ASSERT(snapshot.adapter_luid_low == 123);
+    DUWN_ASSERT(snapshot.adapter_luid_high == 456);
+    DUWN_ASSERT(snapshot.frame_index == 42);
+    DUWN_ASSERT(snapshot.timestamp_qpc == 9876543210LL);
 
     ::UnmapViewOfFile(header);
     ::CloseHandle(h_map);
@@ -106,7 +128,7 @@ DUWN_TEST(CaptureServer_PublishFrame_UpdatesSharedMemory) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. CaptureServer Rapid Concurrent Publish Stress
+// 3. CaptureServer Rapid Concurrent Publish Stress & Multi-Consumer Broadcast
 // ---------------------------------------------------------------------------
 DUWN_TEST(CaptureServer_RapidPublishStress) {
     CaptureServer server;
@@ -125,33 +147,37 @@ DUWN_TEST(CaptureServer_RapidPublishStress) {
     std::atomic<uint64_t> max_read_index{0};
     std::atomic<bool> corrupted{false};
 
-    std::thread reader([&]() {
+    // 2 concurrent reader threads simulating 2 independent consumers (OBS & TikTok Live Studio)
+    auto reader_fn = [&]() {
         uint64_t last_idx = 0;
+        CaptureMemoryHeader snap{};
         while (reader_running.load(std::memory_order_relaxed)) {
-            uint64_t idx = header->frame_index;
-            uint32_t w = header->width;
-            uint32_t h = header->height;
-            if (idx > 0 && (w != 1920 || h != 1080)) {
-                corrupted.store(true);
-            }
-            if (idx > 0 && idx >= last_idx) {
-                last_idx = idx;
-                max_read_index.store(idx, std::memory_order_relaxed);
+            if (ReadHeaderConsistent(header, snap)) {
+                if (snap.frame_index > 0 && (snap.width != 1920 || snap.height != 1080)) {
+                    corrupted.store(true);
+                }
+                if (snap.frame_index > 0 && snap.frame_index >= last_idx) {
+                    last_idx = snap.frame_index;
+                    max_read_index.store(last_idx, std::memory_order_relaxed);
+                }
             }
             std::this_thread::yield();
         }
-    });
+    };
+
+    std::thread reader1(reader_fn);
+    std::thread reader2(reader_fn);
 
     for (uint64_t i = 1; i <= 50; ++i) {
         server.PublishFrame(
             reinterpret_cast<HANDLE>(static_cast<uintptr_t>(i)),
             1920, 1080, DXGI_FORMAT_B8G8R8A8_UNORM, i, 1000LL * i);
         ::Sleep(1);
-
     }
 
     reader_running.store(false);
-    reader.join();
+    reader1.join();
+    reader2.join();
 
     DUWN_ASSERT(!corrupted.load());
     DUWN_ASSERT(max_read_index.load() > 0);
