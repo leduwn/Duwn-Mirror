@@ -63,17 +63,36 @@ public:
     void SetOnTouchDrag(ui::MainWindowView::TouchDragCallback cb) noexcept;
 
     HWND Hwnd() const noexcept { return m_hwnd; }
+    HWND VideoSurfaceHwnd() const noexcept { return m_video_surface_hwnd; }
     ui::UiState& State() noexcept { return m_state; }
+
+    void LayoutVideoSurface() noexcept;
+    void SetOnVideoSurfaceResize(std::function<void(uint32_t, uint32_t)> cb) noexcept {
+        m_on_video_surface_resize = std::move(cb);
+    }
+    void ToggleFullscreen() noexcept;
+    bool IsFullscreen() const noexcept { return m_fullscreen; }
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
                                      WPARAM wp, LPARAM lp) noexcept;
+    static LRESULT CALLBACK VideoChildWndProc(HWND hwnd, UINT msg,
+                                             WPARAM wp, LPARAM lp) noexcept;
+    static LRESULT CALLBACK ScreenOnlyToolbarWndProc(HWND hwnd, UINT msg,
+                                                     WPARAM wp, LPARAM lp) noexcept;
     LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) noexcept;
 
     void ApplyImmersiveDarkMode() noexcept;
 
     HWND                    m_hwnd{nullptr};
+    HWND                    m_video_surface_hwnd{nullptr};
+    HWND                    m_screen_only_toolbar_hwnd{nullptr};
     std::function<void()>   m_on_close;
+    std::function<void()>   m_on_toggle_mute;
+    std::function<void()>   m_on_toggle_screen_only;
+    std::function<void(uint32_t, uint32_t)> m_on_video_surface_resize;
+    bool                    m_fullscreen{false};
+    WINDOWPLACEMENT         m_prev_placement{};
     std::wstring            m_status;
 
     ui::MainWindowView      m_view;

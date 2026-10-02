@@ -42,7 +42,9 @@ enum class EndpointSelectionPolicy {
 enum class AudioSampleType {
     Float32,
     Int16,
+    Int24Packed,
     Int24In32,
+    Int32,
     Unknown
 };
 
@@ -55,6 +57,17 @@ struct AudioFormatConfig {
     uint32_t channel_mask{SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT};
     bool needs_resample{false};
 };
+
+// Validates WAVEFORMATEX/WAVEFORMATEXTENSIBLE strictly. Rejects invalid or unsupported layouts.
+bool ValidateAudioFormat(const WAVEFORMATEX* fmt, AudioFormatConfig& out_cfg) noexcept;
+
+// Production audio frame writer / format converter with sample clamping and optional gain ramping.
+// Guarantees zero byte writes beyond dest_buffer_bytes. Fills silence for frames beyond src_frames.
+size_t WriteAudioFrames(BYTE* pcm_dest, size_t dest_buffer_bytes,
+                        uint32_t frames_to_write,
+                        const float* src_stereo, uint32_t src_frames,
+                        const AudioFormatConfig& fmt,
+                        const std::function<float()>& next_gain = {}) noexcept;
 
 constexpr bool HasAudioStartupPrebuffer(uint32_t available_frames,
                                         uint32_t target_frames,
@@ -140,7 +153,6 @@ private:
     void CleanTarget(AudioTargetResources& target) noexcept;
 
     // Conversion and writing
-    void WriteFramesToTarget(BYTE* pcm_dest, uint32_t frames_to_write, uint32_t pulled_frames) noexcept;
     float NextGain() noexcept;
 
     AudioRingBuffer& m_ring;
@@ -173,10 +185,17 @@ private:
     std::jthread          m_thread;
     UnderrunCallback      m_underrun_cb;
 
-    // Resampler & format buffers
+    // Resampler & staging buffers
     AudioConverter        m_resampler;
-    std::vector<float>    m_resample_in;
-    std::vector<float>    m_resample_out;
+    std::vector<float>    m_staging_in;
+    std::vector<float>    m_converted_chunk;
+    std::vector<float>    m_resampled_fifo; // Persistent resampled output FIFO across callbacks
+
+    // Pending target handoff to worker thread (single owner pattern)
+    HANDLE                m_switch_ack_event{nullptr};
+    std::mutex            m_pending_mutex;
+    AudioTargetResources  m_pending_target;
+    bool                  m_has_pending_target{false};
 };
 
 } // namespace duwn::audio

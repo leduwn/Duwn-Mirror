@@ -38,6 +38,7 @@ public:
     uint32_t SwapWidth() const noexcept override { return m_width; }
     uint32_t SwapHeight() const noexcept override { return m_height; }
     bool HandleDeviceRemoved() noexcept override { return false; }
+    void CopyBackBufferTo(ID3D11Texture2D* dst) noexcept override;
     void PresentBlack() noexcept override;
 
 private:

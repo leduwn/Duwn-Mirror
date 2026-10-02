@@ -33,12 +33,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 
     // Check for fixed firewall helper command before creating any application state
     int argc = 0;
+    bool test_motion = false;
     LPWSTR* argv = ::CommandLineToArgvW(::GetCommandLineW(), &argc);
     if (argv) {
         if (argc >= 3 && (_wcsicmp(argv[1], L"--firewall") == 0 || _wcsicmp(argv[1], L"-firewall") == 0)) {
             std::wstring action = argv[2];
             ::LocalFree(argv);
             return duwn::network::ExecuteFirewallCliCommand(action);
+        }
+        for (int i = 1; i < argc; ++i) {
+            if (_wcsicmp(argv[i], L"--test-motion") == 0 || _wcsicmp(argv[i], L"-test-motion") == 0) {
+                test_motion = true;
+            }
         }
         ::LocalFree(argv);
     }
@@ -53,7 +59,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     int wsa_res = ::WSAStartup(MAKEWORD(2, 2), &wsa_data);
 
     duwn::app::App app;
-    int ret = app.Run();
+    int ret = app.Run(test_motion);
 
     if (wsa_res == 0) {
         ::WSACleanup();

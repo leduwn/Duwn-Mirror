@@ -145,10 +145,15 @@ HRESULT STDMETHODCALLTYPE AudioDeviceManager::OnDefaultDeviceChanged(
     EDataFlow flow, ERole role, LPCWSTR /*pwstrDefaultDeviceId*/) {
     // Only care about render + multimedia role (our eMultimedia default)
     if (flow != eRender || role != eMultimedia) return S_OK;
-    // If user pinned an explicit device, default changes don't affect us
-    ::AcquireSRWLockShared(&m_watched_lock);
-    bool watching_default = m_watched_device_id.empty();
-    ::ReleaseSRWLockShared(&m_watched_lock);
+
+    // Use non-blocking lock to guarantee zero thread stall on Windows audio callback
+    bool watching_default = false;
+    if (::TryAcquireSRWLockShared(&m_watched_lock)) {
+        watching_default = m_watched_device_id.empty();
+        ::ReleaseSRWLockShared(&m_watched_lock);
+    } else {
+        watching_default = true; // safe fallback: dispatch change
+    }
 
     if (watching_default && m_hwnd) {
         ::PostMessageW(m_hwnd, WM_APP_AUDIO_DEVICE_CHANGED, 0, 0);
@@ -159,11 +164,14 @@ HRESULT STDMETHODCALLTYPE AudioDeviceManager::OnDefaultDeviceChanged(
 HRESULT STDMETHODCALLTYPE AudioDeviceManager::OnDeviceAdded(LPCWSTR pwstrDeviceId) {
     if (m_hwnd) ::PostMessageW(m_hwnd, WM_APP_AUDIO_DEVICE_LIST_CHANGED, 0, 0);
 
-    // If the added device matches our watched (pinned) device, trigger reconnect
-    ::AcquireSRWLockShared(&m_watched_lock);
-    bool matches_watched = (!m_watched_device_id.empty() && pwstrDeviceId &&
+    bool matches_watched = false;
+    if (::TryAcquireSRWLockShared(&m_watched_lock)) {
+        matches_watched = (!m_watched_device_id.empty() && pwstrDeviceId &&
                             m_watched_device_id == pwstrDeviceId);
-    ::ReleaseSRWLockShared(&m_watched_lock);
+        ::ReleaseSRWLockShared(&m_watched_lock);
+    } else {
+        matches_watched = true;
+    }
 
     if (matches_watched && m_hwnd) {
         ::PostMessageW(m_hwnd, WM_APP_AUDIO_DEVICE_CHANGED, 0, 0);
@@ -174,11 +182,14 @@ HRESULT STDMETHODCALLTYPE AudioDeviceManager::OnDeviceAdded(LPCWSTR pwstrDeviceI
 HRESULT STDMETHODCALLTYPE AudioDeviceManager::OnDeviceRemoved(LPCWSTR pwstrDeviceId) {
     if (m_hwnd) ::PostMessageW(m_hwnd, WM_APP_AUDIO_DEVICE_LIST_CHANGED, 0, 0);
 
-    // If the removed device is the one we're actively using — trigger handoff
-    ::AcquireSRWLockShared(&m_watched_lock);
-    bool is_active = (!m_watched_device_id.empty() && pwstrDeviceId &&
+    bool is_active = false;
+    if (::TryAcquireSRWLockShared(&m_watched_lock)) {
+        is_active = (!m_watched_device_id.empty() && pwstrDeviceId &&
                       m_watched_device_id == pwstrDeviceId);
-    ::ReleaseSRWLockShared(&m_watched_lock);
+        ::ReleaseSRWLockShared(&m_watched_lock);
+    } else {
+        is_active = true;
+    }
 
     if (is_active && m_hwnd) {
         ::PostMessageW(m_hwnd, WM_APP_AUDIO_DEVICE_CHANGED, 0, 0);
@@ -190,10 +201,14 @@ HRESULT STDMETHODCALLTYPE AudioDeviceManager::OnDeviceStateChanged(
     LPCWSTR pwstrDeviceId, DWORD dwNewState) {
     if (m_hwnd) ::PostMessageW(m_hwnd, WM_APP_AUDIO_DEVICE_LIST_CHANGED, 0, 0);
 
-    ::AcquireSRWLockShared(&m_watched_lock);
-    bool is_watched = (!m_watched_device_id.empty() && pwstrDeviceId &&
+    bool is_watched = false;
+    if (::TryAcquireSRWLockShared(&m_watched_lock)) {
+        is_watched = (!m_watched_device_id.empty() && pwstrDeviceId &&
                        m_watched_device_id == pwstrDeviceId);
-    ::ReleaseSRWLockShared(&m_watched_lock);
+        ::ReleaseSRWLockShared(&m_watched_lock);
+    } else {
+        is_watched = true;
+    }
 
     if (is_watched && m_hwnd) {
         // Trigger on both unplug/disable and reconnect/active

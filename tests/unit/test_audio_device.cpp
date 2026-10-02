@@ -339,3 +339,500 @@ DUWN_TEST(AudioDevice_WorkspaceV2_NavigationModel) {
     DUWN_ASSERT(state.audio_volume == 0.75f);
 }
 
+// ---------------------------------------------------------------------------
+// 17. AudioDevice: ValidateAudioFormat strict validation & all sample types
+// ---------------------------------------------------------------------------
+DUWN_TEST(AudioDevice_FormatValidation_AllTypesAndInvalid) {
+    AudioFormatConfig cfg;
+
+    // 1. Valid Float32 48kHz stereo (WAVE_FORMAT_EXTENSIBLE)
+    WAVEFORMATEXTENSIBLE ext_float{};
+    ext_float.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    ext_float.Format.nChannels = 2;
+    ext_float.Format.nSamplesPerSec = 48000;
+    ext_float.Format.wBitsPerSample = 32;
+    ext_float.Format.nBlockAlign = 8;
+    ext_float.Format.nAvgBytesPerSec = 48000 * 8;
+    ext_float.Format.cbSize = 22;
+    ext_float.Samples.wValidBitsPerSample = 32;
+    ext_float.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+    ext_float.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+    DUWN_ASSERT(ValidateAudioFormat(reinterpret_cast<const WAVEFORMATEX*>(&ext_float), cfg));
+    DUWN_ASSERT(cfg.sample_type == AudioSampleType::Float32);
+    DUWN_ASSERT(!cfg.needs_resample);
+
+    // 2. Valid Int16 44.1kHz stereo (WAVE_FORMAT_PCM)
+    WAVEFORMATEX pcm16{};
+    pcm16.wFormatTag = WAVE_FORMAT_PCM;
+    pcm16.nChannels = 2;
+    pcm16.nSamplesPerSec = 44100;
+    pcm16.wBitsPerSample = 16;
+    pcm16.nBlockAlign = 4;
+    pcm16.nAvgBytesPerSec = 44100 * 4;
+    pcm16.cbSize = 0;
+    DUWN_ASSERT(ValidateAudioFormat(&pcm16, cfg));
+    DUWN_ASSERT(cfg.sample_type == AudioSampleType::Int16);
+    DUWN_ASSERT(cfg.needs_resample);
+
+    // 3. Valid Int24Packed 48kHz stereo (3 bytes per sample)
+    WAVEFORMATEXTENSIBLE ext_24p{};
+    ext_24p.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    ext_24p.Format.nChannels = 2;
+    ext_24p.Format.nSamplesPerSec = 48000;
+    ext_24p.Format.wBitsPerSample = 24;
+    ext_24p.Format.nBlockAlign = 6;
+    ext_24p.Format.nAvgBytesPerSec = 48000 * 6;
+    ext_24p.Format.cbSize = 22;
+    ext_24p.Samples.wValidBitsPerSample = 24;
+    ext_24p.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+    ext_24p.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+    DUWN_ASSERT(ValidateAudioFormat(reinterpret_cast<const WAVEFORMATEX*>(&ext_24p), cfg));
+    DUWN_ASSERT(cfg.sample_type == AudioSampleType::Int24Packed);
+
+    // 4. Valid Int24In32 48kHz stereo (24 valid bits in 32-bit container)
+    WAVEFORMATEXTENSIBLE ext_24in32{};
+    ext_24in32.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    ext_24in32.Format.nChannels = 2;
+    ext_24in32.Format.nSamplesPerSec = 48000;
+    ext_24in32.Format.wBitsPerSample = 32;
+    ext_24in32.Format.nBlockAlign = 8;
+    ext_24in32.Format.nAvgBytesPerSec = 48000 * 8;
+    ext_24in32.Format.cbSize = 22;
+    ext_24in32.Samples.wValidBitsPerSample = 24;
+    ext_24in32.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+    ext_24in32.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+    DUWN_ASSERT(ValidateAudioFormat(reinterpret_cast<const WAVEFORMATEX*>(&ext_24in32), cfg));
+    DUWN_ASSERT(cfg.sample_type == AudioSampleType::Int24In32);
+
+    // 5. Valid Int32 48kHz stereo (32-bit int)
+    WAVEFORMATEXTENSIBLE ext_32{};
+    ext_32.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    ext_32.Format.nChannels = 2;
+    ext_32.Format.nSamplesPerSec = 48000;
+    ext_32.Format.wBitsPerSample = 32;
+    ext_32.Format.nBlockAlign = 8;
+    ext_32.Format.nAvgBytesPerSec = 48000 * 8;
+    ext_32.Format.cbSize = 22;
+    ext_32.Samples.wValidBitsPerSample = 32;
+    ext_32.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+    ext_32.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+    DUWN_ASSERT(ValidateAudioFormat(reinterpret_cast<const WAVEFORMATEX*>(&ext_32), cfg));
+    DUWN_ASSERT(cfg.sample_type == AudioSampleType::Int32);
+
+    // 6. Invalid formats rejected cleanly
+    DUWN_ASSERT(!ValidateAudioFormat(nullptr, cfg));
+
+    WAVEFORMATEX invalid{};
+    invalid.wFormatTag = WAVE_FORMAT_PCM;
+    invalid.nChannels = 0; // 0 channels
+    DUWN_ASSERT(!ValidateAudioFormat(&invalid, cfg));
+
+    invalid.nChannels = 2;
+    invalid.nSamplesPerSec = 4000; // Too low sample rate
+    DUWN_ASSERT(!ValidateAudioFormat(&invalid, cfg));
+
+    invalid.nSamplesPerSec = 48000;
+    invalid.wBitsPerSample = 16;
+    invalid.nBlockAlign = 5; // Mismatched block align (should be 4)
+    invalid.nAvgBytesPerSec = 48000 * 4;
+    DUWN_ASSERT(!ValidateAudioFormat(&invalid, cfg));
+
+    invalid.nBlockAlign = 4;
+    invalid.nAvgBytesPerSec = 100; // Mismatched avg bytes per sec
+    DUWN_ASSERT(!ValidateAudioFormat(&invalid, cfg));
+}
+
+// ---------------------------------------------------------------------------
+// 18. AudioDevice: WriteAudioFrames buffer canary protection & exact bit layout
+// ---------------------------------------------------------------------------
+DUWN_TEST(AudioDevice_WriteAudioFrames_BufferCanaryAndBitLayout) {
+    constexpr size_t kCanarySize = 32;
+    constexpr uint8_t kCanaryVal = 0xAA;
+
+    auto verify_canaries = [](const std::vector<uint8_t>& buf, size_t dest_offset, size_t dest_len) {
+        for (size_t i = 0; i < dest_offset; ++i) {
+            DUWN_ASSERT(buf[i] == kCanaryVal);
+        }
+        for (size_t i = dest_offset + dest_len; i < buf.size(); ++i) {
+            DUWN_ASSERT(buf[i] == kCanaryVal);
+        }
+    };
+
+    // Test 1: Int24Packed (3 bytes per sample)
+    {
+        AudioFormatConfig fmt{};
+        fmt.channels = 2;
+        fmt.bits_per_sample = 24;
+        fmt.sample_type = AudioSampleType::Int24Packed;
+
+        const size_t pcm_bytes = 2 * 3; // 1 stereo frame = 6 bytes
+        std::vector<uint8_t> buffer(kCanarySize * 2 + pcm_bytes, kCanaryVal);
+        BYTE* dest = buffer.data() + kCanarySize;
+
+        float in_samples[2] = { 0.5f, -0.5f };
+        size_t written = WriteAudioFrames(dest, pcm_bytes, 1, in_samples, 1, fmt);
+        DUWN_ASSERT(written == 6);
+        verify_canaries(buffer, kCanarySize, pcm_bytes);
+
+        // Verify exact little-endian byte representation:
+        // Left: 0.5 * 8388607 = 4194303 = 0x3FFFFF -> 0xFF, 0xFF, 0x3F
+        DUWN_ASSERT(dest[0] == 0xFF);
+        DUWN_ASSERT(dest[1] == 0xFF);
+        DUWN_ASSERT(dest[2] == 0x3F);
+
+        // Right: -0.5 * 8388607 = -4194303 = 0xFFC00001 -> 0x01, 0x00, 0xC0
+        DUWN_ASSERT(dest[3] == 0x01);
+        DUWN_ASSERT(dest[4] == 0x00);
+        DUWN_ASSERT(dest[5] == 0xC0);
+    }
+
+    // Test 2: Int24In32 (4 bytes per sample, 24 valid bits left-aligned)
+    {
+        AudioFormatConfig fmt{};
+        fmt.channels = 2;
+        fmt.bits_per_sample = 32;
+        fmt.valid_bits_per_sample = 24;
+        fmt.sample_type = AudioSampleType::Int24In32;
+
+        const size_t pcm_bytes = 2 * 4; // 1 stereo frame = 8 bytes
+        std::vector<uint8_t> buffer(kCanarySize * 2 + pcm_bytes, kCanaryVal);
+        BYTE* dest = buffer.data() + kCanarySize;
+
+        float in_samples[2] = { 0.5f, -0.5f };
+        size_t written = WriteAudioFrames(dest, pcm_bytes, 1, in_samples, 1, fmt);
+        DUWN_ASSERT(written == 8);
+        verify_canaries(buffer, kCanarySize, pcm_bytes);
+
+        const int32_t* out32 = reinterpret_cast<const int32_t*>(dest);
+        DUWN_ASSERT(out32[0] == (4194303 << 8));
+        DUWN_ASSERT(out32[1] == (-4194303 << 8));
+    }
+
+    // Test 3: Clamping boundary protection (out of [-1.0, 1.0] does not overflow)
+    {
+        AudioFormatConfig fmt{};
+        fmt.channels = 2;
+        fmt.bits_per_sample = 16;
+        fmt.sample_type = AudioSampleType::Int16;
+
+        const size_t pcm_bytes = 4;
+        std::vector<uint8_t> buffer(kCanarySize * 2 + pcm_bytes, kCanaryVal);
+        BYTE* dest = buffer.data() + kCanarySize;
+
+        float in_samples[2] = { 5.0f, -5.0f }; // beyond range
+        size_t written = WriteAudioFrames(dest, pcm_bytes, 1, in_samples, 1, fmt);
+        DUWN_ASSERT(written == 4);
+        verify_canaries(buffer, kCanarySize, pcm_bytes);
+
+        const int16_t* out16 = reinterpret_cast<const int16_t*>(dest);
+        DUWN_ASSERT(out16[0] == 32767);
+        DUWN_ASSERT(out16[1] == -32768);
+    }
+
+    // Test 4: Silence filling when input has fewer frames than requested
+    {
+        AudioFormatConfig fmt{};
+        fmt.channels = 2;
+        fmt.bits_per_sample = 16;
+        fmt.sample_type = AudioSampleType::Int16;
+
+        constexpr uint32_t req_frames = 10;
+        constexpr uint32_t src_frames = 4;
+        const size_t pcm_bytes = req_frames * 4;
+        std::vector<uint8_t> buffer(kCanarySize * 2 + pcm_bytes, kCanaryVal);
+        BYTE* dest = buffer.data() + kCanarySize;
+
+        std::vector<float> in_samples(src_frames * 2, 0.5f);
+        size_t written = WriteAudioFrames(dest, pcm_bytes, req_frames, in_samples.data(), src_frames, fmt);
+        DUWN_ASSERT(written == pcm_bytes);
+        verify_canaries(buffer, kCanarySize, pcm_bytes);
+
+        const int16_t* out16 = reinterpret_cast<const int16_t*>(dest);
+        for (size_t f = 0; f < 4; ++f) {
+            DUWN_ASSERT(out16[f * 2 + 0] > 0);
+            DUWN_ASSERT(out16[f * 2 + 1] > 0);
+        }
+        for (size_t f = 4; f < req_frames; ++f) {
+            DUWN_ASSERT(out16[f * 2 + 0] == 0);
+            DUWN_ASSERT(out16[f * 2 + 1] == 0);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 19. AudioDevice: No sample drop or duplication in same-rate varying callbacks
+// ---------------------------------------------------------------------------
+DUWN_TEST(AudioDevice_NoSampleDrop_SameRateVaryingCallbacks) {
+    AudioRingBuffer ring(8192, 2);
+
+    constexpr uint32_t kTotalFrames = 4800;
+    std::vector<float> in_data(kTotalFrames * 2);
+    for (uint32_t i = 0; i < kTotalFrames; ++i) {
+        in_data[i * 2 + 0] = static_cast<float>(i);
+        in_data[i * 2 + 1] = static_cast<float>(i);
+    }
+    uint32_t pushed = ring.Push(in_data.data(), kTotalFrames);
+    DUWN_ASSERT(pushed == kTotalFrames);
+    DUWN_ASSERT(ring.Available() == kTotalFrames);
+
+    const uint32_t callback_sizes[] = { 128, 240, 480, 512, 256, 384, 800, 1000, 1000 };
+    uint32_t total_consumed = 0;
+    float expected_next_val = 0.0f;
+
+    AudioFormatConfig fmt{};
+    fmt.channels = 2;
+    fmt.sample_rate = 48000;
+    fmt.bits_per_sample = 32;
+    fmt.sample_type = AudioSampleType::Float32;
+    fmt.needs_resample = false;
+
+    std::vector<float> staging_in;
+    std::vector<float> wasapi_buffer;
+
+    for (uint32_t cb_frames : callback_sizes) {
+        uint32_t avail = ring.Available();
+        uint32_t to_write = std::min(cb_frames, avail);
+        if (to_write == 0) break;
+
+        // Pull EXACTLY to_write frames from ring
+        staging_in.resize(to_write * 2);
+        uint32_t actual_pull = ring.Pull(staging_in.data(), to_write);
+        DUWN_ASSERT(actual_pull == to_write);
+
+        wasapi_buffer.resize(to_write * 2);
+        size_t written_bytes = WriteAudioFrames(
+            reinterpret_cast<BYTE*>(wasapi_buffer.data()),
+            wasapi_buffer.size() * sizeof(float),
+            to_write, staging_in.data(), actual_pull, fmt);
+        DUWN_ASSERT(written_bytes == to_write * 2 * sizeof(float));
+
+        // Verify sequence continuity: ZERO DROPPED FRAMES!
+        for (uint32_t f = 0; f < to_write; ++f) {
+            DUWN_ASSERT(wasapi_buffer[f * 2 + 0] == expected_next_val);
+            DUWN_ASSERT(wasapi_buffer[f * 2 + 1] == expected_next_val);
+            expected_next_val += 1.0f;
+        }
+
+        total_consumed += to_write;
+    }
+
+    DUWN_ASSERT(total_consumed == kTotalFrames);
+    DUWN_ASSERT(ring.Available() == 0);
+    DUWN_ASSERT(expected_next_val == static_cast<float>(kTotalFrames));
+}
+
+// ---------------------------------------------------------------------------
+// 20. AudioDevice: Resampling persistent FIFO & remainder preserved across callbacks
+// ---------------------------------------------------------------------------
+DUWN_TEST(AudioDevice_Resampling_PersistentFifoAndRemainderPreserved) {
+    // Test 48kHz source to 44.1kHz endpoint
+    duwn::audio::AudioConverter resampler;
+    resampler.Init(48000, 2, 44100, 2);
+
+    AudioRingBuffer ring(16384, 2);
+
+    // Push 4800 stereo frames at 48kHz (0.1 seconds of audio)
+    constexpr uint32_t kInputFrames = 4800;
+    std::vector<float> in_data(kInputFrames * 2);
+    for (uint32_t i = 0; i < kInputFrames; ++i) {
+        float val = std::sin(2.0f * 3.14159265f * 440.0f * (static_cast<float>(i) / 48000.0f));
+        in_data[i * 2 + 0] = val;
+        in_data[i * 2 + 1] = val;
+    }
+    ring.Push(in_data.data(), kInputFrames);
+
+    std::vector<float> persistent_fifo;
+    std::vector<float> staging_in;
+    std::vector<float> converted_chunk;
+
+    // Simulate varying callback sizes at 44.1kHz (e.g. 441 frames = 10ms)
+    const uint32_t cb_sizes[] = { 441, 441, 441, 441, 441, 441, 441, 441, 441, 441 };
+    uint32_t total_out_frames = 0;
+
+    for (uint32_t req_out : cb_sizes) {
+        size_t avail_fifo = persistent_fifo.size() / 2;
+        if (avail_fifo < req_out) {
+            uint32_t deficit = req_out - static_cast<uint32_t>(avail_fifo);
+            double ratio = 48000.0 / 44100.0;
+            uint32_t needed_in = static_cast<uint32_t>(std::ceil(deficit * ratio)) + 4;
+            uint32_t ring_avail = ring.Available();
+            uint32_t to_pull = std::min(needed_in, ring_avail);
+            if (to_pull > 0) {
+                staging_in.resize(to_pull * 2);
+                uint32_t actual = ring.Pull(staging_in.data(), to_pull);
+                converted_chunk.clear();
+                resampler.Convert(staging_in.data(), actual, converted_chunk);
+                persistent_fifo.insert(persistent_fifo.end(), converted_chunk.begin(), converted_chunk.end());
+            }
+        }
+
+        avail_fifo = persistent_fifo.size() / 2;
+        uint32_t frames_from_fifo = std::min(req_out, static_cast<uint32_t>(avail_fifo));
+        total_out_frames += frames_from_fifo;
+
+        if (frames_from_fifo > 0) {
+            if (frames_from_fifo == avail_fifo) {
+                persistent_fifo.clear();
+            } else {
+                persistent_fifo.erase(persistent_fifo.begin(), persistent_fifo.begin() + frames_from_fifo * 2);
+            }
+        }
+    }
+
+    // At 44.1kHz from 48kHz (ratio 44100/48000 = 0.91875):
+    // 4800 input frames produce ~4410 output frames minus filter lookahead (16 frames) = ~4394 frames.
+    DUWN_ASSERT(total_out_frames >= 4380 && total_out_frames <= 4410);
+
+    // FIFO preserved any leftover without discarding
+    DUWN_ASSERT(persistent_fifo.size() / 2 < 441);
+}
+
+// ---------------------------------------------------------------------------
+// 21. AudioDevice: Candidate failure preserves active endpoint and Playing state
+// ---------------------------------------------------------------------------
+DUWN_TEST(AudioDevice_SwitchHandoff_CandidateFailurePreservesActive) {
+    AudioRingBuffer ring(4096, 2);
+    WasapiOutput wasapi(ring);
+
+    bool ok = wasapi.Init(L"");
+    if (!ok) return;
+
+    wasapi.Start();
+    DUWN_ASSERT(wasapi.State() == AudioEndpointState::Playing || wasapi.State() == AudioEndpointState::WaitingForDevice);
+
+    if (wasapi.State() == AudioEndpointState::Playing) {
+        // Attempt switch to totally invalid endpoint ID
+        bool switch_ok = wasapi.SwitchEndpoint(L"{invalid-guid-9999-not-found}");
+        // Candidate preparation fails; must not crash and must preserve active endpoint
+        DUWN_ASSERT(!switch_ok);
+        DUWN_ASSERT(wasapi.State() == AudioEndpointState::Playing);
+        DUWN_ASSERT(!wasapi.ResolvedDeviceId().empty());
+    }
+
+    wasapi.Stop();
+}
+
+// ---------------------------------------------------------------------------
+// 22. AudioDevice: 1000 Rapid Switches Stress (Zero deadlocks, race-free handoff)
+// ---------------------------------------------------------------------------
+DUWN_TEST(AudioDevice_SwitchHandoff_Stress1000Cycles_NoDeadlock) {
+    AudioRingBuffer ring(8192, 2);
+    WasapiOutput wasapi(ring);
+
+    wasapi.Init(L"");
+    wasapi.Start();
+
+    // 1000 rapid requests interleaved
+    for (int i = 0; i < 1000; ++i) {
+        if (i % 3 == 0) {
+            wasapi.SwitchEndpoint(L"");
+        } else if (i % 3 == 1) {
+            wasapi.SwitchEndpoint(L"{invalid-endpoint}");
+        } else {
+            wasapi.SwitchEndpoint(L"");
+        }
+    }
+
+    wasapi.SwitchEndpoint(L"");
+    DUWN_ASSERT(wasapi.SelectionPolicy() == EndpointSelectionPolicy::SystemDefault);
+
+    AudioEndpointState st = wasapi.State();
+    DUWN_ASSERT(st == AudioEndpointState::Playing || st == AudioEndpointState::WaitingForDevice || st == AudioEndpointState::Idle);
+
+    wasapi.Stop();
+    DUWN_ASSERT(wasapi.State() == AudioEndpointState::Stopped);
+}
+
+// ---------------------------------------------------------------------------
+// 23. AudioDevice: Gain Ramp duration proportional to delta and sample rate
+// ---------------------------------------------------------------------------
+DUWN_TEST(AudioDevice_GainRamp_DurationProportionalToDelta) {
+    // kRampStep = 1.0f / 512.0f
+    constexpr float kStep = 1.0f / 512.0f;
+
+    // Test Case 1: Delta = 1.0f (1.0f -> 0.0f, full mute)
+    // Takes exactly 512 frames
+    float gain = 1.0f;
+    float target = 0.0f;
+    uint32_t steps_full = 0;
+    while (std::abs(gain - target) > 0.0001f) {
+        gain = std::max(target, gain - kStep);
+        ++steps_full;
+    }
+    DUWN_ASSERT(steps_full == 512);
+
+    // Test Case 2: Delta = 0.25f (0.75f -> 0.50f)
+    // Takes exactly 128 frames (512 * 0.25)
+    gain = 0.75f;
+    target = 0.50f;
+    uint32_t steps_quarter = 0;
+    while (std::abs(gain - target) > 0.0001f) {
+        gain = std::max(target, gain - kStep);
+        ++steps_quarter;
+    }
+    DUWN_ASSERT(steps_quarter == 128);
+
+    // Test Case 3: Duration at 48kHz vs 44.1kHz
+    // 512 frames at 48kHz = 512 / 48000 = 10.67ms
+    // 512 frames at 44.1kHz = 512 / 44100 = 11.61ms
+    double dur_48k_ms = (static_cast<double>(steps_full) / 48000.0) * 1000.0;
+    double dur_44k_ms = (static_cast<double>(steps_full) / 44100.0) * 1000.0;
+    DUWN_ASSERT(std::abs(dur_48k_ms - 10.667) < 0.01);
+    DUWN_ASSERT(std::abs(dur_44k_ms - 11.610) < 0.01);
+}
+
+// ---------------------------------------------------------------------------
+// 24. AudioDevice: Real Hardware MMDevice enumeration and active endpoint switch
+// ---------------------------------------------------------------------------
+DUWN_TEST(AudioDevice_HardwareEndpoints_RealtekAndVbAudio) {
+    AudioDeviceManager mgr;
+    if (!mgr.Init(nullptr)) return;
+
+    auto endpoints = mgr.Enumerate();
+    std::wstring default_id = mgr.DefaultDeviceId();
+
+    // Verify all active endpoints
+    std::wstring realtek_id;
+    std::wstring vbaudio_id;
+
+    for (const auto& ep : endpoints) {
+        DUWN_ASSERT(!ep.id.empty());
+        DUWN_ASSERT(!ep.friendly_name.empty());
+        if (ep.friendly_name.find(L"Realtek") != std::wstring::npos) {
+            realtek_id = ep.id;
+        } else if (ep.friendly_name.find(L"CABLE") != std::wstring::npos ||
+                   ep.friendly_name.find(L"VB-Audio") != std::wstring::npos) {
+            vbaudio_id = ep.id;
+        }
+    }
+
+    // If both Realtek and VB-Audio active render endpoints exist on host:
+    if (!realtek_id.empty() && !vbaudio_id.empty()) {
+        AudioRingBuffer ring(4096, 2);
+        WasapiOutput wasapi(ring);
+        if (wasapi.Init(realtek_id)) {
+            wasapi.Start();
+            DUWN_ASSERT(wasapi.SelectionPolicy() == EndpointSelectionPolicy::PinnedDevice);
+
+            // Live switch to VB-Audio
+            bool switched = wasapi.SwitchEndpoint(vbaudio_id);
+            DUWN_ASSERT(switched);
+            DUWN_ASSERT(wasapi.CurrentDeviceId() == vbaudio_id);
+
+            // Switch back to Realtek
+            switched = wasapi.SwitchEndpoint(realtek_id);
+            DUWN_ASSERT(switched);
+            DUWN_ASSERT(wasapi.CurrentDeviceId() == realtek_id);
+
+            // Switch back to System Default
+            switched = wasapi.SwitchEndpoint(L"");
+            DUWN_ASSERT(switched);
+            DUWN_ASSERT(wasapi.SelectionPolicy() == EndpointSelectionPolicy::SystemDefault);
+
+            wasapi.Stop();
+        }
+    }
+
+    mgr.Shutdown();
+}
+

@@ -28,6 +28,8 @@
 #include "sync/MasterClock.h"
 #include "sync/AvSynchronizer.h"
 #include "sync/DriftController.h"
+#include "capture/CaptureServer.h"
+#include "capture/SharedTexture.h"
 #include "SessionMetadataCoordinator.h"
 #include <memory>
 #include <atomic>
@@ -57,7 +59,7 @@ public:
     App(const App&) = delete;
     App& operator=(const App&) = delete;
 
-    int Run() noexcept;
+    int Run(bool test_motion = false) noexcept;
 
     bool WaitForMediaReadiness(uint32_t timeout_ms = 2500) const noexcept;
     bool IsVideoMinReady() const noexcept {
@@ -147,6 +149,9 @@ private:
     std::unique_ptr<video::FrameScheduler> m_scheduler;
     std::unique_ptr<video::IVideoRenderer> m_renderer;
     std::unique_ptr<video::IVideoRenderer> m_preview_renderer;
+    std::unique_ptr<capture::CaptureServer> m_capture_server;
+    std::unique_ptr<capture::SharedTexture> m_shared_texture;
+    std::atomic<uint64_t>                  m_export_frame_index{0};
     std::unique_ptr<audio::AudioRingBuffer> m_audio_ring;
     std::unique_ptr<audio::AudioEngine>   m_audio_engine;
     std::unique_ptr<audio::WasapiOutput>  m_wasapi;
@@ -166,7 +171,10 @@ private:
     std::unique_ptr<network::BleBeaconPublisher>  m_ble_beacon;
 
     std::jthread m_metrics_thread;
+    std::jthread m_test_motion_thread;
     std::atomic_bool m_running{false};
+
+    void TestMotionLoop(std::stop_token st) noexcept;
 
     // HWND of the main (control) window, set during Init.
     // Accessed from render thread via PostMessageW (thread-safe).

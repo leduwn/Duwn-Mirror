@@ -2,7 +2,22 @@
 
 namespace duwn::capture {
 
+void SharedTexture::Release() noexcept {
+    m_texture.Reset();
+    m_shared_handle = nullptr;
+    m_width = 0;
+    m_height = 0;
+}
+
 bool SharedTexture::Create(ID3D11Device* device, uint32_t width, uint32_t height) noexcept {
+    if (!device || width == 0 || height == 0) return false;
+
+    if (m_texture && m_width == width && m_height == height) {
+        return true;
+    }
+
+    Release();
+
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width            = width;
     desc.Height           = height;
@@ -18,11 +33,21 @@ bool SharedTexture::Create(ID3D11Device* device, uint32_t width, uint32_t height
     if (FAILED(hr)) return false;
 
     ComPtr<IDXGIResource> dxgi_res;
-    m_texture.As(&dxgi_res);
-    if (!dxgi_res) return false;
+    hr = m_texture.As(&dxgi_res);
+    if (FAILED(hr) || !dxgi_res) {
+        m_texture.Reset();
+        return false;
+    }
 
     hr = dxgi_res->GetSharedHandle(&m_shared_handle);
-    return SUCCEEDED(hr);
+    if (FAILED(hr) || !m_shared_handle) {
+        m_texture.Reset();
+        return false;
+    }
+
+    m_width = width;
+    m_height = height;
+    return true;
 }
 
 } // namespace duwn::capture

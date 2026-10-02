@@ -157,6 +157,8 @@ public:
     uint32_t SwapWidth()  const noexcept override { return m_swap_width; }
     uint32_t SwapHeight() const noexcept override { return m_swap_height; }
 
+    void CopyBackBufferTo(ID3D11Texture2D* dst) noexcept override;
+
     void LogSwapChainConfig(const char* label) const noexcept override;
 
 private:

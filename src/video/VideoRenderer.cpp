@@ -443,6 +443,15 @@ void VideoRenderer::PresentBlack() noexcept {
     m_device.Context()->ClearRenderTargetView(m_rtv.Get(), black);
     m_swap_chain->Present(0, 0);
 }
+void VideoRenderer::CopyBackBufferTo(ID3D11Texture2D* dst) noexcept {
+    if (!dst || !m_swap_chain) return;
+    std::lock_guard lock{m_device.ContextMutex()};
+    ComPtr<ID3D11Texture2D> bb;
+    if (SUCCEEDED(m_swap_chain->GetBuffer(0, IID_PPV_ARGS(&bb))) && bb) {
+        m_device.Context()->CopyResource(dst, bb.Get());
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 PresentResult VideoRenderer::Present(const VideoFrame& frame) noexcept {

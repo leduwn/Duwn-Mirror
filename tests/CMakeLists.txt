@@ -26,6 +26,7 @@ target_link_libraries(duwn-unit-tests
             duwn-airplay
             duwn-wired
             duwn-ui
+            duwn-capture
             msi
             crypt32
             wintrust
@@ -35,3 +36,16 @@ target_compile_features(duwn-unit-tests PRIVATE cxx_std_20)
 
 add_test(NAME duwn-unit-tests COMMAND duwn-unit-tests)
 set_tests_properties(duwn-unit-tests PROPERTIES TIMEOUT 120)
+add_executable(duwn-capture-consumer
+    capture_consumer_harness.cpp
+)
+target_include_directories(duwn-capture-consumer
+    PRIVATE "${CMAKE_SOURCE_DIR}/src"
+)
+target_link_libraries(duwn-capture-consumer
+    PRIVATE duwn-capture
+            d3d11
+            dxgi
+)
+target_compile_features(duwn-capture-consumer PRIVATE cxx_std_20)
+

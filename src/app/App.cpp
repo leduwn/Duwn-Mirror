@@ -260,7 +260,7 @@ App::~App() {
 
 
 
-int App::Run() noexcept {
+int App::Run(bool test_motion) noexcept {
 
     sync::MasterClock::Initialize();
 
@@ -352,6 +352,11 @@ int App::Run() noexcept {
 
         return 1;
 
+    }
+
+    if (test_motion) {
+        DUWN_LOG_INFO("App", "Starting synthetic test motion source for pipeline verification");
+        m_test_motion_thread = std::jthread([this](std::stop_token st) { TestMotionLoop(std::move(st)); });
     }
 
 
@@ -451,28 +456,13 @@ int App::Run() noexcept {
                 }
 
                 if (m_preview_window) {
-
                     m_preview_window->SetVideoGeometry(fw, fh);
-
-                    if (m_settings.show_preview_on_connect) {
-
-                        m_preview_window->ApplyComfortableSize(fw, fh);
-
-                        m_preview_window->ShowNoActivate();
-
-                        if (m_window) {
-
-                            m_window->State().preview_visible = true;
-
-                            ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
-
-                        }
-
-                        PublishMetadataSnapshot();
-
-                    }
-
                 }
+                if (m_window) {
+                    m_window->LayoutVideoSurface();
+                    ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+                }
+                PublishMetadataSnapshot();
 
                 continue;
 
@@ -1304,39 +1294,45 @@ bool App::Init() noexcept {
 
 
 
-    // Preview Renderer — attached to PreviewWindow
+    // Preview Renderer — attached to embedded video surface inside MainWindow (single-window Workspace)
+    HWND preview_target_hwnd = (m_window && m_window->VideoSurfaceHwnd())
+        ? m_window->VideoSurfaceHwnd()
+        : m_preview_window->Hwnd();
 
     if (m_d3d->IsHardware())
-
-        m_preview_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, m_preview_window->Hwnd());
-
+        m_preview_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, preview_target_hwnd);
     else
-
-        m_preview_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, m_preview_window->Hwnd());
+        m_preview_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, preview_target_hwnd);
 
     m_preview_renderer->SetNonBlocking(true);
 
-    const uint32_t p_client_w = m_preview_window->ClientWidth() > 0 ? m_preview_window->ClientWidth() : 640;
+    if (m_window) {
+        m_window->SetOnVideoSurfaceResize([this](uint32_t w, uint32_t h) {
+            if (m_preview_renderer) m_preview_renderer->SignalResize(w, h);
+        });
+    }
 
-    const uint32_t p_client_h = m_preview_window->ClientHeight() > 0 ? m_preview_window->ClientHeight() : 360;
+    const uint32_t p_client_w = 640;
+    const uint32_t p_client_h = 360;
 
     if (!m_preview_renderer->Init(p_client_w, p_client_h)) {
-
         DUWN_LOG_ERROR("App", "Preview VideoRenderer init failed");
-
         return false;
-
     }
 
     m_preview_renderer->SetAspectRatioMode(GetEffectiveAspectRatioMode());
-
     m_preview_renderer->SetPixelPerfect(static_cast<int>(m_settings.pixel_perfect));
-
     m_preview_renderer->SetScalingQuality(static_cast<int>(m_settings.scaling_quality));
-
     m_preview_renderer->SetColorSpace(static_cast<int>(m_settings.color_range), static_cast<int>(m_settings.color_matrix));
-
     for (size_t i = 0; i < 5; ++i) m_preview_renderer->SetColorControl(i, initial_color[i]);
+
+    // Export server & shared texture initialization
+    m_capture_server = std::make_unique<capture::CaptureServer>();
+    m_capture_server->Start(L"DUWN_MIRROR_CAPTURE");
+    m_shared_texture = std::make_unique<capture::SharedTexture>();
+    if (m_d3d->Device()) {
+        m_shared_texture->Create(m_d3d->Device(), kInitW, kInitH);
+    }
 
     m_preview_renderer->LogSwapChainConfig("PreviewWindow");
 
@@ -3620,8 +3616,10 @@ void App::Shutdown() noexcept {
 
 
     m_metrics_thread.request_stop();
-
     if (m_metrics_thread.joinable()) m_metrics_thread.join();
+
+    m_test_motion_thread.request_stop();
+    if (m_test_motion_thread.joinable()) m_test_motion_thread.join();
 
 
 
@@ -4198,19 +4196,11 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
                 }
 
                 if (m_preview_window) {
-
                     m_preview_window->SetVideoGeometry(frame.visible_width, frame.visible_height);
-
-                    if (m_settings.show_preview_on_connect) {
-
-                        m_preview_window->ApplyComfortableSize(frame.visible_width, frame.visible_height);
-
-                        m_preview_window->ShowNoActivate();
-
-                    }
-
                 }
-
+                if (m_window) {
+                    m_window->LayoutVideoSurface();
+                }
             }
 
             m_last_preview_src_w = frame.visible_width;
@@ -4342,9 +4332,27 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
         const int64_t output_present_qpc = frame.present_end_qpc;
         telemetry::LatencyTelemetry::Get().RecordOutputFrameAge(
             decoder_output_qpc, output_select_qpc, output_present_qpc);
+
+        // Export clean frame to SharedTexture & CaptureServer
+        if (m_shared_texture && m_capture_server && m_capture_server->IsRunning() && m_d3d) {
+            uint32_t sw = m_renderer->SwapWidth();
+            uint32_t sh = m_renderer->SwapHeight();
+            if (sw > 0 && sh > 0) {
+                if (m_shared_texture->Width() != sw || m_shared_texture->Height() != sh) {
+                    m_shared_texture->Create(m_d3d->Device(), sw, sh);
+                }
+                if (m_shared_texture->Texture()) {
+                    m_renderer->CopyBackBufferTo(m_shared_texture->Texture());
+                    m_capture_server->PublishFrame(
+                        m_shared_texture->SharedHandle(), sw, sh,
+                        DXGI_FORMAT_B8G8R8A8_UNORM, ++m_export_frame_index,
+                        frame.present_end_qpc);
+                }
+            }
+        }
     }
 
-    if (m_preview_renderer && m_preview_window && m_preview_window->IsVisible()) {
+    if (m_preview_renderer) {
         const int64_t preview_select_qpc = clock::MonotonicClock::NowQpcTicks();
         const video::PresentResult prev_res = m_preview_renderer->Present(frame, true);
         const int64_t preview_present_qpc = clock::MonotonicClock::NowQpcTicks();
@@ -4419,7 +4427,128 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
 
 }
 
+void App::TestMotionLoop(std::stop_token st) noexcept {
+    while (!st.stop_requested() && !m_video_min_ready.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (st.stop_requested() || !m_d3d || !m_d3d->Device() || !m_scheduler) return;
 
+    constexpr uint32_t kW = 1920;
+    constexpr uint32_t kH = 1080;
+    constexpr size_t kYSize = kW * kH;
+    constexpr size_t kUvSize = kW * (kH / 2);
+    constexpr size_t kTotalBytes = kYSize + kUvSize;
+
+    std::vector<uint8_t> nv12(kTotalBytes, 128);
+    std::fill(nv12.begin(), nv12.begin() + kYSize, static_cast<uint8_t>(28));
+
+    constexpr size_t kPoolSize = 3;
+    std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, kPoolSize> textures;
+
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = kW;
+    desc.Height = kH;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_NV12;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_DECODER;
+
+    for (size_t i = 0; i < kPoolSize; ++i) {
+        HRESULT hr = m_d3d->Device()->CreateTexture2D(&desc, nullptr, textures[i].GetAddressOf());
+        if (FAILED(hr) || !textures[i]) {
+            DUWN_LOG_ERRORF("App", "TestMotionLoop failed to create NV12 texture hr={:#010x}", static_cast<unsigned>(hr));
+            return;
+        }
+    }
+
+    uint64_t seq = 0;
+    int box_x = 100;
+    int box_y = 100;
+    int dir_x = 14;
+    int dir_y = 9;
+    constexpr int kBoxW = 320;
+    constexpr int kBoxH = 220;
+    size_t tex_idx = 0;
+
+    DUWN_LOG_INFO("App", "TestMotionLoop started streaming 1920x1080 synthetic motion frames @ ~60fps");
+
+    while (!st.stop_requested() && m_running.load(std::memory_order_acquire)) {
+        box_x += dir_x;
+        box_y += dir_y;
+        if (box_x <= 20 || box_x + kBoxW >= static_cast<int>(kW) - 20) {
+            dir_x = -dir_x;
+            box_x = std::clamp(box_x, 20, static_cast<int>(kW) - kBoxW - 20);
+        }
+        if (box_y <= 20 || box_y + kBoxH >= static_cast<int>(kH) - 20) {
+            dir_y = -dir_y;
+            box_y = std::clamp(box_y, 20, static_cast<int>(kH) - kBoxH - 20);
+        }
+
+        std::fill(nv12.begin(), nv12.begin() + kYSize, static_cast<uint8_t>(24));
+
+        for (int r = box_y; r < box_y + kBoxH; ++r) {
+            uint8_t* row = nv12.data() + (r * kW);
+            for (int c = box_x; c < box_x + kBoxW; ++c) {
+                if (r == box_y || r == box_y + kBoxH - 1 || c == box_x || c == box_x + kBoxW - 1) {
+                    row[c] = 245;
+                } else if ((r + c + static_cast<int>(seq) * 4) % 32 < 16) {
+                    row[c] = 210;
+                } else {
+                    row[c] = 95;
+                }
+            }
+        }
+
+        int scan_y = static_cast<int>((seq * 12) % kH);
+        uint8_t* scan_row = nv12.data() + (scan_y * kW);
+        std::fill(scan_row, scan_row + kW, static_cast<uint8_t>(235));
+
+        uint8_t* uv_base = nv12.data() + kYSize;
+        uint8_t u_val = static_cast<uint8_t>((seq * 3) % 256);
+        uint8_t v_val = static_cast<uint8_t>(255 - u_val);
+        int uv_box_y = box_y / 2;
+        int uv_box_h = kBoxH / 2;
+        for (int r = uv_box_y; r < uv_box_y + uv_box_h; ++r) {
+            uint8_t* uv_row = uv_base + (r * kW);
+            for (int c = box_x; c < box_x + kBoxW; c += 2) {
+                uv_row[c + 0] = u_val;
+                uv_row[c + 1] = v_val;
+            }
+        }
+
+        auto& current_tex = textures[tex_idx];
+        tex_idx = (tex_idx + 1) % kPoolSize;
+
+        {
+            std::lock_guard lock{m_d3d->ContextMutex()};
+            m_d3d->Context()->UpdateSubresource(
+                current_tex.Get(), 0, nullptr, nv12.data(), kW, static_cast<UINT>(kTotalBytes));
+        }
+
+        video::VideoFrame vf;
+        vf.texture = current_tex;
+        vf.subresource = 0;
+        vf.width = kW;
+        vf.height = kH;
+        vf.visible_width = kW;
+        vf.visible_height = kH;
+        vf.visible_x = 0;
+        vf.visible_y = 0;
+        vf.color_matrix = 2;
+        vf.color_range = 1;
+        vf.format = DXGI_FORMAT_NV12;
+        vf.format_generation = 1;
+        vf.sequence_number = ++seq;
+        vf.present_end_qpc = clock::MonotonicClock::NowQpcTicks();
+
+        m_scheduler->PushFrame(std::move(vf));
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+    }
+}
 
 std::string App::GetActiveTransportString() const noexcept {
     const bool is_wired = m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WiredUsb;

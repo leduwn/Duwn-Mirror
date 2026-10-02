@@ -107,6 +107,15 @@ bool WarpVideoRenderer::CreateRenderTarget() noexcept {
         back_buffer.Get(), nullptr, m_rtv.GetAddressOf()));
 }
 
+void WarpVideoRenderer::CopyBackBufferTo(ID3D11Texture2D* dst) noexcept {
+    if (!dst || !m_swap_chain) return;
+    ComPtr<ID3D11Texture2D> bb;
+    if (SUCCEEDED(m_swap_chain->GetBuffer(0, IID_PPV_ARGS(&bb))) && bb) {
+        m_device.Context()->CopyResource(dst, bb.Get());
+    }
+}
+
+
 bool WarpVideoRenderer::Init(uint32_t width, uint32_t height) noexcept {
     ComPtr<IDXGIDevice> dxgi_device;
     if (FAILED(m_device.Device()->QueryInterface(IID_PPV_ARGS(&dxgi_device)))) return false;

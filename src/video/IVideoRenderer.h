@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstddef>
 
+struct ID3D11Texture2D;
+
 namespace duwn::video {
 
 enum class AspectRatioMode { AspectLocked, Fit, Fill, Stretch };
@@ -27,6 +29,8 @@ public:
     virtual uint32_t SwapWidth() const noexcept = 0;
     virtual uint32_t SwapHeight() const noexcept = 0;
     virtual bool HandleDeviceRemoved() noexcept = 0;
+    // Copy rendered back buffer to destination texture (e.g. for IPC SharedTexture export)
+    virtual void CopyBackBufferTo(ID3D11Texture2D* /*dst*/) noexcept {}
     // Non-blocking best-effort presentation (e.g. for preview windows)
     virtual void SetNonBlocking(bool /*non_blocking*/) noexcept {}
     virtual bool IsNonBlocking() const noexcept { return false; }

@@ -50,47 +50,192 @@ static double GetDevWasapiPeriodOverrideMs() noexcept {
     return 0.0;
 }
 
-static AudioFormatConfig ParseFormat(const WAVEFORMATEX* fmt) noexcept {
-    AudioFormatConfig cfg;
-    if (!fmt) return cfg;
+bool ValidateAudioFormat(const WAVEFORMATEX* fmt, AudioFormatConfig& out_cfg) noexcept {
+    if (!fmt) return false;
+    if (fmt->nChannels == 0 || fmt->nChannels > 8) return false;
+    if (fmt->nSamplesPerSec < 8000 || fmt->nSamplesPerSec > 192000) return false;
+    if (fmt->wBitsPerSample == 0 || (fmt->wBitsPerSample % 8) != 0) return false;
+
+    const uint32_t bytes_per_sample = fmt->wBitsPerSample / 8;
+    if (fmt->nBlockAlign != fmt->nChannels * bytes_per_sample) return false;
+    if (fmt->nAvgBytesPerSec != fmt->nSamplesPerSec * fmt->nBlockAlign) return false;
+
+    AudioFormatConfig cfg{};
     cfg.sample_rate = fmt->nSamplesPerSec;
     cfg.channels = fmt->nChannels;
     cfg.bits_per_sample = fmt->wBitsPerSample;
     cfg.valid_bits_per_sample = fmt->wBitsPerSample;
+    cfg.sample_type = AudioSampleType::Unknown;
 
-    if (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && fmt->cbSize >= 22) {
+    if (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+        if (fmt->cbSize < 22) return false; // sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX)
         const auto* ext = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(fmt);
         cfg.valid_bits_per_sample = ext->Samples.wValidBitsPerSample;
         cfg.channel_mask = ext->dwChannelMask;
+
         if (::IsEqualGUID(ext->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) {
-            cfg.sample_type = AudioSampleType::Float32;
+            if (cfg.bits_per_sample == 32 && cfg.valid_bits_per_sample == 32) {
+                cfg.sample_type = AudioSampleType::Float32;
+            } else {
+                return false;
+            }
         } else if (::IsEqualGUID(ext->SubFormat, KSDATAFORMAT_SUBTYPE_PCM)) {
-            if (cfg.bits_per_sample == 16) cfg.sample_type = AudioSampleType::Int16;
-            else if (cfg.bits_per_sample == 32 || cfg.bits_per_sample == 24) cfg.sample_type = AudioSampleType::Int24In32;
+            if (cfg.bits_per_sample == 16 && cfg.valid_bits_per_sample == 16) {
+                cfg.sample_type = AudioSampleType::Int16;
+            } else if (cfg.bits_per_sample == 24 && cfg.valid_bits_per_sample == 24) {
+                cfg.sample_type = AudioSampleType::Int24Packed;
+            } else if (cfg.bits_per_sample == 32 && cfg.valid_bits_per_sample == 24) {
+                cfg.sample_type = AudioSampleType::Int24In32;
+            } else if (cfg.bits_per_sample == 32 && cfg.valid_bits_per_sample == 32) {
+                cfg.sample_type = AudioSampleType::Int32;
+            } else {
+                return false;
+            }
+        } else {
+            return false;
         }
     } else if (fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) {
-        cfg.sample_type = AudioSampleType::Float32;
+        if (cfg.bits_per_sample == 32) {
+            cfg.sample_type = AudioSampleType::Float32;
+            cfg.channel_mask = (cfg.channels == 1) ? SPEAKER_FRONT_CENTER : (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT);
+        } else {
+            return false;
+        }
     } else if (fmt->wFormatTag == WAVE_FORMAT_PCM) {
-        if (cfg.bits_per_sample == 16) cfg.sample_type = AudioSampleType::Int16;
-        else if (cfg.bits_per_sample == 32 || cfg.bits_per_sample == 24) cfg.sample_type = AudioSampleType::Int24In32;
+        if (cfg.bits_per_sample == 16) {
+            cfg.sample_type = AudioSampleType::Int16;
+        } else if (cfg.bits_per_sample == 24) {
+            cfg.sample_type = AudioSampleType::Int24Packed;
+        } else if (cfg.bits_per_sample == 32) {
+            cfg.sample_type = AudioSampleType::Int32;
+        } else {
+            return false;
+        }
+        cfg.channel_mask = (cfg.channels == 1) ? SPEAKER_FRONT_CENTER : (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT);
+    } else {
+        return false;
     }
+
     cfg.needs_resample = (cfg.sample_rate != 48000);
-    return cfg;
+    out_cfg = cfg;
+    return true;
+}
+
+size_t WriteAudioFrames(BYTE* pcm_dest, size_t dest_buffer_bytes,
+                        uint32_t frames_to_write,
+                        const float* src_stereo, uint32_t src_frames,
+                        const AudioFormatConfig& fmt,
+                        const std::function<float()>& next_gain) noexcept {
+    if (!pcm_dest || frames_to_write == 0) return 0;
+    const uint32_t ch = fmt.channels;
+    const uint32_t bytes_per_sample = fmt.bits_per_sample / 8;
+    if (bytes_per_sample == 0) return 0;
+
+    const size_t total_bytes = static_cast<size_t>(frames_to_write) * ch * bytes_per_sample;
+    if (dest_buffer_bytes < total_bytes) return 0;
+
+    if (src_frames == 0 || !src_stereo) {
+        std::memset(pcm_dest, 0, total_bytes);
+        return total_bytes;
+    }
+
+    for (uint32_t f = 0; f < frames_to_write; ++f) {
+        float g = next_gain ? next_gain() : 1.0f;
+        float left = 0.0f, right = 0.0f;
+        if (f < src_frames) {
+            left  = src_stereo[f * 2 + 0] * g;
+            right = src_stereo[f * 2 + 1] * g;
+        }
+
+        BYTE* frame_dest = pcm_dest + static_cast<size_t>(f) * ch * bytes_per_sample;
+
+        if (fmt.sample_type == AudioSampleType::Float32) {
+            float* out = reinterpret_cast<float*>(frame_dest);
+            if (ch == 1) {
+                out[0] = (left + right) * 0.5f;
+            } else {
+                out[0] = left;
+                out[1] = right;
+                for (uint32_t c = 2; c < ch; ++c) out[c] = 0.0f;
+            }
+        } else if (fmt.sample_type == AudioSampleType::Int16) {
+            int16_t* out = reinterpret_cast<int16_t*>(frame_dest);
+            int16_t s_l = static_cast<int16_t>(std::clamp(left * 32767.0f, -32768.0f, 32767.0f));
+            int16_t s_r = static_cast<int16_t>(std::clamp(right * 32767.0f, -32768.0f, 32767.0f));
+            if (ch == 1) {
+                out[0] = static_cast<int16_t>((static_cast<int32_t>(s_l) + static_cast<int32_t>(s_r)) / 2);
+            } else {
+                out[0] = s_l;
+                out[1] = s_r;
+                for (uint32_t c = 2; c < ch; ++c) out[c] = 0;
+            }
+        } else if (fmt.sample_type == AudioSampleType::Int24Packed) {
+            int32_t s_l = static_cast<int32_t>(std::clamp(left * 8388607.0f, -8388608.0f, 8388607.0f));
+            int32_t s_r = static_cast<int32_t>(std::clamp(right * 8388607.0f, -8388608.0f, 8388607.0f));
+            if (ch == 1) {
+                int32_t mono = (s_l + s_r) / 2;
+                uint32_t u = static_cast<uint32_t>(mono);
+                frame_dest[0] = static_cast<uint8_t>(u & 0xFF);
+                frame_dest[1] = static_cast<uint8_t>((u >> 8) & 0xFF);
+                frame_dest[2] = static_cast<uint8_t>((u >> 16) & 0xFF);
+            } else {
+                uint32_t ul = static_cast<uint32_t>(s_l);
+                frame_dest[0] = static_cast<uint8_t>(ul & 0xFF);
+                frame_dest[1] = static_cast<uint8_t>((ul >> 8) & 0xFF);
+                frame_dest[2] = static_cast<uint8_t>((ul >> 16) & 0xFF);
+
+                uint32_t ur = static_cast<uint32_t>(s_r);
+                frame_dest[3] = static_cast<uint8_t>(ur & 0xFF);
+                frame_dest[4] = static_cast<uint8_t>((ur >> 8) & 0xFF);
+                frame_dest[5] = static_cast<uint8_t>((ur >> 16) & 0xFF);
+
+                for (uint32_t c = 2; c < ch; ++c) {
+                    frame_dest[c * 3 + 0] = 0;
+                    frame_dest[c * 3 + 1] = 0;
+                    frame_dest[c * 3 + 2] = 0;
+                }
+            }
+        } else if (fmt.sample_type == AudioSampleType::Int24In32) {
+            int32_t* out = reinterpret_cast<int32_t*>(frame_dest);
+            int32_t s_l = static_cast<int32_t>(std::clamp(left * 8388607.0f, -8388608.0f, 8388607.0f)) << 8;
+            int32_t s_r = static_cast<int32_t>(std::clamp(right * 8388607.0f, -8388608.0f, 8388607.0f)) << 8;
+            if (ch == 1) {
+                out[0] = static_cast<int32_t>((static_cast<int64_t>(s_l) + static_cast<int64_t>(s_r)) / 2);
+            } else {
+                out[0] = s_l;
+                out[1] = s_r;
+                for (uint32_t c = 2; c < ch; ++c) out[c] = 0;
+            }
+        } else if (fmt.sample_type == AudioSampleType::Int32) {
+            int32_t* out = reinterpret_cast<int32_t*>(frame_dest);
+            int32_t s_l = static_cast<int32_t>(std::clamp(left * 2147483647.0f, -2147483648.0f, 2147483647.0f));
+            int32_t s_r = static_cast<int32_t>(std::clamp(right * 2147483647.0f, -2147483648.0f, 2147483647.0f));
+            if (ch == 1) {
+                out[0] = static_cast<int32_t>((static_cast<int64_t>(s_l) + static_cast<int64_t>(s_r)) / 2);
+            } else {
+                out[0] = s_l;
+                out[1] = s_r;
+                for (uint32_t c = 2; c < ch; ++c) out[c] = 0;
+            }
+        }
+    }
+    return total_bytes;
 }
 
 WasapiOutput::WasapiOutput(AudioRingBuffer& ring) noexcept : m_ring(ring) {
     m_wake_event = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    m_switch_ack_event = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
 }
 
 WasapiOutput::~WasapiOutput() {
     Stop();
-    {
-        std::lock_guard lock(m_active_mutex);
-        CleanTarget(m_active);
-    }
     if (m_wake_event) {
         ::CloseHandle(m_wake_event);
         m_wake_event = nullptr;
+    }
+    if (m_switch_ack_event) {
+        ::CloseHandle(m_switch_ack_event);
+        m_switch_ack_event = nullptr;
     }
 }
 
@@ -281,11 +426,14 @@ bool WasapiOutput::TryInitAudioClient3(IMMDevice* device, AudioTargetResources& 
         &default_period, &fundamental_period, &min_period, &max_period);
 
     const WAVEFORMATEX* chosen_fmt = reinterpret_cast<const WAVEFORMATEX*>(&req);
-    if (SUCCEEDED(hr)) {
-        target.format = ParseFormat(chosen_fmt);
+    if (SUCCEEDED(hr) && ValidateAudioFormat(chosen_fmt, target.format)) {
+        // req accepted
     } else {
         chosen_fmt = mix_fmt;
-        target.format = ParseFormat(mix_fmt);
+        if (!ValidateAudioFormat(mix_fmt, target.format)) {
+            ::CoTaskMemFree(mix_fmt);
+            return false;
+        }
         hr = client3->GetSharedModeEnginePeriod(
             mix_fmt,
             &default_period, &fundamental_period, &min_period, &max_period);
@@ -324,9 +472,6 @@ bool WasapiOutput::TryInitAudioClient3(IMMDevice* device, AudioTargetResources& 
 
     target.client = client3;
     target.buffer_ms = static_cast<double>(target.buffer_frames) / target.format.sample_rate * 1000.0;
-    if (target.format.needs_resample) {
-        m_resampler.Init(48000, 2, target.format.sample_rate, 2);
-    }
     GlobalMetrics().audio_engine_period_ms.store(1000.0 * period / target.format.sample_rate, std::memory_order_relaxed);
     REFERENCE_TIME stream_latency = 0;
     if (SUCCEEDED(client3->GetStreamLatency(&stream_latency)))
@@ -346,7 +491,10 @@ bool WasapiOutput::FallbackInitAudioClient(IMMDevice* device, AudioTargetResourc
     hr = client->GetMixFormat(&mix_fmt);
     if (FAILED(hr) || !mix_fmt) return false;
 
-    target.format = ParseFormat(mix_fmt);
+    if (!ValidateAudioFormat(mix_fmt, target.format)) {
+        ::CoTaskMemFree(mix_fmt);
+        return false;
+    }
 
     hr = client->Initialize(
         AUDCLNT_SHAREMODE_SHARED,
@@ -366,9 +514,6 @@ bool WasapiOutput::FallbackInitAudioClient(IMMDevice* device, AudioTargetResourc
 
     target.client = client;
     target.buffer_ms = static_cast<double>(target.buffer_frames) / target.format.sample_rate * 1000.0;
-    if (target.format.needs_resample) {
-        m_resampler.Init(48000, 2, target.format.sample_rate, 2);
-    }
     GlobalMetrics().audio_engine_period_ms.store(0.0, std::memory_order_relaxed);
     REFERENCE_TIME stream_latency = 0;
     if (SUCCEEDED(client->GetStreamLatency(&stream_latency)))
@@ -450,10 +595,18 @@ bool WasapiOutput::SwitchEndpoint(const std::wstring& device_id) noexcept {
 
     AudioTargetResources candidate;
     bool ok = PrepareTarget(device_id, candidate);
-    bool fallback = false;
-    if (!ok && !device_id.empty()) {
-        ok = PrepareTarget(L"", candidate);
-        if (ok) fallback = true;
+
+    if (!ok) {
+        CleanTarget(candidate);
+        bool currently_active = false;
+        {
+            std::lock_guard act_lock(m_active_mutex);
+            currently_active = (m_active.client != nullptr);
+        }
+        m_state.store(currently_active ? AudioEndpointState::Playing : AudioEndpointState::WaitingForDevice,
+                      std::memory_order_release);
+        DUWN_LOG_WARN("WasapiOutput", "SwitchEndpoint failed: candidate unavailable; preserving current endpoint");
+        return false;
     }
 
     if (gen != m_request_generation.load(std::memory_order_acquire)) {
@@ -461,38 +614,46 @@ bool WasapiOutput::SwitchEndpoint(const std::wstring& device_id) noexcept {
         return true;
     }
 
-    if (ok) {
-        candidate.is_fallback = fallback;
-        m_switching.store(true, std::memory_order_release);
-        if (m_wake_event) ::SetEvent(m_wake_event);
-        {
-            std::lock_guard act_lock(m_active_mutex);
-            if (m_active.ready_event) ::SetEvent(m_active.ready_event);
-            if (m_running.load(std::memory_order_acquire) && candidate.client) {
-                candidate.client->Start();
-            }
-            AudioTargetResources old = std::move(m_active);
-            m_active = std::move(candidate);
-            m_is_fallback.store(m_active.is_fallback, std::memory_order_release);
-            m_buffer_ms.store(m_active.buffer_ms, std::memory_order_relaxed);
-            CleanTarget(old);
-        }
-        m_switching.store(false, std::memory_order_release);
-        m_state.store(AudioEndpointState::Playing, std::memory_order_release);
-        DUWN_LOG_INFOF("WasapiOutput", "Endpoint switched: {}Hz, {} ch, buffer {:.1f}ms, endpoint={} (fallback={})",
-            m_active.format.sample_rate, m_active.format.channels, m_active.buffer_ms,
-            ToUtf8(m_active.resolved_name), fallback);
-        return true;
-    } else {
+    candidate.is_fallback = false;
+
+    if (!m_running.load(std::memory_order_acquire)) {
         std::lock_guard act_lock(m_active_mutex);
-        if (m_active.client) {
-            m_state.store(AudioEndpointState::Playing, std::memory_order_release);
+        CleanTarget(m_active);
+        m_active = std::move(candidate);
+        m_is_fallback.store(m_active.is_fallback, std::memory_order_release);
+        m_buffer_ms.store(m_active.buffer_ms, std::memory_order_relaxed);
+        if (m_active.format.needs_resample) {
+            m_resampler.Init(48000, 2, m_active.format.sample_rate, 2);
         } else {
-            m_state.store(AudioEndpointState::WaitingForDevice, std::memory_order_release);
+            m_resampler.Reset();
         }
-        DUWN_LOG_WARN("WasapiOutput", "SwitchEndpoint failed: candidate unavailable; preserving current endpoint");
-        return false;
+        m_resampled_fifo.clear();
+        m_state.store(AudioEndpointState::Idle, std::memory_order_release);
+        return true;
     }
+
+    {
+        std::lock_guard pend_lock(m_pending_mutex);
+        if (m_has_pending_target) {
+            CleanTarget(m_pending_target);
+        }
+        m_pending_target = std::move(candidate);
+        m_has_pending_target = true;
+    }
+
+    ::ResetEvent(m_switch_ack_event);
+    if (m_wake_event) ::SetEvent(m_wake_event);
+
+    DWORD wr = ::WaitForSingleObject(m_switch_ack_event, 500);
+    if (wr != WAIT_OBJECT_0) {
+        DUWN_LOG_WARNF("WasapiOutput", "SwitchEndpoint: worker switch ack timed out ({})", wr);
+    }
+
+    m_state.store(AudioEndpointState::Playing, std::memory_order_release);
+    DUWN_LOG_INFOF("WasapiOutput", "Endpoint switched: {}Hz, {} ch, buffer {:.1f}ms, endpoint={} (fallback={})",
+        m_active.format.sample_rate, m_active.format.channels, m_active.buffer_ms,
+        ToUtf8(m_active.resolved_name), m_active.is_fallback);
+    return true;
 }
 
 void WasapiOutput::OnDeviceEnvironmentChanged() noexcept {
@@ -571,12 +732,17 @@ bool WasapiOutput::PerformRecovery(std::stop_token stop) noexcept {
         }
         {
             std::lock_guard lock(m_active_mutex);
-            AudioTargetResources old = std::move(m_active);
+            CleanTarget(m_active);
             m_active = std::move(candidate);
-            m_is_fallback.store(m_active.is_fallback, std::memory_order_release);
-            m_buffer_ms.store(m_active.buffer_ms, std::memory_order_relaxed);
-            CleanTarget(old);
         }
+        m_is_fallback.store(m_active.is_fallback, std::memory_order_release);
+        m_buffer_ms.store(m_active.buffer_ms, std::memory_order_relaxed);
+        if (m_active.format.needs_resample) {
+            m_resampler.Init(48000, 2, m_active.format.sample_rate, 2);
+        } else {
+            m_resampler.Reset();
+        }
+        m_resampled_fifo.clear();
         m_state.store(AudioEndpointState::Playing, std::memory_order_release);
         DUWN_LOG_INFOF("WasapiOutput", "Recovery successful: playing on {} (fallback={})",
             ToUtf8(m_active.resolved_name), fallback);
@@ -600,82 +766,45 @@ float WasapiOutput::NextGain() noexcept {
     return m_current_gain;
 }
 
-void WasapiOutput::WriteFramesToTarget(BYTE* pcm_dest, uint32_t frames_to_write, uint32_t pulled_frames) noexcept {
-    if (!pcm_dest || frames_to_write == 0) return;
-
-    const auto& fmt = m_active.format;
-    const uint32_t ch = fmt.channels;
-
-    if (pulled_frames == 0) {
-        size_t bytes = static_cast<size_t>(frames_to_write) * ch * (fmt.bits_per_sample / 8);
-        std::memset(pcm_dest, 0, bytes);
-        return;
-    }
-
-    if (!fmt.needs_resample && ch == 2 && fmt.sample_type == AudioSampleType::Float32) {
-        float* dst = reinterpret_cast<float*>(pcm_dest);
-        for (uint32_t f = 0; f < frames_to_write; ++f) {
-            float g = NextGain();
-            dst[f * 2 + 0] *= g;
-            dst[f * 2 + 1] *= g;
-        }
-        return;
-    }
-
-    const float* src_stereo = fmt.needs_resample ? m_resample_out.data() : m_resample_in.data();
-    size_t available_src_frames = (fmt.needs_resample ? m_resample_out.size() : m_resample_in.size()) / 2;
-
-    for (uint32_t f = 0; f < frames_to_write; ++f) {
-        float g = NextGain();
-        float left = 0.0f, right = 0.0f;
-        if (f < available_src_frames) {
-            left  = src_stereo[f * 2 + 0] * g;
-            right = src_stereo[f * 2 + 1] * g;
-        }
-
-        if (fmt.sample_type == AudioSampleType::Float32) {
-            float* out = reinterpret_cast<float*>(pcm_dest) + f * ch;
-            if (ch == 1) {
-                out[0] = (left + right) * 0.5f;
-            } else {
-                out[0] = left;
-                out[1] = right;
-                for (uint32_t c = 2; c < ch; ++c) out[c] = 0.0f;
-            }
-        } else if (fmt.sample_type == AudioSampleType::Int16) {
-            int16_t* out = reinterpret_cast<int16_t*>(pcm_dest) + f * ch;
-            int16_t s_l = static_cast<int16_t>(std::clamp(left * 32767.0f, -32768.0f, 32767.0f));
-            int16_t s_r = static_cast<int16_t>(std::clamp(right * 32767.0f, -32768.0f, 32767.0f));
-            if (ch == 1) {
-                out[0] = static_cast<int16_t>((s_l + s_r) / 2);
-            } else {
-                out[0] = s_l;
-                out[1] = s_r;
-                for (uint32_t c = 2; c < ch; ++c) out[c] = 0;
-            }
-        } else if (fmt.sample_type == AudioSampleType::Int24In32) {
-            int32_t* out = reinterpret_cast<int32_t*>(pcm_dest) + f * ch;
-            int32_t s_l = static_cast<int32_t>(std::clamp(left * 8388607.0f, -8388608.0f, 8388607.0f)) << 8;
-            int32_t s_r = static_cast<int32_t>(std::clamp(right * 8388607.0f, -8388608.0f, 8388607.0f)) << 8;
-            if (ch == 1) {
-                out[0] = static_cast<int16_t>((s_l + s_r) / 2);
-            } else {
-                out[0] = s_l;
-                out[1] = s_r;
-                for (uint32_t c = 2; c < ch; ++c) out[c] = 0;
-            }
-        }
-    }
-}
-
 void WasapiOutput::RenderLoop(std::stop_token stop) noexcept {
     DWORD mmcss_task = 0;
     HANDLE mmcss = ::AvSetMmThreadCharacteristicsW(L"Audio", &mmcss_task);
     bool stream_primed = false;
 
     while (!stop.stop_requested() && m_running.load(std::memory_order_acquire)) {
-        if (m_switching.load(std::memory_order_acquire)) {
-            ::WaitForSingleObject(m_wake_event, 5);
+        // Check for pending endpoint switch committed by worker thread
+        AudioTargetResources new_target;
+        bool do_switch = false;
+        {
+            std::lock_guard pend_lock(m_pending_mutex);
+            if (m_has_pending_target) {
+                new_target = std::move(m_pending_target);
+                m_has_pending_target = false;
+                do_switch = true;
+            }
+        }
+        if (do_switch) {
+            if (m_active.client) {
+                m_active.client->Stop();
+            }
+            CleanTarget(m_active);
+            {
+                std::lock_guard act_lock(m_active_mutex);
+                m_active = std::move(new_target);
+            }
+            m_is_fallback.store(m_active.is_fallback, std::memory_order_release);
+            m_buffer_ms.store(m_active.buffer_ms, std::memory_order_relaxed);
+            if (m_active.format.needs_resample) {
+                m_resampler.Init(48000, 2, m_active.format.sample_rate, 2);
+            } else {
+                m_resampler.Reset();
+            }
+            m_resampled_fifo.clear();
+            if (m_running.load(std::memory_order_acquire) && m_active.client) {
+                m_active.client->Start();
+            }
+            m_state.store(AudioEndpointState::Playing, std::memory_order_release);
+            if (m_switch_ack_event) ::SetEvent(m_switch_ack_event);
             continue;
         }
 
@@ -707,10 +836,8 @@ void WasapiOutput::RenderLoop(std::stop_token stop) noexcept {
 
         DWORD wr = ::WaitForMultipleObjects(2, wait_handles, FALSE, 50);
         if (wr == WAIT_TIMEOUT) continue;
-        if (wr == WAIT_OBJECT_0 + 1) continue;
+        if (wr == WAIT_OBJECT_0 + 1) continue; // Woken by wake_event
         if (wr != WAIT_OBJECT_0) continue;
-
-        if (m_switching.load(std::memory_order_acquire)) continue;
 
         std::unique_lock lock(m_active_mutex);
         if (!m_active.client || !m_active.render_client) {
@@ -781,25 +908,70 @@ void WasapiOutput::RenderLoop(std::stop_token stop) noexcept {
         }
 
         const uint32_t available_before_pull = m_ring.Available();
+        const size_t bytes_per_sample = m_active.format.bits_per_sample / 8;
+        const size_t bytes_per_frame = static_cast<size_t>(m_active.format.channels) * bytes_per_sample;
+        const size_t dest_buffer_bytes = static_cast<size_t>(frames_to_write) * bytes_per_frame;
+
         uint32_t pulled = 0;
         if (stream_primed) {
-            if (!m_active.format.needs_resample && m_active.format.channels == 2 && m_active.format.sample_type == AudioSampleType::Float32) {
-                pulled = m_ring.Pull(reinterpret_cast<float*>(data), frames_to_write);
+            if (!m_active.format.needs_resample) {
+                // Passthrough sample rate (48kHz): pull EXACTLY frames_to_write
+                m_staging_in.resize(frames_to_write * 2);
+                uint32_t actual_pull = m_ring.Pull(m_staging_in.data(), frames_to_write);
+                pulled = actual_pull;
+                WriteAudioFrames(data, dest_buffer_bytes, frames_to_write,
+                                 m_staging_in.data(), pulled, m_active.format,
+                                 [this] { return NextGain(); });
             } else {
-                double ratio = 48000.0 / sample_rate;
-                uint32_t ring_frames = static_cast<uint32_t>(frames_to_write * ratio) + 8;
-                m_resample_in.resize(ring_frames * 2);
-                uint32_t actual_pull = m_ring.Pull(m_resample_in.data(), ring_frames);
-                if (m_active.format.needs_resample) {
-                    m_resampler.Convert(m_resample_in.data(), actual_pull, m_resample_out);
+                // Resampling path: retain unused samples in persistent FIFO
+                size_t avail_fifo = m_resampled_fifo.size() / 2;
+                if (avail_fifo < frames_to_write) {
+                    uint32_t deficit = frames_to_write - static_cast<uint32_t>(avail_fifo);
+                    double ratio = 48000.0 / static_cast<double>(sample_rate);
+                    uint32_t needed_in = static_cast<uint32_t>(std::ceil(deficit * ratio)) + 4;
+                    uint32_t ring_avail = m_ring.Available();
+                    uint32_t to_pull = std::min(needed_in, ring_avail);
+                    if (to_pull > 0) {
+                        m_staging_in.resize(to_pull * 2);
+                        uint32_t actual_pull = m_ring.Pull(m_staging_in.data(), to_pull);
+                        m_converted_chunk.clear();
+                        m_resampler.Convert(m_staging_in.data(), actual_pull, m_converted_chunk);
+                        m_resampled_fifo.insert(m_resampled_fifo.end(),
+                                                m_converted_chunk.begin(), m_converted_chunk.end());
+                    }
                 }
-                pulled = actual_pull > 0 ? frames_to_write : 0;
+
+                avail_fifo = m_resampled_fifo.size() / 2;
+                uint32_t frames_from_fifo = std::min(frames_to_write, static_cast<uint32_t>(avail_fifo));
+                pulled = frames_from_fifo;
+
+                WriteAudioFrames(data, dest_buffer_bytes, frames_to_write,
+                                 m_resampled_fifo.data(), frames_from_fifo, m_active.format,
+                                 [this] { return NextGain(); });
+
+                if (frames_from_fifo > 0) {
+                    if (frames_from_fifo == avail_fifo) {
+                        m_resampled_fifo.clear();
+                    } else {
+                        m_resampled_fifo.erase(m_resampled_fifo.begin(),
+                                               m_resampled_fifo.begin() + frames_from_fifo * 2);
+                    }
+                }
+
+                // Cap FIFO to 4800 frames (~100ms)
+                constexpr size_t kMaxFifoFrames = 4800;
+                if (m_resampled_fifo.size() / 2 > kMaxFifoFrames) {
+                    size_t excess = (m_resampled_fifo.size() / 2) - kMaxFifoFrames;
+                    m_resampled_fifo.erase(m_resampled_fifo.begin(),
+                                           m_resampled_fifo.begin() + excess * 2);
+                }
             }
         } else {
             pulled = 0;
+            WriteAudioFrames(data, dest_buffer_bytes, frames_to_write,
+                             nullptr, 0, m_active.format,
+                             [this] { return NextGain(); });
         }
-
-        WriteFramesToTarget(data, frames_to_write, pulled);
 
         uint32_t silence_frames = frames_to_write - pulled;
 
@@ -837,7 +1009,8 @@ void WasapiOutput::RenderLoop(std::stop_token stop) noexcept {
             }
         }
 
-        hr = m_active.render_client->ReleaseBuffer(frames_to_write, 0);
+        DWORD rel_flags = (pulled == 0) ? AUDCLNT_BUFFERFLAGS_SILENT : 0;
+        hr = m_active.render_client->ReleaseBuffer(frames_to_write, rel_flags);
         lock.unlock();
 
         if (hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_RESOURCES_INVALIDATED) {
