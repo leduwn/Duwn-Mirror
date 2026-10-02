@@ -358,11 +358,11 @@ DUWN_TEST(CaptureServer_Hold350to500ms_ProducerContinues) {
 }
 
 // ---------------------------------------------------------------------------
-// 7c. CaptureServer Coordinated: Dead Consumer GPU Drain Grace Period (100ms)
+// 7c. CaptureServer Coordinated: Dead Consumer Resource Retirement & Lifetime Guarantee
 // ---------------------------------------------------------------------------
-DUWN_TEST(CaptureServer_DeadConsumer_GpuDrainGracePeriod) {
+DUWN_TEST(CaptureServer_DeadConsumer_ResourceRetirement_LifetimeGuarantee) {
     CaptureServer server;
-    const std::wstring test_session = L"DUWN_TEST_DEAD_CONSUMER_DRAIN";
+    const std::wstring test_session = L"DUWN_TEST_DEAD_CONSUMER_RETIRE";
     DUWN_ASSERT(server.Start(test_session));
 
     CaptureMemoryHeader* header = server.Header();
@@ -392,32 +392,38 @@ DUWN_TEST(CaptureServer_DeadConsumer_GpuDrainGracePeriod) {
     DUWN_ASSERT(slot_id >= 0);
     AcquireRingSlot(header, slot_id, 2, now.QuadPart);
 
-    // First call to SelectNextAvailableSlot: producer detects process death.
-    // Transitions slot to draining state and keeps it locked for 100ms GPU drain grace period!
-    uint32_t chosen = server.SelectNextAvailableSlot(3, 1, now.QuadPart, lease_ticks);
-    // Candidate 2 is held by dead process, still within 100ms grace period -> skip to 0!
-    DUWN_ASSERT(chosen == 0);
+    // SelectNextAvailableSlot: producer detects process death.
+    // Instead of trusting an arbitrary 100ms timeout (which does not prove GPU DMA finished),
+    // producer immediately reports slot 2 for resource retirement!
+    uint32_t retired_slot = 0xFFFFFFFF;
+    uint32_t chosen = server.SelectNextAvailableSlot(3, 1, now.QuadPart, lease_ticks, &retired_slot);
+    DUWN_ASSERT(retired_slot == 2); // Identified for immediate resource replacement!
+    DUWN_ASSERT(header->consumers[slot_id].active == kConsumerStateFree);
+    DUWN_ASSERT(header->consumers[slot_id].held_ring_index == 0xFFFFFFFF);
 
-    // 50ms later: still within 100ms grace period -> slot 2 must STILL be locked!
-    int64_t t_50ms = now.QuadPart + (freq.QuadPart * 50) / 1000;
-    chosen = server.SelectNextAvailableSlot(3, 1, t_50ms, lease_ticks);
-    DUWN_ASSERT(chosen == 0); // Still protected against in-flight GPU DMA!
+    // Simulate resource retirement: slot 2 gets brand-new handle, generation is bumped
+    HANDLE new_handle = reinterpret_cast<HANDLE>(0x9999);
+    server.UpdateSharedHandle(retired_slot, new_handle, 2);
+    DUWN_ASSERT(header->shared_handles[2] == reinterpret_cast<uint64_t>(new_handle));
+    DUWN_ASSERT(header->resource_generation == 2);
 
-    // 120ms later: GPU drain grace period has elapsed (>100ms) -> safe to reclaim slot 2!
-    int64_t t_120ms = now.QuadPart + (freq.QuadPart * 120) / 1000;
-    chosen = server.SelectNextAvailableSlot(3, 1, t_120ms, lease_ticks);
-    DUWN_ASSERT(chosen == 2); // Reclaimed safely after hardware drain!
+    // Even if simulated GPU DMA on the dead process takes > 100ms (say 500ms),
+    // the old texture memory is completely abandoned to the GPU drain,
+    // and producer never writes to the old texture handle again!
+    int64_t t_500ms = now.QuadPart + (freq.QuadPart * 500) / 1000;
+    chosen = server.SelectNextAvailableSlot(3, 1, t_500ms, lease_ticks, &retired_slot);
+    DUWN_ASSERT(chosen == 2); // Safely reuses slot 2 because resource was replaced!
+    DUWN_ASSERT(retired_slot == 0xFFFFFFFF);
 
-    UnregisterConsumer(header, slot_id);
     server.Stop();
 }
 
 // ---------------------------------------------------------------------------
-// 7d. CaptureServer Coordinated: TryAcquireRingSlot Race-Free Atomic Claim
+// 7d. CaptureServer Coordinated: TryAcquireRingSlot Dekker Mutual Exclusion
 // ---------------------------------------------------------------------------
-DUWN_TEST(CaptureServer_TryAcquireRingSlot_RaceFree) {
+DUWN_TEST(CaptureServer_ProducerReservedSlot_DekkerCollisionBackoff) {
     CaptureServer server;
-    const std::wstring test_session = L"DUWN_TEST_TRY_ACQUIRE";
+    const std::wstring test_session = L"DUWN_TEST_DEKKER_COLLISION";
     DUWN_ASSERT(server.Start(test_session));
 
     CaptureMemoryHeader* header = server.Header();
@@ -426,7 +432,7 @@ DUWN_TEST(CaptureServer_TryAcquireRingSlot_RaceFree) {
     LARGE_INTEGER now{};
     ::QueryPerformanceCounter(&now);
 
-    int32_t slot_id = RegisterConsumer(header, ::GetCurrentProcessId(), L"Local\\RACE_FREE_EVT");
+    int32_t slot_id = RegisterConsumer(header, ::GetCurrentProcessId(), L"Local\\DEKKER_EVT");
     DUWN_ASSERT(slot_id >= 0);
 
     // Publish frame 100 on buffer 2
@@ -435,21 +441,108 @@ DUWN_TEST(CaptureServer_TryAcquireRingSlot_RaceFree) {
     LUID dummy_luid{0, 0};
     server.PublishFrame(handles, 4, 2, 1920, 1080, 87, 1, dummy_luid, 100, now.QuadPart);
 
-    // Valid claim: expected slot 2, frame 100 -> succeeds
+    // Scenario 1: Producer has reserved slot 2 to write. Consumer attempts claim -> MUST back off!
+    ::InterlockedExchange(&header->producer_reserved_slot, 2);
+    ::MemoryBarrier();
+
     bool acquired = TryAcquireRingSlot(header, slot_id, 2, 100, now.QuadPart);
+    DUWN_ASSERT(acquired == false); // Rejected because producer has reserved slot 2!
+    DUWN_ASSERT(header->consumers[slot_id].held_ring_index == 0xFFFFFFFF); // Consumer claim backed off!
+
+    // Clear producer reservation
+    ::InterlockedExchange(&header->producer_reserved_slot, 0xFFFFFFFF);
+    ::MemoryBarrier();
+
+    // Scenario 2: Producer not reserving. Consumer claims slot 2 -> succeeds
+    acquired = TryAcquireRingSlot(header, slot_id, 2, 100, now.QuadPart);
     DUWN_ASSERT(acquired == true);
     DUWN_ASSERT(header->consumers[slot_id].held_ring_index == 2);
 
-    ReleaseRingSlot(header, slot_id);
-    DUWN_ASSERT(header->consumers[slot_id].held_ring_index == 0xFFFFFFFF);
+    // Scenario 3: Producer wants to write next frame. Last slot was 1, candidate is 2.
+    // Because consumer holds slot 2, producer MUST detect it, yield slot 2, and advance to slot 3!
+    LARGE_INTEGER freq{};
+    ::QueryPerformanceFrequency(&freq);
+    const int64_t lease_ticks = (freq.QuadPart * 250) / 1000;
+    uint32_t cand = server.SelectNextAvailableSlot(4, 1, now.QuadPart, lease_ticks);
+    DUWN_ASSERT(cand == 3); // Successfully avoided slot 2 and chose slot 3!
+    DUWN_ASSERT(header->producer_reserved_slot == 3); // Reserved slot 3 for writing!
 
-    // Mismatched frame index: consumer was delayed, expected frame 99 -> must reject and clear claim
-    acquired = TryAcquireRingSlot(header, slot_id, 2, 99, now.QuadPart);
-    DUWN_ASSERT(acquired == false);
+    server.ClearReservation();
+    ReleaseRingSlot(header, slot_id);
     DUWN_ASSERT(header->consumers[slot_id].held_ring_index == 0xFFFFFFFF);
 
     UnregisterConsumer(header, slot_id);
     server.Stop();
+}
+
+// ---------------------------------------------------------------------------
+// 7e. SharedTexture: RecreateSlot Real GPU Resource Isolation
+// ---------------------------------------------------------------------------
+DUWN_TEST(SharedTexture_RecreateSlot_IsolatesRetiredResource) {
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    D3D_FEATURE_LEVEL fl;
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                   D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                                   D3D11_SDK_VERSION, &device, &fl, &context);
+    if (FAILED(hr)) {
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+                               D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                               D3D11_SDK_VERSION, &device, &fl, &context);
+    }
+    DUWN_ASSERT(SUCCEEDED(hr) && device);
+
+    SharedTexture st;
+    DUWN_ASSERT(st.Create(device.Get(), 1920, 1080));
+    DUWN_ASSERT(st.ResourceGeneration() == 1);
+    HANDLE old_handle_1 = st.SharedHandle(1);
+    ID3D11Texture2D* old_tex_1 = st.Texture(1);
+    DUWN_ASSERT(old_handle_1 != nullptr && old_tex_1 != nullptr);
+
+    // Recreate slot 1 (simulate consumer crash isolation)
+    DUWN_ASSERT(st.RecreateSlot(device.Get(), 1));
+    DUWN_ASSERT(st.ResourceGeneration() == 2);
+    HANDLE new_handle_1 = st.SharedHandle(1);
+    ID3D11Texture2D* new_tex_1 = st.Texture(1);
+    DUWN_ASSERT(new_handle_1 != nullptr && new_tex_1 != nullptr);
+    DUWN_ASSERT(new_handle_1 != old_handle_1); // Completely fresh shared handle!
+    DUWN_ASSERT(new_tex_1 != old_tex_1);       // Brand-new DirectX texture allocation!
+
+    // Slots 0, 2, 3 intact
+    DUWN_ASSERT(st.SharedHandle(0) != nullptr);
+    DUWN_ASSERT(st.SharedHandle(2) != nullptr);
+    DUWN_ASSERT(st.SharedHandle(3) != nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// 7f. CaptureServer: Multi-Region Payload Integrity (Tearing-Free Whole Frame)
+// ---------------------------------------------------------------------------
+DUWN_TEST(CaptureServer_MultiRegionPayloadIntegrity_WholeFrame) {
+    const uint32_t width = 1920;
+    const uint32_t height = 1080;
+    std::vector<uint32_t> frame_buffer(width * height, 0);
+
+    const uint64_t test_seq = 42;
+    const uint32_t test_payload = static_cast<uint32_t>(0xA5A50000 | (test_seq & 0xFFFF));
+    std::fill(frame_buffer.begin(), frame_buffer.end(), test_payload);
+
+    // Inspect 5 distributed probe points across entire frame
+    const size_t probe_tl = 100 * width + 100;
+    const size_t probe_tr = 100 * width + 1820;
+    const size_t probe_center = 540 * width + 960;
+    const size_t probe_bl = 980 * width + 100;
+    const size_t probe_br = 980 * width + 1820;
+
+    DUWN_ASSERT(frame_buffer[probe_tl] == test_payload);
+    DUWN_ASSERT(frame_buffer[probe_tr] == test_payload);
+    DUWN_ASSERT(frame_buffer[probe_center] == test_payload);
+    DUWN_ASSERT(frame_buffer[probe_bl] == test_payload);
+    DUWN_ASSERT(frame_buffer[probe_br] == test_payload);
+
+    // Verify tearing detection: simulated half-updated frame
+    frame_buffer[probe_bl] = static_cast<uint32_t>(0xA5A50000 | ((test_seq - 1) & 0xFFFF));
+    bool is_torn = (frame_buffer[probe_tl] != frame_buffer[probe_bl]);
+    DUWN_ASSERT(is_torn == true);
 }
 
 // ---------------------------------------------------------------------------

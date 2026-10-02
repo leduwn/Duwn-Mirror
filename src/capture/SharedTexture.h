@@ -25,7 +25,11 @@ public:
     bool Create(ID3D11Device* device, uint32_t width, uint32_t height) noexcept;
     void Release() noexcept;
 
-    // Flush GPU command queue to guarantee command submission before publishing
+    // Recreate a single ring slot texture with a fresh DXGI resource and shared handle,
+    // safely isolating and retiring prior resource after consumer crash
+    bool RecreateSlot(ID3D11Device* device, uint32_t ring_index) noexcept;
+
+    // Flush GPU command queue and verify current frame copy completion before publishing
     bool SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index) noexcept;
 
     // Verify GPU has completed prior operations on candidate slot before reusing

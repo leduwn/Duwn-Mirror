@@ -4335,9 +4335,19 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
             ::QueryPerformanceFrequency(&freq);
             const int64_t lease_ticks = (freq.QuadPart * 250) / 1000; // 250ms lease timeout
             const int64_t now_ticks = clock::MonotonicClock::NowQpcTicks();
+            uint32_t retired_slot = 0xFFFFFFFF;
             uint32_t cand_slot = m_capture_server->SelectNextAvailableSlot(
                 m_shared_texture->RingSize(), m_last_export_ring_idx.load(std::memory_order_relaxed),
-                now_ticks, lease_ticks);
+                now_ticks, lease_ticks, &retired_slot);
+            if (retired_slot != 0xFFFFFFFF && retired_slot < m_shared_texture->RingSize()) {
+                if (m_shared_texture->RecreateSlot(m_d3d->Device(), retired_slot)) {
+                    m_capture_server->UpdateSharedHandle(retired_slot,
+                        m_shared_texture->SharedHandle(retired_slot),
+                        m_shared_texture->ResourceGeneration());
+                    DUWN_LOG_INFOF("Capture", "Recreated retired texture slot {} after dead consumer (new gen={})",
+                                   retired_slot, m_shared_texture->ResourceGeneration());
+                }
+            }
             if (cand_slot != 0xFFFFFFFF) {
                 active_ring_idx = cand_slot;
                 m_shared_texture->EnsureSlotReady(m_d3d->Context(), active_ring_idx);
@@ -4386,9 +4396,16 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
                         new_idx,
                         frame.present_end_qpc);
                 } else {
+                    m_capture_server->ClearReservation();
                     DUWN_LOG_WARNF("Capture", "SyncGpu timed out on ring slot {}: skipping publish to avoid corrupt frame", active_ring_idx);
                 }
+            } else {
+                m_capture_server->ClearReservation();
             }
+        }
+    } else {
+        if (m_capture_server) {
+            m_capture_server->ClearReservation();
         }
     }
 

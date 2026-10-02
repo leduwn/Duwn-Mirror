@@ -44,6 +44,7 @@ bool CaptureServer::Start(std::wstring_view session_name) noexcept {
     std::memcpy(m_header->magic, "DUWNCAP", 8);
     m_header->protocol_version = 2;
     m_header->generation = m_generation;
+    m_header->producer_reserved_slot = 0xFFFFFFFF;
     const char kDefName[] = "Duwn Mirror Video";
     std::memcpy(m_header->source_name, kDefName, sizeof(kDefName));
 
@@ -120,6 +121,10 @@ bool CaptureServer::PublishFrame(const HANDLE* ring_handles, uint32_t ring_count
     ::MemoryBarrier();
     ::InterlockedIncrement(&m_header->seqlock);
 
+    // Frame published: release producer write reservation
+    ::InterlockedExchange(&m_header->producer_reserved_slot, 0xFFFFFFFF);
+    ::MemoryBarrier();
+
     // Broadcast wake up to private registered consumers (auto-reset events)
     for (uint32_t i = 0; i < 4; ++i) {
         if (m_header->consumers[i].active == kConsumerStateActive && m_header->consumers[i].event_name[0] != L'\0') {
@@ -151,77 +156,91 @@ bool CaptureServer::PublishFrame(const HANDLE* ring_handles, uint32_t ring_count
 }
 
 uint32_t CaptureServer::SelectNextAvailableSlot(uint32_t ring_count, uint32_t last_slot,
-                                                int64_t now_qpc, int64_t lease_ticks) noexcept {
+                                                int64_t now_qpc, int64_t lease_ticks,
+                                                uint32_t* out_retired_slot) noexcept {
+    if (out_retired_slot) *out_retired_slot = 0xFFFFFFFF;
     if (!m_header || ring_count == 0) return 0;
     if (ring_count == 1) return 0;
 
-    LARGE_INTEGER freq{};
-    ::QueryPerformanceFrequency(&freq);
-    const int64_t drain_ticks = (freq.QuadPart * 100) / 1000; // 100ms GPU drain grace period
+    // Detect crashed/dead consumers and retire their held texture resources immediately
+    for (uint32_t c = 0; c < 4; ++c) {
+        uint32_t state = m_header->consumers[c].active;
+        if (state == kConsumerStateFree) continue;
+
+        HANDLE hProc = ::OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, m_header->consumers[c].process_id);
+        bool process_dead = false;
+        if (!hProc) {
+            process_dead = true;
+        } else {
+            DWORD exit_code = 0;
+            if (::GetExitCodeProcess(hProc, &exit_code) && exit_code != STILL_ACTIVE) {
+                process_dead = true;
+            }
+            ::CloseHandle(hProc);
+        }
+
+        if (process_dead) {
+            uint32_t dead_held = m_header->consumers[c].held_ring_index;
+            ::InterlockedExchange(&m_header->consumers[c].held_ring_index, 0xFFFFFFFF);
+            ::MemoryBarrier();
+            m_header->consumers[c].active = kConsumerStateFree;
+            ::MemoryBarrier();
+
+            if (dead_held < ring_count && out_retired_slot && *out_retired_slot == 0xFFFFFFFF) {
+                *out_retired_slot = dead_held;
+            }
+        }
+    }
 
     // Check candidate slots in sequence starting from (last_slot + 1)
     for (uint32_t step = 1; step <= ring_count; ++step) {
         uint32_t cand = (last_slot + step) % ring_count;
+
+        // Dekker reservation: announce intent to write to slot 'cand'
+        ::InterlockedExchange(&m_header->producer_reserved_slot, cand);
+        ::MemoryBarrier();
+
         bool locked = false;
-
         for (uint32_t c = 0; c < 4; ++c) {
-            uint32_t state = m_header->consumers[c].active;
-            if (state == kConsumerStateFree) continue;
-
-            if (m_header->consumers[c].held_ring_index == cand) {
-                // If already marked as draining (dead process awaiting GPU command drain)
-                if (state == kConsumerStateDraining) {
-                    if (now_qpc - m_header->consumers[c].acquire_qpc >= drain_ticks) {
-                        // GPU DMA drain complete; reclaim slot
-                        m_header->consumers[c].held_ring_index = 0xFFFFFFFF;
-                        m_header->consumers[c].active = kConsumerStateFree;
-                        ::MemoryBarrier();
-                        continue;
-                    }
-                    // Still draining: keep locked
+            if (m_header->consumers[c].active == kConsumerStateActive) {
+                if (m_header->consumers[c].held_ring_index == cand) {
                     locked = true;
                     break;
                 }
-
-                // Consumer was active: check if process died
-                HANDLE hProc = ::OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, m_header->consumers[c].process_id);
-                bool process_dead = false;
-                if (!hProc) {
-                    process_dead = true;
-                } else {
-                    DWORD exit_code = 0;
-                    if (::GetExitCodeProcess(hProc, &exit_code) && exit_code != STILL_ACTIVE) {
-                        process_dead = true;
-                    }
-                    ::CloseHandle(hProc);
-                }
-
-                if (process_dead) {
-                    // Mark as draining; start drain timer from now_qpc
-                    m_header->consumers[c].active = kConsumerStateDraining;
-                    m_header->consumers[c].acquire_qpc = now_qpc;
-                    ::MemoryBarrier();
-                    locked = true;
-                    break;
-                }
-
-                // Consumer process is ALIVE:
-                // Do NOT reclaim slot even if lease expired (>250ms).
-                // Consumer may be delayed by scheduler or still executing Map/readback.
-                // Keep slot locked to prevent corrupting consumer texture!
-                locked = true;
-                break;
             }
         }
 
-        if (!locked) {
-            return cand;
+        if (locked) {
+            // Contested by active consumer: clear reservation and check next slot
+            ::InterlockedExchange(&m_header->producer_reserved_slot, 0xFFFFFFFF);
+            continue;
         }
+
+        // Slot cand successfully reserved for Producer write!
+        return cand;
     }
 
-    // All slots locked by slow consumers: drop export frame without stalling producer
+    // All slots locked by slow consumers: clear reservation and drop export frame
+    ::InterlockedExchange(&m_header->producer_reserved_slot, 0xFFFFFFFF);
     ::InterlockedIncrement(&m_header->dropped_exports);
     return 0xFFFFFFFF;
+}
+
+void CaptureServer::ClearReservation() noexcept {
+    if (m_header) {
+        ::InterlockedExchange(&m_header->producer_reserved_slot, 0xFFFFFFFF);
+        ::MemoryBarrier();
+    }
+}
+
+void CaptureServer::UpdateSharedHandle(uint32_t ring_index, HANDLE new_handle, uint32_t new_resource_gen) noexcept {
+    if (!m_header || ring_index >= 4) return;
+    ::InterlockedIncrement(&m_header->seqlock);
+    ::MemoryBarrier();
+    m_header->shared_handles[ring_index] = reinterpret_cast<uint64_t>(new_handle);
+    m_header->resource_generation = new_resource_gen;
+    ::MemoryBarrier();
+    ::InterlockedIncrement(&m_header->seqlock);
 }
 
 bool CaptureServer::PublishFrame(HANDLE shared_handle, uint32_t width, uint32_t height,

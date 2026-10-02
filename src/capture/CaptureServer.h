@@ -49,8 +49,8 @@ struct CaptureMemoryHeader {
     int64_t  timestamp_qpc;         // QPC ticks
 
     // Seqlock protection: odd = write in progress, even = stable
-    volatile uint32_t seqlock;      // Incremented at start and end of publish
-    uint32_t          reserved_seq; // Padding / alignment
+    volatile uint32_t seqlock;                // Incremented at start and end of publish
+    volatile uint32_t producer_reserved_slot; // 0xFFFFFFFF if idle, else 0..3 currently reserved for writing
 
     char     source_name[64];       // "Duwn Mirror Video"
 
@@ -126,44 +126,64 @@ inline int32_t RegisterConsumer(CaptureMemoryHeader* header, uint32_t pid, const
 
 inline void UnregisterConsumer(CaptureMemoryHeader* header, int32_t slot_idx) noexcept {
     if (!header || slot_idx < 0 || slot_idx >= 4) return;
-    header->consumers[slot_idx].held_ring_index = 0xFFFFFFFF;
+    ::InterlockedExchange(&header->consumers[slot_idx].held_ring_index, 0xFFFFFFFF);
+    ::MemoryBarrier();
     header->consumers[slot_idx].active = kConsumerStateFree;
     ::MemoryBarrier();
 }
 
-// Atomically claim slot and verify producer has not advanced to overwrite it
+// Atomically claim slot and verify producer has not reserved or advanced to overwrite it
 inline bool TryAcquireRingSlot(CaptureMemoryHeader* header, int32_t slot_idx,
                                uint32_t expected_ring_idx, uint64_t expected_frame_idx,
                                int64_t now_qpc) noexcept {
     if (!header || slot_idx < 0 || slot_idx >= 4) return false;
+
+    // 1. Atomic claim of ring slot lease
     header->consumers[slot_idx].acquire_qpc = now_qpc;
-    header->consumers[slot_idx].held_ring_index = expected_ring_idx;
+    ::InterlockedExchange(&header->consumers[slot_idx].held_ring_index, expected_ring_idx);
     ::MemoryBarrier();
 
+    // 2. Collision check: Did producer reserve this slot to write?
+    if (header->producer_reserved_slot == expected_ring_idx) {
+        // Producer is actively preparing or writing to this slot: back off immediately
+        ::InterlockedExchange(&header->consumers[slot_idx].held_ring_index, 0xFFFFFFFF);
+        ::MemoryBarrier();
+        return false;
+    }
+
+    // 3. Consistency and freshness check: Did producer advance sequence?
     CaptureMemoryHeader snap{};
     if (!ReadHeaderConsistent(header, snap)) {
-        header->consumers[slot_idx].held_ring_index = 0xFFFFFFFF;
+        ::InterlockedExchange(&header->consumers[slot_idx].held_ring_index, 0xFFFFFFFF);
         ::MemoryBarrier();
         return false;
     }
     if (snap.frame_index != expected_frame_idx || snap.active_buffer_index != expected_ring_idx) {
-        header->consumers[slot_idx].held_ring_index = 0xFFFFFFFF;
+        ::InterlockedExchange(&header->consumers[slot_idx].held_ring_index, 0xFFFFFFFF);
         ::MemoryBarrier();
         return false;
     }
+
+    // 4. Secondary check: Did producer reserve slot while reading snapshot?
+    if (header->producer_reserved_slot == expected_ring_idx) {
+        ::InterlockedExchange(&header->consumers[slot_idx].held_ring_index, 0xFFFFFFFF);
+        ::MemoryBarrier();
+        return false;
+    }
+
     return true;
 }
 
 inline void AcquireRingSlot(CaptureMemoryHeader* header, int32_t slot_idx, uint32_t ring_idx, int64_t now_qpc) noexcept {
     if (!header || slot_idx < 0 || slot_idx >= 4) return;
     header->consumers[slot_idx].acquire_qpc = now_qpc;
-    header->consumers[slot_idx].held_ring_index = ring_idx;
+    ::InterlockedExchange(&header->consumers[slot_idx].held_ring_index, ring_idx);
     ::MemoryBarrier();
 }
 
 inline void ReleaseRingSlot(CaptureMemoryHeader* header, int32_t slot_idx) noexcept {
     if (!header || slot_idx < 0 || slot_idx >= 4) return;
-    header->consumers[slot_idx].held_ring_index = 0xFFFFFFFF;
+    ::InterlockedExchange(&header->consumers[slot_idx].held_ring_index, 0xFFFFFFFF);
     ::MemoryBarrier();
 }
 
@@ -189,8 +209,16 @@ public:
                       uint32_t dxgi_format, uint64_t frame_index, int64_t timestamp_qpc) noexcept;
 
     // Select next ring slot that is not locked by any active consumer. Returns 0xFFFFFFFF if all locked.
+    // If a dead consumer process held a slot, reports it via out_retired_slot for resource retirement.
     uint32_t SelectNextAvailableSlot(uint32_t ring_count, uint32_t last_slot,
-                                     int64_t now_qpc, int64_t lease_ticks) noexcept;
+                                     int64_t now_qpc, int64_t lease_ticks,
+                                     uint32_t* out_retired_slot = nullptr) noexcept;
+
+    // Clear producer slot reservation in case of dropped frame or timeout
+    void ClearReservation() noexcept;
+
+    // Update shared handle for a retired slot and bump resource generation under seqlock
+    void UpdateSharedHandle(uint32_t ring_index, HANDLE new_handle, uint32_t new_resource_gen) noexcept;
 
     bool IsRunning() const noexcept { return m_running; }
     std::wstring SessionName() const noexcept { return m_session_name; }
