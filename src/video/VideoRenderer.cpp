@@ -668,7 +668,15 @@ PresentResult VideoRenderer::Present(VideoFrame& frame, bool skip_wait) noexcept
         if (SUCCEEDED(hr) && m_export_target) {
             ComPtr<ID3D11Texture2D> bb;
             if (SUCCEEDED(m_swap_chain->GetBuffer(0, IID_PPV_ARGS(&bb))) && bb) {
-                m_device.Context()->CopyResource(m_export_target, bb.Get());
+                D3D11_TEXTURE2D_DESC bb_desc{}, exp_desc{};
+                bb->GetDesc(&bb_desc);
+                m_export_target->GetDesc(&exp_desc);
+                if (bb_desc.Width == exp_desc.Width && bb_desc.Height == exp_desc.Height) {
+                    m_device.Context()->CopyResource(m_export_target, bb.Get());
+                    if (m_export_query) {
+                        m_device.Context()->End(m_export_query);
+                    }
+                }
             }
         }
     }

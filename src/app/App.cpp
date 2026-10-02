@@ -260,7 +260,7 @@ App::~App() {
 
 
 
-int App::Run(bool test_motion) noexcept {
+int App::Run(bool test_motion, bool verify_capture) noexcept {
 
     sync::MasterClock::Initialize();
 
@@ -273,6 +273,8 @@ int App::Run(bool test_motion) noexcept {
     common::CpuCapabilities::Get().LogCapabilities();
 
     m_net_env = network::NetworkEnvironmentInfo::Probe();
+
+    m_verify_capture = verify_capture;
 
     duwn::telemetry::ConnectionTimeline::Get().Record(
         duwn::telemetry::ConnectionMilestone::C1_NetworkDiscoveryComplete,
@@ -4319,6 +4321,7 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
 
     // Prepare pre-present export target so VideoProcessorBlt writes directly to shared ring buffer before Present() flips
     uint32_t active_ring_idx = 0;
+    bool export_slot_valid = false;
     if (m_shared_texture && m_capture_server && m_capture_server->IsRunning() && m_d3d && m_renderer) {
         uint32_t sw = m_renderer->SwapWidth();
         uint32_t sh = m_renderer->SwapHeight();
@@ -4326,8 +4329,21 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
             if (m_shared_texture->Width() != sw || m_shared_texture->Height() != sh) {
                 m_shared_texture->Create(m_d3d->Device(), sw, sh);
             }
-            active_ring_idx = static_cast<uint32_t>(m_export_frame_index.load(std::memory_order_relaxed) % m_shared_texture->RingSize());
-            m_renderer->SetExportTarget(m_shared_texture->Texture(active_ring_idx));
+            LARGE_INTEGER freq{};
+            ::QueryPerformanceFrequency(&freq);
+            const int64_t lease_ticks = (freq.QuadPart * 250) / 1000; // 250ms lease timeout
+            const int64_t now_ticks = clock::MonotonicClock::NowQpcTicks();
+            uint32_t cand_slot = m_capture_server->SelectNextAvailableSlot(
+                m_shared_texture->RingSize(), m_last_export_ring_idx.load(std::memory_order_relaxed),
+                now_ticks, lease_ticks);
+            if (cand_slot != 0xFFFFFFFF) {
+                active_ring_idx = cand_slot;
+                m_last_export_ring_idx.store(active_ring_idx, std::memory_order_relaxed);
+                m_renderer->SetExportTarget(m_shared_texture->Texture(active_ring_idx), m_shared_texture->Query(active_ring_idx));
+                export_slot_valid = true;
+            } else {
+                m_renderer->SetExportTarget(nullptr);
+            }
         }
     }
 
@@ -4348,23 +4364,27 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
             decoder_output_qpc, output_select_qpc, output_present_qpc);
 
         // Export clean frame to SharedTexture & CaptureServer
-        if (m_shared_texture && m_capture_server && m_capture_server->IsRunning() && m_d3d) {
+        if (export_slot_valid && m_shared_texture && m_capture_server && m_capture_server->IsRunning() && m_d3d) {
             uint32_t sw = m_renderer->SwapWidth();
             uint32_t sh = m_renderer->SwapHeight();
-            if (sw > 0 && sh > 0 && m_shared_texture->Texture(active_ring_idx)) {
-                m_shared_texture->SyncGpu(m_d3d->Context(), active_ring_idx);
-                const uint64_t new_idx = frame.sequence_number > 0 ? frame.sequence_number : (++m_export_frame_index);
-                m_export_frame_index.store(new_idx, std::memory_order_relaxed);
-                m_capture_server->PublishFrame(
-                    m_shared_texture->SharedHandles(),
-                    m_shared_texture->RingSize(),
-                    active_ring_idx,
-                    sw, sh,
-                    DXGI_FORMAT_B8G8R8A8_UNORM,
-                    m_shared_texture->ResourceGeneration(),
-                    m_shared_texture->AdapterLuid(),
-                    new_idx,
-                    frame.present_end_qpc);
+            if (sw > 0 && sh > 0 && m_shared_texture->Texture(active_ring_idx) &&
+                m_shared_texture->Width() == sw && m_shared_texture->Height() == sh) {
+                if (m_shared_texture->SyncGpu(m_d3d->Context(), active_ring_idx)) {
+                    const uint64_t new_idx = frame.sequence_number > 0 ? frame.sequence_number : (++m_export_frame_index);
+                    m_export_frame_index.store(new_idx, std::memory_order_relaxed);
+                    m_capture_server->PublishFrame(
+                        m_shared_texture->SharedHandles(),
+                        m_shared_texture->RingSize(),
+                        active_ring_idx,
+                        sw, sh,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        m_shared_texture->ResourceGeneration(),
+                        m_shared_texture->AdapterLuid(),
+                        new_idx,
+                        frame.present_end_qpc);
+                } else {
+                    DUWN_LOG_WARNF("Capture", "SyncGpu timed out on ring slot {}: skipping publish to avoid corrupt frame", active_ring_idx);
+                }
             }
         }
     }
@@ -4524,14 +4544,16 @@ void App::TestMotionLoop(std::stop_token st) noexcept {
         uint8_t* scan_row = nv12.data() + (scan_y * kW);
         std::fill(scan_row, scan_row + kW, static_cast<uint8_t>(235));
 
-        // Encode 64-bit frame sequence into row 0 barcode (64 bits x 8 pixels = 512 pixels)
+        // Encode 64-bit frame sequence into row 0 barcode only in explicit verification mode (--verify-capture)
         // High contrast (235=White, 16=Black) survives color matrix and scaling without bit error
-        uint8_t* row0 = nv12.data();
-        for (int bit = 0; bit < 64; ++bit) {
-            const bool bit_val = ((seq >> bit) & 1ULL) != 0;
-            const uint8_t lum = bit_val ? 235 : 16;
-            for (int px = 0; px < 8; ++px) {
-                row0[bit * 8 + px] = lum;
+        if (m_verify_capture) {
+            uint8_t* row0 = nv12.data();
+            for (int bit = 0; bit < 64; ++bit) {
+                const bool bit_val = ((seq >> bit) & 1ULL) != 0;
+                const uint8_t lum = bit_val ? 235 : 16;
+                for (int px = 0; px < 8; ++px) {
+                    row0[bit * 8 + px] = lum;
+                }
             }
         }
 

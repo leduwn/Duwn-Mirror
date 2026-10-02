@@ -86,7 +86,6 @@ bool SharedTexture::Create(ID3D11Device* device, uint32_t width, uint32_t height
 bool SharedTexture::SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index) noexcept {
     if (!context || ring_index >= kSharedTextureRingSize || !m_queries[ring_index]) return false;
 
-    context->End(m_queries[ring_index].Get());
     context->Flush();
 
     // Query completion check with timeout to avoid freezing producer pipeline
@@ -98,7 +97,7 @@ bool SharedTexture::SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index) n
     while (context->GetData(m_queries[ring_index].Get(), nullptr, 0, 0) == S_FALSE) {
         ::QueryPerformanceCounter(&now);
         if (now.QuadPart - start.QuadPart > max_ticks) {
-            break; // Timeout, continue safely
+            return false; // Timeout: GPU hardware copy did not complete within 5ms!
         }
         YieldProcessor();
     }

@@ -38,7 +38,10 @@ public:
     uint32_t SwapWidth() const noexcept override { return m_width; }
     uint32_t SwapHeight() const noexcept override { return m_height; }
     bool HandleDeviceRemoved() noexcept override { return false; }
-    void SetExportTarget(ID3D11Texture2D* dst) noexcept override { m_export_target = dst; }
+    void SetExportTarget(ID3D11Texture2D* dst, ID3D11Query* query = nullptr) noexcept override {
+        m_export_target = dst;
+        m_export_query = query;
+    }
     void CopyBackBufferTo(ID3D11Texture2D* dst) noexcept override;
     void PresentBlack() noexcept override;
 
@@ -72,6 +75,7 @@ private:
     std::atomic<int> m_quality{0}, m_range{0}, m_matrix{0};
     std::array<std::atomic<int>, 5> m_controls{};
     ID3D11Texture2D* m_export_target{nullptr};
+    ID3D11Query*     m_export_query{nullptr};
 };
 
 } // namespace duwn::video

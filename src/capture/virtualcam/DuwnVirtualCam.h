@@ -127,6 +127,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Device>        m_d3d_device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_d3d_context;
     Microsoft::WRL::ComPtr<ID3D11Texture2D>     m_staging_tex;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D>     m_cached_shared_tex[4];
+    HANDLE                                      m_cached_handles[4]{nullptr, nullptr, nullptr, nullptr};
     uint32_t                                    m_staging_w{0};
     uint32_t                                    m_staging_h{0};
     uint32_t                                    m_cached_gen{0};

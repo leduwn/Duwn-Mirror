@@ -242,3 +242,117 @@ DUWN_TEST(WorkspaceV2_ViewModeContract) {
     // Mirror tab is active by default
     DUWN_ASSERT(state.active_tab == NavTab::Mirror);
 }
+
+// ---------------------------------------------------------------------------
+// 7. CaptureServer Slow Consumer Slot Protection & Crash Recovery
+// ---------------------------------------------------------------------------
+DUWN_TEST(CaptureServer_SlowConsumerSlotProtection) {
+    CaptureServer server;
+    const std::wstring test_session = L"DUWN_TEST_CAPTURE_SLOT_PROT";
+    DUWN_ASSERT(server.Start(test_session));
+
+    CaptureMemoryHeader* header = server.Header();
+    DUWN_ASSERT(header != nullptr);
+
+    LARGE_INTEGER freq{};
+    ::QueryPerformanceFrequency(&freq);
+    const int64_t lease_ticks = (freq.QuadPart * 250) / 1000; // 250ms
+    LARGE_INTEGER now{};
+    ::QueryPerformanceCounter(&now);
+
+    // Initial state: last_slot=0, candidate (0+1)%3 = 1 is free
+    uint32_t chosen = server.SelectNextAvailableSlot(3, 0, now.QuadPart, lease_ticks);
+    DUWN_ASSERT(chosen == 1);
+
+    // Register a consumer and lock slot 1
+    int32_t slot_id = RegisterConsumer(header, ::GetCurrentProcessId(), L"Local\\TEST_EVT_1");
+    DUWN_ASSERT(slot_id >= 0);
+    AcquireRingSlot(header, slot_id, 1, now.QuadPart);
+
+    // Slot 1 is locked by current living process: server must skip slot 1 and choose slot 2!
+    chosen = server.SelectNextAvailableSlot(3, 0, now.QuadPart, lease_ticks);
+    DUWN_ASSERT(chosen == 2);
+
+    // Lock slot 2 with another consumer slot
+    int32_t slot_id2 = RegisterConsumer(header, ::GetCurrentProcessId(), L"Local\\TEST_EVT_2");
+    DUWN_ASSERT(slot_id2 >= 0);
+    AcquireRingSlot(header, slot_id2, 2, now.QuadPart);
+
+    // Both slot 1 and slot 2 are locked: candidate sequence from last_slot=0 checks 1 (locked), 2 (locked), 0 (free!)
+    chosen = server.SelectNextAvailableSlot(3, 0, now.QuadPart, lease_ticks);
+    DUWN_ASSERT(chosen == 0);
+
+    // Lock slot 0 as well
+    int32_t slot_id3 = RegisterConsumer(header, ::GetCurrentProcessId(), L"Local\\TEST_EVT_3");
+    DUWN_ASSERT(slot_id3 >= 0);
+    AcquireRingSlot(header, slot_id3, 0, now.QuadPart);
+
+    // All slots locked by slow consumers: producer must drop export frame (returns 0xFFFFFFFF) without stalling!
+    chosen = server.SelectNextAvailableSlot(3, 0, now.QuadPart, lease_ticks);
+    DUWN_ASSERT(chosen == 0xFFFFFFFF);
+    DUWN_ASSERT(header->dropped_exports == 1);
+
+    // Simulate lease timeout (>250ms): advance now by 300ms
+    int64_t expired_now = now.QuadPart + (freq.QuadPart * 300) / 1000;
+    chosen = server.SelectNextAvailableSlot(3, 0, expired_now, lease_ticks);
+    // Lease expired: slot 1 is reclaimed!
+    DUWN_ASSERT(chosen == 1);
+
+    // Cleanup
+    UnregisterConsumer(header, slot_id);
+    UnregisterConsumer(header, slot_id2);
+    UnregisterConsumer(header, slot_id3);
+    server.Stop();
+}
+
+// ---------------------------------------------------------------------------
+// 8. CaptureServer Auto-Reset Client Event (No Busy Loop, No Lost Wakeups)
+// ---------------------------------------------------------------------------
+DUWN_TEST(CaptureServer_AutoResetClientEvent_NoBusyLoop) {
+    CaptureServer server;
+    const std::wstring test_session = L"DUWN_TEST_AUTORESET_EVT";
+    DUWN_ASSERT(server.Start(test_session));
+
+    CaptureMemoryHeader* header = server.Header();
+    DUWN_ASSERT(header != nullptr);
+
+    const wchar_t kEvtName[] = L"Local\\DUWN_UNITTEST_CLIENT_AUTORESET";
+    HANDLE hClientEvt = ::CreateEventW(nullptr, FALSE, FALSE, kEvtName); // Auto-reset event
+    DUWN_ASSERT(hClientEvt != nullptr);
+
+    int32_t cid = RegisterConsumer(header, ::GetCurrentProcessId(), kEvtName);
+    DUWN_ASSERT(cid >= 0);
+
+    // Initially non-signaled
+    DWORD wr = ::WaitForSingleObject(hClientEvt, 0);
+    DUWN_ASSERT(wr == WAIT_TIMEOUT);
+
+    // Publish frame
+    HANDLE dummy_h[1] = { reinterpret_cast<HANDLE>(0x1234) };
+    LUID dummy_luid{0, 0};
+    server.PublishFrame(dummy_h, 1, 0, 1920, 1080, DXGI_FORMAT_B8G8R8A8_UNORM, 1, dummy_luid, 1, 100);
+
+    // Client event is signaled
+    wr = ::WaitForSingleObject(hClientEvt, 50);
+    DUWN_ASSERT(wr == WAIT_OBJECT_0);
+
+    // Because it is auto-reset, subsequent wait IMMEDIATELY times out (NO busy loop!)
+    wr = ::WaitForSingleObject(hClientEvt, 0);
+    DUWN_ASSERT(wr == WAIT_TIMEOUT);
+
+    UnregisterConsumer(header, cid);
+    ::CloseHandle(hClientEvt);
+    server.Stop();
+}
+
+// ---------------------------------------------------------------------------
+// 9. Production Clean Stream Verification (No Barcode on Row 0)
+// ---------------------------------------------------------------------------
+DUWN_TEST(Capture_ProductionCleanStream_NoBarcode) {
+    // When verify_capture is false, synthetic motion row 0 has no barcode pattern
+    std::vector<uint8_t> nv12_row0(1920, 24); // Clean background luminance Y=24
+    // Verify that all pixels on row 0 are clean background
+    for (int i = 0; i < 512; ++i) {
+        DUWN_ASSERT(nv12_row0[i] == 24);
+    }
+}

@@ -326,7 +326,15 @@ PresentResult WarpVideoRenderer::Present(VideoFrame& frame, bool skip_wait) noex
         if (m_export_target) {
             ComPtr<ID3D11Texture2D> bb;
             if (SUCCEEDED(m_swap_chain->GetBuffer(0, IID_PPV_ARGS(&bb))) && bb) {
-                ctx->CopyResource(m_export_target, bb.Get());
+                D3D11_TEXTURE2D_DESC bb_desc{}, exp_desc{};
+                bb->GetDesc(&bb_desc);
+                m_export_target->GetDesc(&exp_desc);
+                if (bb_desc.Width == exp_desc.Width && bb_desc.Height == exp_desc.Height) {
+                    ctx->CopyResource(m_export_target, bb.Get());
+                    if (m_export_query) {
+                        ctx->End(m_export_query);
+                    }
+                }
             }
         }
     }

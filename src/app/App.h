@@ -59,7 +59,7 @@ public:
     App(const App&) = delete;
     App& operator=(const App&) = delete;
 
-    int Run(bool test_motion = false) noexcept;
+    int Run(bool test_motion = false, bool verify_capture = false) noexcept;
 
     bool WaitForMediaReadiness(uint32_t timeout_ms = 2500) const noexcept;
     bool IsVideoMinReady() const noexcept {
@@ -152,6 +152,8 @@ private:
     std::unique_ptr<capture::CaptureServer> m_capture_server;
     std::unique_ptr<capture::SharedTexture> m_shared_texture;
     std::atomic<uint64_t>                  m_export_frame_index{0};
+    std::atomic<uint32_t>                  m_last_export_ring_idx{0};
+    bool                                   m_verify_capture{false};
     std::unique_ptr<audio::AudioRingBuffer> m_audio_ring;
     std::unique_ptr<audio::AudioEngine>   m_audio_engine;
     std::unique_ptr<audio::WasapiOutput>  m_wasapi;

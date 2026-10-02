@@ -601,19 +601,28 @@ void DuwnOutputPin::WorkerLoop() {
     }
 
     HANDLE h_map = nullptr;
-    const CaptureMemoryHeader* header = nullptr;
+    CaptureMemoryHeader* header = nullptr;
     HANDLE h_event = nullptr;
+    HANDLE h_my_event = nullptr;
+    int32_t my_consumer_slot = -1;
     uint64_t last_frame_index = 0;
     uint64_t local_seq = 0;
     REFERENCE_TIME rt_frame_duration = 166666; // ~16.6ms (60 FPS)
     REFERENCE_TIME rt_current = 0;
+    auto last_producer_activity = std::chrono::steady_clock::now();
 
     while (m_streaming.load(std::memory_order_relaxed)) {
         if (!h_map) {
-            h_map = ::OpenFileMappingW(FILE_MAP_READ, FALSE, L"Local\\DUWN_MIRROR_CAPTURE");
+            h_map = ::OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, L"Local\\DUWN_MIRROR_CAPTURE");
             if (h_map) {
-                header = static_cast<const CaptureMemoryHeader*>(
-                    ::MapViewOfFile(h_map, FILE_MAP_READ, 0, 0, sizeof(CaptureMemoryHeader)));
+                header = static_cast<CaptureMemoryHeader*>(
+                    ::MapViewOfFile(h_map, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(CaptureMemoryHeader)));
+                if (header) {
+                    wchar_t my_evt_name[64];
+                    swprintf_s(my_evt_name, L"Local\\DUWN_FRAME_EVENT_%u", ::GetCurrentProcessId());
+                    h_my_event = ::CreateEventW(nullptr, FALSE, FALSE, my_evt_name);
+                    my_consumer_slot = RegisterConsumer(header, ::GetCurrentProcessId(), my_evt_name);
+                }
             }
         }
         if (!h_event) {
@@ -632,6 +641,7 @@ void DuwnOutputPin::WorkerLoop() {
                         (snapshot.frame_index > last_frame_index || last_frame_index == 0)) {
                         last_frame_index = snapshot.frame_index;
                         got_clean_frame = true;
+                        last_producer_activity = std::chrono::steady_clock::now();
                     }
                 }
             }
@@ -659,13 +669,29 @@ void DuwnOutputPin::WorkerLoop() {
                     m_staging_tex.Reset();
                     m_staging_w = 0;
                     m_staging_h = 0;
+                    for (int k = 0; k < 4; ++k) {
+                        m_cached_shared_tex[k].Reset();
+                        m_cached_handles[k] = nullptr;
+                    }
                     m_cached_gen = snapshot.generation;
                     m_cached_res_gen = snapshot.resource_generation;
                 }
 
-                Microsoft::WRL::ComPtr<ID3D11Texture2D> shared_tex;
-                hr = m_d3d_device->OpenSharedResource(shared_h, IID_PPV_ARGS(&shared_tex));
-                if (SUCCEEDED(hr) && shared_tex) {
+                // Acquire ring slot lease during texture access
+                LARGE_INTEGER qpc_now{};
+                ::QueryPerformanceCounter(&qpc_now);
+                if (header && my_consumer_slot >= 0) {
+                    AcquireRingSlot(header, my_consumer_slot, active_idx, qpc_now.QuadPart);
+                }
+
+                uint32_t slot = active_idx < 4 ? active_idx : 0;
+                if (!m_cached_shared_tex[slot] || m_cached_handles[slot] != shared_h) {
+                    m_cached_shared_tex[slot].Reset();
+                    m_d3d_device->OpenSharedResource(shared_h, IID_PPV_ARGS(&m_cached_shared_tex[slot]));
+                    m_cached_handles[slot] = shared_h;
+                }
+                auto& shared_tex = m_cached_shared_tex[slot];
+                if (shared_tex) {
                     if (!m_staging_tex || m_staging_w != snapshot.width || m_staging_h != snapshot.height) {
                         D3D11_TEXTURE2D_DESC sdesc{};
                         shared_tex->GetDesc(&sdesc);
@@ -687,15 +713,31 @@ void DuwnOutputPin::WorkerLoop() {
                             const uint8_t* src_px = static_cast<const uint8_t*>(mapped.pData);
                             uint32_t copy_lines = (snapshot.height < out_h) ? snapshot.height : out_h;
                             uint32_t copy_pitch = (snapshot.width * 4 < row_pitch) ? snapshot.width * 4 : row_pitch;
+                            // DirectShow VIDEOINFOHEADER has biHeight > 0 (bottom-up DIB)
+                            // Invert scanlines so top row in DirectX texture is top row visually
                             for (uint32_t y = 0; y < copy_lines; ++y) {
-                                CopyMemory(pBuffer + (y * row_pitch), src_px + (y * mapped.RowPitch), copy_pitch);
+                                uint32_t dst_y = copy_lines - 1 - y;
+                                CopyMemory(pBuffer + (dst_y * row_pitch), src_px + (y * mapped.RowPitch), copy_pitch);
                             }
                             m_d3d_context->Unmap(m_staging_tex.Get(), 0);
                         }
                     }
                 }
+
+                // Release ring slot lease immediately after copy
+                if (header && my_consumer_slot >= 0) {
+                    ReleaseRingSlot(header, my_consumer_slot);
+                }
             } else {
-                RenderDefaultPattern(pBuffer, out_w, out_h, row_pitch, ++local_seq);
+                auto time_since_active = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - last_producer_activity).count();
+                if (time_since_active > 500 || last_frame_index == 0) {
+                    RenderDefaultPattern(pBuffer, out_w, out_h, row_pitch, ++local_seq);
+                } else {
+                    pSample->Release();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
             }
 
             pSample->SetActualDataLength(out_w * out_h * 4);
@@ -712,10 +754,15 @@ void DuwnOutputPin::WorkerLoop() {
         }
 
         pSample->Release();
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        if (!got_clean_frame) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
     }
 
     if (header) {
+        if (my_consumer_slot >= 0) {
+            UnregisterConsumer(header, my_consumer_slot);
+        }
         ::UnmapViewOfFile(header);
     }
     if (h_map) {
@@ -723,6 +770,9 @@ void DuwnOutputPin::WorkerLoop() {
     }
     if (h_event) {
         ::CloseHandle(h_event);
+    }
+    if (h_my_event) {
+        ::CloseHandle(h_my_event);
     }
 }
 

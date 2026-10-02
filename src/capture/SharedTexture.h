@@ -37,6 +37,10 @@ public:
         return (ring_index < kSharedTextureRingSize) ? m_textures[ring_index].Get() : nullptr;
     }
 
+    ID3D11Query* Query(uint32_t ring_index = 0) const noexcept {
+        return (ring_index < kSharedTextureRingSize) ? m_queries[ring_index].Get() : nullptr;
+    }
+
     uint32_t Width() const noexcept { return m_width; }
     uint32_t Height() const noexcept { return m_height; }
     uint32_t RingSize() const noexcept { return kSharedTextureRingSize; }

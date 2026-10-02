@@ -111,11 +111,76 @@ bool CaptureServer::PublishFrame(const HANDLE* ring_handles, uint32_t ring_count
     ::MemoryBarrier();
     ::InterlockedIncrement(&m_header->seqlock);
 
-    // Broadcast wake up to all waiting consumers
+    // Broadcast wake up to private registered consumers (auto-reset events)
+    for (uint32_t i = 0; i < 4; ++i) {
+        if (m_header->consumers[i].active && m_header->consumers[i].event_name[0] != L'\0') {
+            HANDLE h_client_evt = ::OpenEventW(EVENT_MODIFY_STATE, FALSE, m_header->consumers[i].event_name);
+            if (h_client_evt) {
+                ::SetEvent(h_client_evt);
+                ::CloseHandle(h_client_evt);
+            }
+        }
+    }
+
+    // Broadcast wake up to legacy/unregistered consumers
     if (m_frame_event) {
         ::SetEvent(m_frame_event);
     }
     return true;
+}
+
+uint32_t CaptureServer::SelectNextAvailableSlot(uint32_t ring_count, uint32_t last_slot,
+                                                int64_t now_qpc, int64_t lease_ticks) noexcept {
+    if (!m_header || ring_count == 0) return 0;
+    if (ring_count == 1) return 0;
+
+    // Check candidate slots in sequence starting from (last_slot + 1)
+    for (uint32_t step = 1; step <= ring_count; ++step) {
+        uint32_t cand = (last_slot + step) % ring_count;
+        bool locked = false;
+
+        for (uint32_t c = 0; c < 4; ++c) {
+            if (!m_header->consumers[c].active) continue;
+
+            if (m_header->consumers[c].held_ring_index == cand) {
+                // Check if consumer process died
+                HANDLE hProc = ::OpenProcess(SYNCHRONIZE, FALSE, m_header->consumers[c].process_id);
+                if (!hProc) {
+                    m_header->consumers[c].active = 0;
+                    m_header->consumers[c].held_ring_index = 0xFFFFFFFF;
+                    continue;
+                }
+                DWORD exit_code = 0;
+                if (::GetExitCodeProcess(hProc, &exit_code) && exit_code != STILL_ACTIVE) {
+                    ::CloseHandle(hProc);
+                    m_header->consumers[c].active = 0;
+                    m_header->consumers[c].held_ring_index = 0xFFFFFFFF;
+                    continue;
+                }
+                ::CloseHandle(hProc);
+
+                // Consumer is alive: check lease timeout
+                int64_t elapsed = now_qpc - m_header->consumers[c].acquire_qpc;
+                if (elapsed > lease_ticks) {
+                    // Lease expired (>250ms), reclaim slot
+                    m_header->consumers[c].held_ring_index = 0xFFFFFFFF;
+                    continue;
+                }
+
+                // Slot is actively locked by consumer
+                locked = true;
+                break;
+            }
+        }
+
+        if (!locked) {
+            return cand;
+        }
+    }
+
+    // All slots locked by slow consumers: drop export frame
+    ::InterlockedIncrement(&m_header->dropped_exports);
+    return 0xFFFFFFFF;
 }
 
 bool CaptureServer::PublishFrame(HANDLE shared_handle, uint32_t width, uint32_t height,

@@ -49,6 +49,8 @@ int main(int argc, char* argv[]) {
     int iterations = 30;
     bool reopen_test = false;
     std::string export_bmp;
+    std::string mode = "normal"; // "normal", "slow", "kill-slow"
+    bool verify_no_barcode = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -58,6 +60,10 @@ int main(int argc, char* argv[]) {
             reopen_test = true;
         } else if (arg == "--export-raw-frame" && i + 1 < argc) {
             export_bmp = argv[++i];
+        } else if (arg == "--mode" && i + 1 < argc) {
+            mode = argv[++i];
+        } else if (arg == "--verify-no-barcode") {
+            verify_no_barcode = true;
         }
     }
 
@@ -82,7 +88,7 @@ int main(int argc, char* argv[]) {
     HANDLE h_map = nullptr;
     auto start_wait = std::chrono::steady_clock::now();
     while (!h_map) {
-        h_map = ::OpenFileMappingW(FILE_MAP_READ, FALSE, L"Local\\DUWN_MIRROR_CAPTURE");
+        h_map = ::OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, L"Local\\DUWN_MIRROR_CAPTURE");
         if (!h_map) {
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - start_wait).count();
@@ -94,17 +100,23 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    auto* header = static_cast<const CaptureMemoryHeader*>(
-        ::MapViewOfFile(h_map, FILE_MAP_READ, 0, 0, sizeof(CaptureMemoryHeader)));
+    auto* header = static_cast<CaptureMemoryHeader*>(
+        ::MapViewOfFile(h_map, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(CaptureMemoryHeader)));
     if (!header) {
         std::cerr << "{\"status\":\"FAIL\",\"error\":\"MapViewOfFile failed\"}\n";
         ::CloseHandle(h_map);
         return 3;
     }
 
+    wchar_t my_evt_name[64];
+    swprintf_s(my_evt_name, L"Local\\DUWN_FRAME_EVENT_%u", ::GetCurrentProcessId());
+    HANDLE h_my_event = ::CreateEventW(nullptr, FALSE, FALSE, my_evt_name);
+    int32_t my_slot = duwn::capture::RegisterConsumer(header, ::GetCurrentProcessId(), my_evt_name);
+
     HANDLE h_event = ::OpenEventW(SYNCHRONIZE, FALSE, L"Local\\DUWN_MIRROR_CAPTURE_FRAME_READY");
-    if (!h_event) {
+    if (!h_event && !h_my_event) {
         std::cerr << "{\"status\":\"FAIL\",\"error\":\"OpenEventW failed\"}\n";
+        if (my_slot >= 0) duwn::capture::UnregisterConsumer(header, my_slot);
         ::UnmapViewOfFile(header);
         ::CloseHandle(h_map);
         return 4;
@@ -124,13 +136,16 @@ int main(int argc, char* argv[]) {
         CaptureMemoryHeader snapshot{};
         bool got_new_frame = false;
         auto wait_start = std::chrono::steady_clock::now();
+        HANDLE wait_h = h_event;
 
         while (!got_new_frame) {
-            DWORD wr = ::WaitForSingleObject(h_event, 500);
+            DWORD wr = ::WaitForSingleObject(wait_h, 500);
             if (wr != WAIT_OBJECT_0) {
                 std::cerr << "{\"status\":\"FAIL\",\"error\":\"WaitForSingleObject timed out\"}\n";
+                if (my_slot >= 0) duwn::capture::UnregisterConsumer(header, my_slot);
                 ::UnmapViewOfFile(header);
-                ::CloseHandle(h_event);
+                if (h_event) ::CloseHandle(h_event);
+                if (h_my_event) ::CloseHandle(h_my_event);
                 ::CloseHandle(h_map);
                 return 5;
             }
@@ -170,17 +185,38 @@ int main(int argc, char* argv[]) {
             return 8;
         }
 
+        // Acquire slot lease
+        LARGE_INTEGER qpc_now{};
+        ::QueryPerformanceCounter(&qpc_now);
+        if (my_slot >= 0) {
+            duwn::capture::AcquireRingSlot(header, my_slot, active_idx, qpc_now.QuadPart);
+        }
+
+        if (mode == "kill-slow") {
+            ::Sleep(50);
+            std::cout << "{\"status\":\"CRASH_SIMULATION\",\"slot\":" << active_idx << "}\n";
+            ::ExitProcess(42);
+        }
+
+        if (mode == "slow") {
+            ::Sleep(150); // Intentionally hold slot 150ms (> 9 frames at 60fps)
+        }
+
         ComPtr<ID3D11Texture2D> shared_tex;
         hr = device->OpenSharedResource(shared_h, IID_PPV_ARGS(&shared_tex));
         if (FAILED(hr) || !shared_tex) {
             std::cerr << "{\"status\":\"FAIL\",\"error\":\"OpenSharedResource failed\"}\n";
+            if (my_slot >= 0) duwn::capture::ReleaseRingSlot(header, my_slot);
             return 9;
         }
 
         D3D11_TEXTURE2D_DESC desc{};
         shared_tex->GetDesc(&desc);
         if (desc.Width != captured_w || desc.Height != captured_h || desc.Format != static_cast<DXGI_FORMAT>(captured_fmt)) {
-            std::cerr << "{\"status\":\"FAIL\",\"error\":\"Texture descriptor mismatch\"}\n";
+            std::cerr << "{\"status\":\"FAIL\",\"error\":\"Texture descriptor mismatch: desc "
+                      << desc.Width << "x" << desc.Height << " fmt " << desc.Format
+                      << " vs captured " << captured_w << "x" << captured_h << " fmt " << captured_fmt << "\"}\n";
+            if (my_slot >= 0) duwn::capture::ReleaseRingSlot(header, my_slot);
             return 10;
         }
 
@@ -191,7 +227,10 @@ int main(int argc, char* argv[]) {
             sdesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
             sdesc.MiscFlags = 0;
             hr = device->CreateTexture2D(&sdesc, nullptr, staging_tex.ReleaseAndGetAddressOf());
-            if (FAILED(hr) || !staging_tex) return 11;
+            if (FAILED(hr) || !staging_tex) {
+                if (my_slot >= 0) duwn::capture::ReleaseRingSlot(header, my_slot);
+                return 11;
+            }
             staging_w = captured_w;
             staging_h = captured_h;
         }
@@ -203,7 +242,21 @@ int main(int argc, char* argv[]) {
         if (SUCCEEDED(hr)) {
             const uint8_t* pixels = static_cast<const uint8_t*>(mapped.pData);
 
-            // Verify encoded barcode frame ID at row 0 (center of 8-pixel blocks)
+            // Multi-region integrity verification (TL, TR, Center, BL, BR)
+            const uint32_t* pTL = reinterpret_cast<const uint32_t*>(pixels + 100 * mapped.RowPitch + 100 * 4);
+            const uint32_t* pTR = reinterpret_cast<const uint32_t*>(pixels + 100 * mapped.RowPitch + (captured_w - 100) * 4);
+            const uint32_t* pC  = reinterpret_cast<const uint32_t*>(pixels + (captured_h / 2) * mapped.RowPitch + (captured_w / 2) * 4);
+            const uint32_t* pBL = reinterpret_cast<const uint32_t*>(pixels + (captured_h - 100) * mapped.RowPitch + 100 * 4);
+            const uint32_t* pBR = reinterpret_cast<const uint32_t*>(pixels + (captured_h - 100) * mapped.RowPitch + (captured_w - 100) * 4);
+
+            if (!pTL || !pTR || !pC || !pBL || !pBR) {
+                std::cerr << "{\"status\":\"FAIL\",\"error\":\"Multi-region pointer invalid\"}\n";
+                context->Unmap(staging_tex.Get(), 0);
+                if (my_slot >= 0) duwn::capture::ReleaseRingSlot(header, my_slot);
+                return 12;
+            }
+
+            // Verify barcode or clean production mode
             const uint32_t* row0 = reinterpret_cast<const uint32_t*>(pixels);
             uint64_t decoded_seq = 0;
             for (int bit = 0; bit < 64; ++bit) {
@@ -214,11 +267,19 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            if (decoded_seq != 0 && decoded_seq != snapshot.frame_index) {
+            if (verify_no_barcode) {
+                if (decoded_seq != 0) {
+                    std::cerr << "{\"status\":\"FAIL\",\"error\":\"Barcode detected on row 0 in clean production mode\"}\n";
+                    context->Unmap(staging_tex.Get(), 0);
+                    if (my_slot >= 0) duwn::capture::ReleaseRingSlot(header, my_slot);
+                    return 13;
+                }
+            } else if (decoded_seq != 0 && decoded_seq != snapshot.frame_index) {
                 std::cerr << "{\"status\":\"FAIL\",\"error\":\"Pixel barcode frame ID mismatch: decoded "
                           << decoded_seq << " vs header " << snapshot.frame_index << "\"}\n";
                 context->Unmap(staging_tex.Get(), 0);
-                return 12;
+                if (my_slot >= 0) duwn::capture::ReleaseRingSlot(header, my_slot);
+                return 14;
             }
 
             uint32_t hash = 2166136261u;
@@ -235,7 +296,16 @@ int main(int argc, char* argv[]) {
             }
             context->Unmap(staging_tex.Get(), 0);
         }
+
+        // Release slot lease
+        if (my_slot >= 0) {
+            duwn::capture::ReleaseRingSlot(header, my_slot);
+        }
         verified_frames++;
+    }
+
+    if (my_slot >= 0) {
+        duwn::capture::UnregisterConsumer(header, my_slot);
     }
 
     bool reopen_ok = true;
@@ -250,8 +320,8 @@ int main(int argc, char* argv[]) {
         h_map = ::OpenFileMappingW(FILE_MAP_READ, FALSE, L"Local\\DUWN_MIRROR_CAPTURE");
         if (!h_map) reopen_ok = false;
         else {
-            header = static_cast<const CaptureMemoryHeader*>(
-                ::MapViewOfFile(h_map, FILE_MAP_READ, 0, 0, sizeof(CaptureMemoryHeader)));
+            header = static_cast<CaptureMemoryHeader*>(
+                ::MapViewOfFile(h_map, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(CaptureMemoryHeader)));
             h_event = ::OpenEventW(SYNCHRONIZE, FALSE, L"Local\\DUWN_MIRROR_CAPTURE_FRAME_READY");
             if (!header || !h_event) reopen_ok = false;
             else {
