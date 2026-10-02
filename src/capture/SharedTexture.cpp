@@ -84,20 +84,26 @@ bool SharedTexture::Create(ID3D11Device* device, uint32_t width, uint32_t height
 }
 
 bool SharedTexture::SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index) noexcept {
-    if (!context || ring_index >= kSharedTextureRingSize || !m_queries[ring_index]) return false;
-
+    if (!context || ring_index >= kSharedTextureRingSize) return false;
+    // Flush command buffer to guarantee all blit/copy commands are submitted to GPU hardware
     context->Flush();
+    return true;
+}
 
-    // Query completion check with timeout to avoid freezing producer pipeline
+bool SharedTexture::EnsureSlotReady(ID3D11DeviceContext* context, uint32_t ring_index) noexcept {
+    if (!context || ring_index >= kSharedTextureRingSize || !m_queries[ring_index]) return true;
+
+    // Check if GPU has completed operations from prior cycle on this slot.
+    // On a quad-buffered ring (4 slots ~66ms), this returns S_OK immediately without CPU stall.
     LARGE_INTEGER freq{}, start{}, now{};
     ::QueryPerformanceFrequency(&freq);
     ::QueryPerformanceCounter(&start);
-    const int64_t max_ticks = (freq.QuadPart * 5) / 1000; // 5ms maximum spin wait
+    const int64_t max_ticks = (freq.QuadPart * 3) / 1000;
 
     while (context->GetData(m_queries[ring_index].Get(), nullptr, 0, 0) == S_FALSE) {
         ::QueryPerformanceCounter(&now);
         if (now.QuadPart - start.QuadPart > max_ticks) {
-            return false; // Timeout: GPU hardware copy did not complete within 5ms!
+            return false;
         }
         YieldProcessor();
     }

@@ -292,16 +292,163 @@ DUWN_TEST(CaptureServer_SlowConsumerSlotProtection) {
     DUWN_ASSERT(chosen == 0xFFFFFFFF);
     DUWN_ASSERT(header->dropped_exports == 1);
 
-    // Simulate lease timeout (>250ms): advance now by 300ms
+    // Simulate time advancing past lease timeout (>250ms): advance now by 300ms.
+    // Because consumer process is ALIVE, producer NEVER forcefully overwrites in-use texture!
     int64_t expired_now = now.QuadPart + (freq.QuadPart * 300) / 1000;
     chosen = server.SelectNextAvailableSlot(3, 0, expired_now, lease_ticks);
-    // Lease expired: slot 1 is reclaimed!
-    DUWN_ASSERT(chosen == 1);
+    DUWN_ASSERT(chosen == 0xFFFFFFFF); // Still safely locked, no overwrite hazard!
+    DUWN_ASSERT(header->dropped_exports == 2);
+
+    // Consumer finishes and releases slot 1
+    ReleaseRingSlot(header, slot_id);
+    chosen = server.SelectNextAvailableSlot(3, 0, expired_now, lease_ticks);
+    DUWN_ASSERT(chosen == 1); // Now cleanly available!
 
     // Cleanup
     UnregisterConsumer(header, slot_id);
     UnregisterConsumer(header, slot_id2);
     UnregisterConsumer(header, slot_id3);
+    server.Stop();
+}
+
+// ---------------------------------------------------------------------------
+// 7b. CaptureServer Coordinated: Hold 350-500ms Producer Continues Unblocked
+// ---------------------------------------------------------------------------
+DUWN_TEST(CaptureServer_Hold350to500ms_ProducerContinues) {
+    CaptureServer server;
+    const std::wstring test_session = L"DUWN_TEST_HOLD_500MS";
+    DUWN_ASSERT(server.Start(test_session));
+
+    CaptureMemoryHeader* header = server.Header();
+    DUWN_ASSERT(header != nullptr);
+
+    LARGE_INTEGER freq{};
+    ::QueryPerformanceFrequency(&freq);
+    const int64_t lease_ticks = (freq.QuadPart * 250) / 1000;
+    LARGE_INTEGER now{};
+    ::QueryPerformanceCounter(&now);
+
+    // Consumer acquires slot 1 and holds it for 500ms
+    int32_t slot_id = RegisterConsumer(header, ::GetCurrentProcessId(), L"Local\\HOLD_500MS_EVT");
+    DUWN_ASSERT(slot_id >= 0);
+    AcquireRingSlot(header, slot_id, 1, now.QuadPart);
+
+    // Quad-buffered ring (4 slots: 0, 1, 2, 3)
+    // Producer runs for 60 iterations (simulating 1 full second at 60 FPS)
+    // Slot 1 is held by living consumer the entire time.
+    // Producer MUST rotate across slots 2, 3, 0 and NEVER touch slot 1!
+    uint32_t last_slot = 0;
+    int64_t simulated_now = now.QuadPart;
+    const int64_t frame_interval = freq.QuadPart / 60; // 16.6ms per frame
+
+    for (int frame = 0; frame < 60; ++frame) {
+        simulated_now += frame_interval;
+        uint32_t chosen = server.SelectNextAvailableSlot(4, last_slot, simulated_now, lease_ticks);
+        DUWN_ASSERT(chosen != 1);          // Slot 1 NEVER overwritten while held!
+        DUWN_ASSERT(chosen != 0xFFFFFFFF); // Producer never blocked; remaining 3 slots keep running!
+        last_slot = chosen;
+    }
+
+    DUWN_ASSERT(header->dropped_exports == 0); // Zero frames dropped!
+
+    // Release slot 1
+    ReleaseRingSlot(header, slot_id);
+    UnregisterConsumer(header, slot_id);
+    server.Stop();
+}
+
+// ---------------------------------------------------------------------------
+// 7c. CaptureServer Coordinated: Dead Consumer GPU Drain Grace Period (100ms)
+// ---------------------------------------------------------------------------
+DUWN_TEST(CaptureServer_DeadConsumer_GpuDrainGracePeriod) {
+    CaptureServer server;
+    const std::wstring test_session = L"DUWN_TEST_DEAD_CONSUMER_DRAIN";
+    DUWN_ASSERT(server.Start(test_session));
+
+    CaptureMemoryHeader* header = server.Header();
+    DUWN_ASSERT(header != nullptr);
+
+    LARGE_INTEGER freq{};
+    ::QueryPerformanceFrequency(&freq);
+    const int64_t lease_ticks = (freq.QuadPart * 250) / 1000;
+
+    // Launch a short-lived process that exits immediately
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    wchar_t cmd[] = L"cmd.exe /c exit 0";
+    BOOL ok = ::CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    DUWN_ASSERT(ok);
+
+    ::WaitForSingleObject(pi.hProcess, 2000);
+    DWORD child_pid = pi.dwProcessId;
+    ::CloseHandle(pi.hProcess);
+    ::CloseHandle(pi.hThread);
+
+    // Register child PID in consumer slot and acquire ring slot 2
+    LARGE_INTEGER now{};
+    ::QueryPerformanceCounter(&now);
+    int32_t slot_id = RegisterConsumer(header, child_pid, L"Local\\DEAD_PROC_EVT");
+    DUWN_ASSERT(slot_id >= 0);
+    AcquireRingSlot(header, slot_id, 2, now.QuadPart);
+
+    // First call to SelectNextAvailableSlot: producer detects process death.
+    // Transitions slot to draining state and keeps it locked for 100ms GPU drain grace period!
+    uint32_t chosen = server.SelectNextAvailableSlot(3, 1, now.QuadPart, lease_ticks);
+    // Candidate 2 is held by dead process, still within 100ms grace period -> skip to 0!
+    DUWN_ASSERT(chosen == 0);
+
+    // 50ms later: still within 100ms grace period -> slot 2 must STILL be locked!
+    int64_t t_50ms = now.QuadPart + (freq.QuadPart * 50) / 1000;
+    chosen = server.SelectNextAvailableSlot(3, 1, t_50ms, lease_ticks);
+    DUWN_ASSERT(chosen == 0); // Still protected against in-flight GPU DMA!
+
+    // 120ms later: GPU drain grace period has elapsed (>100ms) -> safe to reclaim slot 2!
+    int64_t t_120ms = now.QuadPart + (freq.QuadPart * 120) / 1000;
+    chosen = server.SelectNextAvailableSlot(3, 1, t_120ms, lease_ticks);
+    DUWN_ASSERT(chosen == 2); // Reclaimed safely after hardware drain!
+
+    UnregisterConsumer(header, slot_id);
+    server.Stop();
+}
+
+// ---------------------------------------------------------------------------
+// 7d. CaptureServer Coordinated: TryAcquireRingSlot Race-Free Atomic Claim
+// ---------------------------------------------------------------------------
+DUWN_TEST(CaptureServer_TryAcquireRingSlot_RaceFree) {
+    CaptureServer server;
+    const std::wstring test_session = L"DUWN_TEST_TRY_ACQUIRE";
+    DUWN_ASSERT(server.Start(test_session));
+
+    CaptureMemoryHeader* header = server.Header();
+    DUWN_ASSERT(header != nullptr);
+
+    LARGE_INTEGER now{};
+    ::QueryPerformanceCounter(&now);
+
+    int32_t slot_id = RegisterConsumer(header, ::GetCurrentProcessId(), L"Local\\RACE_FREE_EVT");
+    DUWN_ASSERT(slot_id >= 0);
+
+    // Publish frame 100 on buffer 2
+    HANDLE dummy_handle = reinterpret_cast<HANDLE>(0x1234);
+    HANDLE handles[4] = { dummy_handle, dummy_handle, dummy_handle, dummy_handle };
+    LUID dummy_luid{0, 0};
+    server.PublishFrame(handles, 4, 2, 1920, 1080, 87, 1, dummy_luid, 100, now.QuadPart);
+
+    // Valid claim: expected slot 2, frame 100 -> succeeds
+    bool acquired = TryAcquireRingSlot(header, slot_id, 2, 100, now.QuadPart);
+    DUWN_ASSERT(acquired == true);
+    DUWN_ASSERT(header->consumers[slot_id].held_ring_index == 2);
+
+    ReleaseRingSlot(header, slot_id);
+    DUWN_ASSERT(header->consumers[slot_id].held_ring_index == 0xFFFFFFFF);
+
+    // Mismatched frame index: consumer was delayed, expected frame 99 -> must reject and clear claim
+    acquired = TryAcquireRingSlot(header, slot_id, 2, 99, now.QuadPart);
+    DUWN_ASSERT(acquired == false);
+    DUWN_ASSERT(header->consumers[slot_id].held_ring_index == 0xFFFFFFFF);
+
+    UnregisterConsumer(header, slot_id);
     server.Stop();
 }
 

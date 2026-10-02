@@ -632,16 +632,19 @@ void DuwnOutputPin::WorkerLoop() {
         bool got_clean_frame = false;
         CaptureMemoryHeader snapshot{};
 
-        if (header && h_event) {
-            DWORD wr = ::WaitForSingleObject(h_event, 20);
-            if (wr == WAIT_OBJECT_0) {
-                if (ReadHeaderConsistent(header, snapshot)) {
-                    if (std::memcmp(snapshot.magic, "DUWNCAP", 7) == 0 &&
-                        snapshot.protocol_version == 2 &&
-                        (snapshot.frame_index > last_frame_index || last_frame_index == 0)) {
-                        last_frame_index = snapshot.frame_index;
-                        got_clean_frame = true;
-                        last_producer_activity = std::chrono::steady_clock::now();
+        if (header) {
+            HANDLE wait_target = h_my_event ? h_my_event : h_event;
+            if (wait_target) {
+                DWORD wr = ::WaitForSingleObject(wait_target, 20);
+                if (wr == WAIT_OBJECT_0) {
+                    if (ReadHeaderConsistent(header, snapshot)) {
+                        if (std::memcmp(snapshot.magic, "DUWNCAP", 7) == 0 &&
+                            snapshot.protocol_version == 2 &&
+                            (snapshot.frame_index > last_frame_index || last_frame_index == 0)) {
+                            last_frame_index = snapshot.frame_index;
+                            got_clean_frame = true;
+                            last_producer_activity = std::chrono::steady_clock::now();
+                        }
                     }
                 }
             }
@@ -677,11 +680,16 @@ void DuwnOutputPin::WorkerLoop() {
                     m_cached_res_gen = snapshot.resource_generation;
                 }
 
-                // Acquire ring slot lease during texture access
+                // Acquire ring slot lease during texture access using TryAcquireRingSlot
                 LARGE_INTEGER qpc_now{};
                 ::QueryPerformanceCounter(&qpc_now);
+                bool slot_acquired = false;
                 if (header && my_consumer_slot >= 0) {
-                    AcquireRingSlot(header, my_consumer_slot, active_idx, qpc_now.QuadPart);
+                    slot_acquired = TryAcquireRingSlot(header, my_consumer_slot, active_idx, snapshot.frame_index, qpc_now.QuadPart);
+                    if (!slot_acquired) {
+                        pSample->Release();
+                        continue;
+                    }
                 }
 
                 uint32_t slot = active_idx < 4 ? active_idx : 0;
@@ -725,7 +733,7 @@ void DuwnOutputPin::WorkerLoop() {
                 }
 
                 // Release ring slot lease immediately after copy
-                if (header && my_consumer_slot >= 0) {
+                if (header && my_consumer_slot >= 0 && slot_acquired) {
                     ReleaseRingSlot(header, my_consumer_slot);
                 }
             } else {
@@ -735,7 +743,7 @@ void DuwnOutputPin::WorkerLoop() {
                     RenderDefaultPattern(pBuffer, out_w, out_h, row_pitch, ++local_seq);
                 } else {
                     pSample->Release();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    std::this_thread::yield();
                     continue;
                 }
             }
@@ -755,7 +763,7 @@ void DuwnOutputPin::WorkerLoop() {
 
         pSample->Release();
         if (!got_clean_frame) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            std::this_thread::yield();
         }
     }
 

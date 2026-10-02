@@ -28,6 +28,8 @@ struct SinkStats {
     std::atomic<bool>     orientation_bottom_up{true};
     std::atomic<uint64_t> repeated_frames{0};
     std::atomic<uint64_t> new_frames{0};
+    uint32_t              last_frame_hash{0};
+    bool                  has_first_hash{false};
     std::atomic<int64_t>  first_rt_start{-1};
     std::atomic<int64_t>  last_rt_start{-1};
     std::atomic<int64_t>  last_rt_duration{0};
@@ -329,7 +331,12 @@ inline STDMETHODIMP CSinkPin::Receive(IMediaSample* pSample) {
             }
         }
         std::lock_guard lock(m_stats->hash_mutex);
-        if (m_stats->unique_hashes.insert(hash).second) {
+        if (!m_stats->has_first_hash) {
+            m_stats->has_first_hash = true;
+            m_stats->last_frame_hash = hash;
+            m_stats->new_frames++;
+        } else if (hash != m_stats->last_frame_hash) {
+            m_stats->last_frame_hash = hash;
             m_stats->new_frames++;
         } else {
             m_stats->repeated_frames++;
@@ -648,7 +655,8 @@ int main(int argc, char* argv[]) {
     ::CoUninitialize();
 
     double fps = total_sec > 0 ? (stats.samples_received.load() / total_sec) : 0.0;
-    bool pass = (stats.samples_received.load() > static_cast<uint64_t>(duration_sec * 20)) &&
+    double unique_fps = total_sec > 0 ? (stats.new_frames.load() / total_sec) : 0.0;
+    bool pass = (stats.samples_received.load() >= static_cast<uint64_t>(duration_sec * 50)) &&
                 stats.timestamps_monotonic.load() &&
                 stats.format_rgb32.load() &&
                 (stats.last_width.load() == 1920 && stats.last_height.load() == 1080);
@@ -657,8 +665,10 @@ int main(int argc, char* argv[]) {
               << "  \"status\": \"" << (pass ? "PASS" : "FAIL") << "\",\n"
               << "  \"duration_seconds\": " << total_sec << ",\n"
               << "  \"samples_received\": " << stats.samples_received.load() << ",\n"
+              << "  \"sample_fps\": " << fps << ",\n"
               << "  \"measured_fps\": " << fps << ",\n"
               << "  \"new_frames\": " << stats.new_frames.load() << ",\n"
+              << "  \"unique_frame_fps\": " << unique_fps << ",\n"
               << "  \"repeated_frames\": " << stats.repeated_frames.load() << ",\n"
               << "  \"timestamps_monotonic\": " << (stats.timestamps_monotonic.load() ? "true" : "false") << ",\n"
               << "  \"first_timestamp_100ns\": " << stats.first_rt_start.load() << ",\n"

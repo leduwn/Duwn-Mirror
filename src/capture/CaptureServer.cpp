@@ -14,6 +14,8 @@ static std::string WideToUtf8(std::wstring_view w) noexcept {
     return out;
 }
 
+CaptureServer::CaptureServer() noexcept = default;
+
 bool CaptureServer::Start(std::wstring_view session_name) noexcept {
     Stop();
 
@@ -61,6 +63,13 @@ bool CaptureServer::Start(std::wstring_view session_name) noexcept {
 
 void CaptureServer::Stop() noexcept {
     m_running = false;
+    for (int i = 0; i < 4; ++i) {
+        if (m_cached_client_events[i]) {
+            ::CloseHandle(m_cached_client_events[i]);
+            m_cached_client_events[i] = nullptr;
+        }
+        m_cached_client_pids[i] = 0;
+    }
     if (m_header) {
         ::UnmapViewOfFile(m_header);
         m_header = nullptr;
@@ -113,12 +122,24 @@ bool CaptureServer::PublishFrame(const HANDLE* ring_handles, uint32_t ring_count
 
     // Broadcast wake up to private registered consumers (auto-reset events)
     for (uint32_t i = 0; i < 4; ++i) {
-        if (m_header->consumers[i].active && m_header->consumers[i].event_name[0] != L'\0') {
-            HANDLE h_client_evt = ::OpenEventW(EVENT_MODIFY_STATE, FALSE, m_header->consumers[i].event_name);
-            if (h_client_evt) {
-                ::SetEvent(h_client_evt);
-                ::CloseHandle(h_client_evt);
+        if (m_header->consumers[i].active == kConsumerStateActive && m_header->consumers[i].event_name[0] != L'\0') {
+            uint32_t pid = m_header->consumers[i].process_id;
+            if (m_cached_client_events[i] && m_cached_client_pids[i] != pid) {
+                ::CloseHandle(m_cached_client_events[i]);
+                m_cached_client_events[i] = nullptr;
+                m_cached_client_pids[i] = 0;
             }
+            if (!m_cached_client_events[i]) {
+                m_cached_client_events[i] = ::OpenEventW(EVENT_MODIFY_STATE, FALSE, m_header->consumers[i].event_name);
+                m_cached_client_pids[i] = pid;
+            }
+            if (m_cached_client_events[i]) {
+                ::SetEvent(m_cached_client_events[i]);
+            }
+        } else if (m_cached_client_events[i]) {
+            ::CloseHandle(m_cached_client_events[i]);
+            m_cached_client_events[i] = nullptr;
+            m_cached_client_pids[i] = 0;
         }
     }
 
@@ -134,40 +155,60 @@ uint32_t CaptureServer::SelectNextAvailableSlot(uint32_t ring_count, uint32_t la
     if (!m_header || ring_count == 0) return 0;
     if (ring_count == 1) return 0;
 
+    LARGE_INTEGER freq{};
+    ::QueryPerformanceFrequency(&freq);
+    const int64_t drain_ticks = (freq.QuadPart * 100) / 1000; // 100ms GPU drain grace period
+
     // Check candidate slots in sequence starting from (last_slot + 1)
     for (uint32_t step = 1; step <= ring_count; ++step) {
         uint32_t cand = (last_slot + step) % ring_count;
         bool locked = false;
 
         for (uint32_t c = 0; c < 4; ++c) {
-            if (!m_header->consumers[c].active) continue;
+            uint32_t state = m_header->consumers[c].active;
+            if (state == kConsumerStateFree) continue;
 
             if (m_header->consumers[c].held_ring_index == cand) {
-                // Check if consumer process died
-                HANDLE hProc = ::OpenProcess(SYNCHRONIZE, FALSE, m_header->consumers[c].process_id);
+                // If already marked as draining (dead process awaiting GPU command drain)
+                if (state == kConsumerStateDraining) {
+                    if (now_qpc - m_header->consumers[c].acquire_qpc >= drain_ticks) {
+                        // GPU DMA drain complete; reclaim slot
+                        m_header->consumers[c].held_ring_index = 0xFFFFFFFF;
+                        m_header->consumers[c].active = kConsumerStateFree;
+                        ::MemoryBarrier();
+                        continue;
+                    }
+                    // Still draining: keep locked
+                    locked = true;
+                    break;
+                }
+
+                // Consumer was active: check if process died
+                HANDLE hProc = ::OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, m_header->consumers[c].process_id);
+                bool process_dead = false;
                 if (!hProc) {
-                    m_header->consumers[c].active = 0;
-                    m_header->consumers[c].held_ring_index = 0xFFFFFFFF;
-                    continue;
-                }
-                DWORD exit_code = 0;
-                if (::GetExitCodeProcess(hProc, &exit_code) && exit_code != STILL_ACTIVE) {
+                    process_dead = true;
+                } else {
+                    DWORD exit_code = 0;
+                    if (::GetExitCodeProcess(hProc, &exit_code) && exit_code != STILL_ACTIVE) {
+                        process_dead = true;
+                    }
                     ::CloseHandle(hProc);
-                    m_header->consumers[c].active = 0;
-                    m_header->consumers[c].held_ring_index = 0xFFFFFFFF;
-                    continue;
-                }
-                ::CloseHandle(hProc);
-
-                // Consumer is alive: check lease timeout
-                int64_t elapsed = now_qpc - m_header->consumers[c].acquire_qpc;
-                if (elapsed > lease_ticks) {
-                    // Lease expired (>250ms), reclaim slot
-                    m_header->consumers[c].held_ring_index = 0xFFFFFFFF;
-                    continue;
                 }
 
-                // Slot is actively locked by consumer
+                if (process_dead) {
+                    // Mark as draining; start drain timer from now_qpc
+                    m_header->consumers[c].active = kConsumerStateDraining;
+                    m_header->consumers[c].acquire_qpc = now_qpc;
+                    ::MemoryBarrier();
+                    locked = true;
+                    break;
+                }
+
+                // Consumer process is ALIVE:
+                // Do NOT reclaim slot even if lease expired (>250ms).
+                // Consumer may be delayed by scheduler or still executing Map/readback.
+                // Keep slot locked to prevent corrupting consumer texture!
                 locked = true;
                 break;
             }
@@ -178,7 +219,7 @@ uint32_t CaptureServer::SelectNextAvailableSlot(uint32_t ring_count, uint32_t la
         }
     }
 
-    // All slots locked by slow consumers: drop export frame
+    // All slots locked by slow consumers: drop export frame without stalling producer
     ::InterlockedIncrement(&m_header->dropped_exports);
     return 0xFFFFFFFF;
 }

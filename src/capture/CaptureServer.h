@@ -10,12 +10,17 @@
 
 namespace duwn::capture {
 
-#pragma pack(push, 1)
+// Consumer slot active state
+constexpr uint32_t kConsumerStateFree = 0;
+constexpr uint32_t kConsumerStateActive = 1;
+constexpr uint32_t kConsumerStateDraining = 2; // Process dead; awaiting GPU DMA drain grace period
+
+#pragma pack(push, 8)
 struct ConsumerSlot {
     volatile uint32_t process_id;      // Windows Process ID of consumer
-    volatile uint32_t active;          // 1 if active/registered, 0 if free
+    volatile uint32_t active;          // 0 = free, 1 = active, 2 = draining (dead process GPU drain)
     volatile uint32_t held_ring_index; // 0xFFFFFFFF if not holding any ring slot, else 0..3
-    volatile int64_t  acquire_qpc;     // QPC timestamp when ring slot was acquired
+    volatile int64_t  acquire_qpc;     // QPC timestamp when ring slot was acquired or death detected
     wchar_t           event_name[64];  // Dedicated auto-reset event name: "Local\DUWN_FRAME_EVENT_<PID>"
 };
 
@@ -34,9 +39,9 @@ struct CaptureMemoryHeader {
     uint32_t height;                // 1080
     uint32_t dxgi_format;           // DXGI_FORMAT_B8G8R8A8_UNORM (87)
 
-    // Ring buffer handles (triple buffering)
-    uint32_t ring_buffer_count;     // 3
-    uint32_t active_buffer_index;   // 0, 1, 2
+    // Ring buffer handles (quad buffering: 4 slots)
+    uint32_t ring_buffer_count;     // 4
+    uint32_t active_buffer_index;   // 0, 1, 2, 3
     uint64_t shared_handles[4];     // Legacy DXGI shared handles
 
     // Frame sequence and timing
@@ -75,24 +80,34 @@ inline bool ReadHeaderConsistent(const CaptureMemoryHeader* src, CaptureMemoryHe
 // Consumer registration and ring slot lease helpers
 inline int32_t RegisterConsumer(CaptureMemoryHeader* header, uint32_t pid, const wchar_t* event_name) noexcept {
     if (!header) return -1;
+    LARGE_INTEGER freq{}, now{};
+    ::QueryPerformanceFrequency(&freq);
+    ::QueryPerformanceCounter(&now);
+    const int64_t drain_ticks = (freq.QuadPart * 100) / 1000; // 100ms GPU drain grace period
+
     for (int i = 0; i < 4; ++i) {
-        // If slot inactive or process died, reclaim
-        if (header->consumers[i].active) {
-            HANDLE hProc = ::OpenProcess(SYNCHRONIZE, FALSE, header->consumers[i].process_id);
+        uint32_t state = header->consumers[i].active;
+        if (state == kConsumerStateActive) {
+            HANDLE hProc = ::OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, header->consumers[i].process_id);
             if (!hProc) {
-                header->consumers[i].active = 0;
-                header->consumers[i].held_ring_index = 0xFFFFFFFF;
+                header->consumers[i].active = kConsumerStateDraining;
+                header->consumers[i].acquire_qpc = now.QuadPart;
             } else {
                 DWORD exit_code = 0;
                 if (::GetExitCodeProcess(hProc, &exit_code) && exit_code != STILL_ACTIVE) {
-                    header->consumers[i].active = 0;
-                    header->consumers[i].held_ring_index = 0xFFFFFFFF;
+                    header->consumers[i].active = kConsumerStateDraining;
+                    header->consumers[i].acquire_qpc = now.QuadPart;
                 }
                 ::CloseHandle(hProc);
             }
+        } else if (state == kConsumerStateDraining) {
+            if (now.QuadPart - header->consumers[i].acquire_qpc >= drain_ticks) {
+                header->consumers[i].held_ring_index = 0xFFFFFFFF;
+                header->consumers[i].active = kConsumerStateFree;
+            }
         }
 
-        if (header->consumers[i].active == 0) {
+        if (header->consumers[i].active == kConsumerStateFree) {
             header->consumers[i].process_id = pid;
             header->consumers[i].held_ring_index = 0xFFFFFFFF;
             header->consumers[i].acquire_qpc = 0;
@@ -102,7 +117,7 @@ inline int32_t RegisterConsumer(CaptureMemoryHeader* header, uint32_t pid, const
                 header->consumers[i].event_name[0] = L'\0';
             }
             ::MemoryBarrier();
-            header->consumers[i].active = 1;
+            header->consumers[i].active = kConsumerStateActive;
             return i;
         }
     }
@@ -112,8 +127,31 @@ inline int32_t RegisterConsumer(CaptureMemoryHeader* header, uint32_t pid, const
 inline void UnregisterConsumer(CaptureMemoryHeader* header, int32_t slot_idx) noexcept {
     if (!header || slot_idx < 0 || slot_idx >= 4) return;
     header->consumers[slot_idx].held_ring_index = 0xFFFFFFFF;
-    header->consumers[slot_idx].active = 0;
+    header->consumers[slot_idx].active = kConsumerStateFree;
     ::MemoryBarrier();
+}
+
+// Atomically claim slot and verify producer has not advanced to overwrite it
+inline bool TryAcquireRingSlot(CaptureMemoryHeader* header, int32_t slot_idx,
+                               uint32_t expected_ring_idx, uint64_t expected_frame_idx,
+                               int64_t now_qpc) noexcept {
+    if (!header || slot_idx < 0 || slot_idx >= 4) return false;
+    header->consumers[slot_idx].acquire_qpc = now_qpc;
+    header->consumers[slot_idx].held_ring_index = expected_ring_idx;
+    ::MemoryBarrier();
+
+    CaptureMemoryHeader snap{};
+    if (!ReadHeaderConsistent(header, snap)) {
+        header->consumers[slot_idx].held_ring_index = 0xFFFFFFFF;
+        ::MemoryBarrier();
+        return false;
+    }
+    if (snap.frame_index != expected_frame_idx || snap.active_buffer_index != expected_ring_idx) {
+        header->consumers[slot_idx].held_ring_index = 0xFFFFFFFF;
+        ::MemoryBarrier();
+        return false;
+    }
+    return true;
 }
 
 inline void AcquireRingSlot(CaptureMemoryHeader* header, int32_t slot_idx, uint32_t ring_idx, int64_t now_qpc) noexcept {
@@ -131,7 +169,7 @@ inline void ReleaseRingSlot(CaptureMemoryHeader* header, int32_t slot_idx) noexc
 
 class CaptureServer {
 public:
-    CaptureServer() noexcept = default;
+    CaptureServer() noexcept;
     ~CaptureServer() { Stop(); }
 
     CaptureServer(const CaptureServer&) = delete;
@@ -164,6 +202,8 @@ private:
     HANDLE                m_file_mapping{nullptr};
     CaptureMemoryHeader*  m_header{nullptr};
     HANDLE                m_frame_event{nullptr};
+    HANDLE                m_cached_client_events[4]{nullptr, nullptr, nullptr, nullptr};
+    uint32_t              m_cached_client_pids[4]{0, 0, 0, 0};
     uint32_t              m_generation{0};
     bool                  m_running{false};
 };

@@ -185,17 +185,27 @@ int main(int argc, char* argv[]) {
             return 8;
         }
 
-        // Acquire slot lease
+        // Acquire slot lease atomically
         LARGE_INTEGER qpc_now{};
         ::QueryPerformanceCounter(&qpc_now);
         if (my_slot >= 0) {
-            duwn::capture::AcquireRingSlot(header, my_slot, active_idx, qpc_now.QuadPart);
+            if (!duwn::capture::TryAcquireRingSlot(header, my_slot, active_idx, snapshot.frame_index, qpc_now.QuadPart)) {
+                continue;
+            }
         }
 
-        if (mode == "kill-slow") {
+        if (mode == "kill-slow" || mode == "crash-hold") {
             ::Sleep(50);
             std::cout << "{\"status\":\"CRASH_SIMULATION\",\"slot\":" << active_idx << "}\n";
             ::ExitProcess(42);
+        }
+
+        if (mode == "pause-after-claim") {
+            ::Sleep(200); // Intentionally pause after claim before submit copy
+        }
+
+        if (mode == "hold-500ms") {
+            ::Sleep(400); // Intentionally hold slot 400ms (>250ms lease) while producer continues
         }
 
         if (mode == "slow") {

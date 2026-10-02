@@ -35,6 +35,8 @@
 #include <objbase.h>
 
 #include <format>
+#include <timeapi.h>
+#pragma comment(lib, "winmm.lib")
 
 #include <thread>
 
@@ -4338,6 +4340,7 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
                 now_ticks, lease_ticks);
             if (cand_slot != 0xFFFFFFFF) {
                 active_ring_idx = cand_slot;
+                m_shared_texture->EnsureSlotReady(m_d3d->Context(), active_ring_idx);
                 m_last_export_ring_idx.store(active_ring_idx, std::memory_order_relaxed);
                 m_renderer->SetExportTarget(m_shared_texture->Texture(active_ring_idx), m_shared_texture->Query(active_ring_idx));
                 export_slot_valid = true;
@@ -4470,6 +4473,9 @@ void App::TestMotionLoop(std::stop_token st) noexcept {
     }
     if (st.stop_requested() || !m_d3d || !m_d3d->Device() || !m_scheduler) return;
 
+    // High resolution timer period for precise 60.0 FPS pacing
+    ::timeBeginPeriod(1);
+
     constexpr uint32_t kW = 1920;
     constexpr uint32_t kH = 1080;
     constexpr size_t kYSize = kW * kH;
@@ -4479,7 +4485,7 @@ void App::TestMotionLoop(std::stop_token st) noexcept {
     std::vector<uint8_t> nv12(kTotalBytes, 128);
     std::fill(nv12.begin(), nv12.begin() + kYSize, static_cast<uint8_t>(28));
 
-    constexpr size_t kPoolSize = 3;
+    constexpr size_t kPoolSize = 4;
     std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, kPoolSize> textures;
 
     D3D11_TEXTURE2D_DESC desc{};
@@ -4497,6 +4503,7 @@ void App::TestMotionLoop(std::stop_token st) noexcept {
         HRESULT hr = m_d3d->Device()->CreateTexture2D(&desc, nullptr, textures[i].GetAddressOf());
         if (FAILED(hr) || !textures[i]) {
             DUWN_LOG_ERRORF("App", "TestMotionLoop failed to create NV12 texture hr={:#010x}", static_cast<unsigned>(hr));
+            ::timeEndPeriod(1);
             return;
         }
     }
@@ -4510,9 +4517,17 @@ void App::TestMotionLoop(std::stop_token st) noexcept {
     constexpr int kBoxH = 220;
     size_t tex_idx = 0;
 
-    DUWN_LOG_INFO("App", "TestMotionLoop started streaming 1920x1080 synthetic motion frames @ ~60fps");
+    LARGE_INTEGER freq{};
+    ::QueryPerformanceFrequency(&freq);
+    const int64_t interval_ticks = (freq.QuadPart * 1000) / 60000; // 16.6666 ms (60.0 FPS)
+    LARGE_INTEGER start_qpc{};
+    ::QueryPerformanceCounter(&start_qpc);
+    int64_t next_frame_qpc = start_qpc.QuadPart;
+
+    DUWN_LOG_INFO("App", "TestMotionLoop started streaming 1920x1080 synthetic motion frames @ 60.0 fps");
 
     while (!st.stop_requested() && m_running.load(std::memory_order_acquire)) {
+        next_frame_qpc += interval_ticks;
         ++seq;
         box_x += dir_x;
         box_y += dir_y;
@@ -4597,8 +4612,26 @@ void App::TestMotionLoop(std::stop_token st) noexcept {
 
         m_scheduler->PushFrame(std::move(vf));
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        // Precision monotonic sleep until next target frame time
+        LARGE_INTEGER now_qpc{};
+        ::QueryPerformanceCounter(&now_qpc);
+        while (now_qpc.QuadPart < next_frame_qpc) {
+            int64_t diff_ticks = next_frame_qpc - now_qpc.QuadPart;
+            int64_t diff_ms = (diff_ticks * 1000) / freq.QuadPart;
+            if (diff_ms > 2) {
+                ::Sleep(1);
+            } else {
+                YieldProcessor();
+            }
+            ::QueryPerformanceCounter(&now_qpc);
+        }
+        if (now_qpc.QuadPart > next_frame_qpc + interval_ticks) {
+            // Late: realign next_frame_qpc to current time to avoid burst
+            next_frame_qpc = now_qpc.QuadPart;
+        }
     }
+
+    ::timeEndPeriod(1);
 }
 
 std::string App::GetActiveTransportString() const noexcept {

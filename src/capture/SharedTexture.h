@@ -11,7 +11,7 @@
 namespace duwn::capture {
 using Microsoft::WRL::ComPtr;
 
-constexpr uint32_t kSharedTextureRingSize = 3;
+constexpr uint32_t kSharedTextureRingSize = 4;
 
 class SharedTexture {
 public:
@@ -21,12 +21,15 @@ public:
     SharedTexture(const SharedTexture&) = delete;
     SharedTexture& operator=(const SharedTexture&) = delete;
 
-    // Create a triple-buffered ring of shareable BGRA textures. Returns true on success.
+    // Create a quad-buffered ring of shareable BGRA textures. Returns true on success.
     bool Create(ID3D11Device* device, uint32_t width, uint32_t height) noexcept;
     void Release() noexcept;
 
-    // Flush GPU command queue and verify hardware completion for the given ring slot
+    // Flush GPU command queue to guarantee command submission before publishing
     bool SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index) noexcept;
+
+    // Verify GPU has completed prior operations on candidate slot before reusing
+    bool EnsureSlotReady(ID3D11DeviceContext* context, uint32_t ring_index) noexcept;
 
     HANDLE SharedHandle(uint32_t ring_index = 0) const noexcept {
         return (ring_index < kSharedTextureRingSize) ? m_shared_handles[ring_index] : nullptr;
@@ -49,7 +52,7 @@ public:
 
 private:
     ComPtr<ID3D11Texture2D> m_textures[kSharedTextureRingSize];
-    HANDLE                  m_shared_handles[kSharedTextureRingSize]{nullptr, nullptr, nullptr};
+    HANDLE                  m_shared_handles[kSharedTextureRingSize]{nullptr, nullptr, nullptr, nullptr};
     ComPtr<ID3D11Query>     m_queries[kSharedTextureRingSize];
     uint32_t                m_width{0};
     uint32_t                m_height{0};
