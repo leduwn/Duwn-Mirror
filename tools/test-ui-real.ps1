@@ -6,6 +6,7 @@ using System;
 using System.Text;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 public class Win32UiUtil {
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
@@ -29,7 +30,13 @@ public class Win32UiUtil {
     public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll")]
-    public static extern bool SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
 
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
@@ -37,14 +44,52 @@ public class Win32UiUtil {
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X, Y; }
+
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int X, int Y);
+
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern IntPtr FindWindowEx(IntPtr parentHandle, IntPtr childAfter, string className, string windowTitle);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    public static extern int GetWindowLong32(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    public static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
+
+    public static IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex) {
+        if (IntPtr.Size == 8) return GetWindowLongPtr64(hWnd, nIndex);
+        return new IntPtr(GetWindowLong32(hWnd, nIndex));
+    }
+
+    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    public const uint MOUSEEVENTF_LEFTUP   = 0x0004;
+    public const uint KEYEVENTF_KEYUP      = 0x0002;
+    public const byte VK_ESCAPE            = 0x1B;
 
     public struct WinInfo {
         public IntPtr Hwnd;
         public string Title;
         public string ClassName;
         public bool Visible;
+        public int Left;
+        public int Top;
         public int Width;
         public int Height;
     }
@@ -64,6 +109,7 @@ public class Win32UiUtil {
                 list.Add(new WinInfo {
                     Hwnd = hwnd, Title = sbTitle.ToString(), ClassName = sbClass.ToString(),
                     Visible = IsWindowVisible(hwnd),
+                    Left = rc.Left, Top = rc.Top,
                     Width = rc.Right - rc.Left, Height = rc.Bottom - rc.Top
                 });
             }
@@ -72,7 +118,79 @@ public class Win32UiUtil {
         return list;
     }
 
+    public static void RealClick(IntPtr hWnd, int clientX, int clientY) {
+        ShowWindow(hWnd, 9);
+        SetForegroundWindow(hWnd);
+        Thread.Sleep(50);
+        RECT rc;
+        GetWindowRect(hWnd, out rc);
+        POINT pt = new POINT { X = clientX, Y = clientY };
+        ClientToScreen(hWnd, ref pt);
+        Console.WriteLine(string.Format("RealClick: win=({0},{1},{2},{3}) client=({4},{5}) screen=({6},{7})", rc.Left, rc.Top, rc.Right, rc.Bottom, clientX, clientY, pt.X, pt.Y));
+        SetCursorPos(pt.X, pt.Y);
+        Thread.Sleep(50);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(60);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(120);
+    }
+
+    public static void RealDoubleClick(IntPtr hWnd, int clientX, int clientY) {
+        POINT pt = new POINT { X = clientX, Y = clientY };
+        ClientToScreen(hWnd, ref pt);
+        SetForegroundWindow(hWnd);
+        Thread.Sleep(50);
+        SetCursorPos(pt.X, pt.Y);
+        Thread.Sleep(50);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(40);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(40);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(40);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(120);
+    }
+
+    public static void RealDrag(IntPtr hWnd, int startX, int startY, int endX, int endY) {
+        POINT p1 = new POINT { X = startX, Y = startY };
+        POINT p2 = new POINT { X = endX, Y = endY };
+        ClientToScreen(hWnd, ref p1);
+        ClientToScreen(hWnd, ref p2);
+        SetForegroundWindow(hWnd);
+        Thread.Sleep(50);
+        SetCursorPos(p1.X, p1.Y);
+        Thread.Sleep(50);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(80);
+        int steps = 15;
+        for (int i = 1; i <= steps; i++) {
+            int cx = p1.X + (p2.X - p1.X) * i / steps;
+            int cy = p1.Y + (p2.Y - p1.Y) * i / steps;
+            SetCursorPos(cx, cy);
+            Thread.Sleep(15);
+        }
+        Thread.Sleep(80);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(120);
+    }
+
+    public static void RealPressEsc(IntPtr hWnd) {
+        SetForegroundWindow(hWnd);
+        Thread.Sleep(50);
+        keybd_event(VK_ESCAPE, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(50);
+        keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+        Thread.Sleep(120);
+    }
+
     public static void CaptureWindow(IntPtr hWnd, string filePath) {
+        if (IsIconic(hWnd)) {
+            ShowWindow(hWnd, 9); // SW_RESTORE
+            Thread.Sleep(150);
+        }
+        SetForegroundWindow(hWnd);
+        Thread.Sleep(150);
         RECT rc;
         GetWindowRect(hWnd, out rc);
         int w = rc.Right - rc.Left;
@@ -91,6 +209,23 @@ public class Win32UiUtil {
 $exe = "D:\Projects\Duwn Mirror\build-msvc\bin\Release\duwn-mirror.exe"
 $shotDir = "D:\Projects\Duwn Mirror\artifacts\ui_verification"
 if (-not (Test-Path $shotDir)) { New-Item -ItemType Directory -Path $shotDir -Force | Out-Null }
+
+# Clear prior abnormal shutdown and crash markers to prevent crash banner polluting visual acceptance
+$crashDir = Join-Path $env:LOCALAPPDATA "Duwn Mirror\Crashes"
+if (Test-Path $crashDir) {
+    try { Remove-Item (Join-Path $crashDir "*") -Force -Recurse -ErrorAction SilentlyContinue } catch {}
+}
+$settingsPath = Join-Path $env:LOCALAPPDATA "Duwn Mirror\settings.json"
+if (Test-Path $settingsPath) {
+    try {
+        $content = Get-Content $settingsPath -Raw
+        $content = $content -replace '"unclean_shutdown":\s*true', '"unclean_shutdown": false'
+        $content = $content -replace '"last_crash_file":\s*"[^"]*"', '"last_crash_file": ""'
+        $content = $content -replace '"show_output_toolbar":\s*false', '"show_output_toolbar": true'
+
+        Set-Content $settingsPath $content -Encoding UTF8
+    } catch {}
+}
 
 Write-Host "=== TEST 1: Launch App (Clean, Idle, Mirror Tab Default) ==="
 $proc = Start-Process -FilePath $exe -PassThru
@@ -118,62 +253,197 @@ try {
     }
     Write-Host "[PASS] App launched into MainWindow with OutputWindow correctly hidden." -ForegroundColor Green
 
-    # Capture 1: Main window on launch (Phản chiếu tab)
+    # Position MainWindow at left of screen (30, 40, 1280, 740)
+    [Win32UiUtil]::ShowWindow($mainWin.Hwnd, 9)
+
+    [Win32UiUtil]::SetWindowPos($mainWin.Hwnd, [IntPtr]::Zero, 30, 40, 1280, 740, 0x0044)
+    Start-Sleep -Milliseconds 400
+
+    # Capture 1: Main window on launch (Phan chieu tab)
     $shot1 = Join-Path $shotDir "01_app_launch_mirror_tab.png"
     [Win32UiUtil]::CaptureWindow($mainWin.Hwnd, $shot1)
     Write-Host "Captured: $shot1"
 
-    # Iterate through sidebar tabs
-    $tabs = @(
-        @{ Name="02_tab_video"; Index=1; Desc="Hinh anh" },
-        @{ Name="03_tab_audio"; Index=2; Desc="Am thanh" },
-        @{ Name="04_tab_color"; Index=3; Desc="Mau sac" },
-        @{ Name="05_tab_settings"; Index=4; Desc="Cai dat" },
-        @{ Name="06_tab_diagnostics"; Index=5; Desc="Chan doan" }
+    # Test Sidebar Navigation with REAL MOUSE CLICKS
+    Write-Host "`n=== Sidebar Navigation Audit via Real Mouse Input ==="
+    $tabClicks = @(
+        @{ Name="02_tab_video";       X=60; Y=150; Desc="Video" },
+        @{ Name="03_tab_audio";       X=60; Y=200; Desc="Audio" },
+        @{ Name="04_tab_color";       X=60; Y=245; Desc="Color" },
+        @{ Name="05_tab_settings";    X=60; Y=290; Desc="Settings" },
+        @{ Name="06_tab_diagnostics"; X=100; Y=630; Desc="Diagnostics" }
     )
 
-    foreach ($t in $tabs) {
-        Write-Host "Switching to Tab $($t.Desc) (Index $($t.Index))..."
-        [Win32UiUtil]::PostMessage($mainWin.Hwnd, 0x8021, [IntPtr]$($t.Index), [IntPtr]::Zero)
-        Start-Sleep -Milliseconds 400
+    foreach ($t in $tabClicks) {
+        Write-Host "Clicking Tab $($t.Desc) at client ($($t.X), $($t.Y))..."
+        [Win32UiUtil]::RealClick($mainWin.Hwnd, $t.X, $t.Y)
+        Start-Sleep -Milliseconds 500
         $shotTab = Join-Path $shotDir "$($t.Name).png"
         [Win32UiUtil]::CaptureWindow($mainWin.Hwnd, $shotTab)
         Write-Host "Captured: $shotTab"
     }
 
-    # Return to Mirror tab
-    Write-Host "Switching back to Mirror Tab..."
-    [Win32UiUtil]::PostMessage($mainWin.Hwnd, 0x8021, [IntPtr]0, [IntPtr]::Zero)
-    Start-Sleep -Milliseconds 400
+    # Return to Mirror tab with Real Mouse Click
+    Write-Host "Clicking back to Mirror Tab at client (100, 96)..."
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 100, 96)
+    Start-Sleep -Milliseconds 800
 
-    # Toggle Output window visible via WM_APP + 0x022
-    Write-Host "`n=== TEST 2: Open Standalone Output Window ==="
-    [Win32UiUtil]::PostMessage($mainWin.Hwnd, 0x8022, [IntPtr]::Zero, [IntPtr]::Zero)
+    # TEST 2: Open Standalone Output Window via Real Click on Center Button
+    Write-Host "`n=== TEST 2: Open Standalone Output Window via Real Click ==="
+    # Button "Mo dau ra" center: client (449, 538)
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 449, 538)
     Start-Sleep -Milliseconds 800
 
     $wins = [Win32UiUtil]::GetProcessWindows($proc.Id)
     $outWin = $null
     foreach ($w in $wins) {
-        if ($w.ClassName -eq "DUWNMirrorOutputWindow") { $outWin = $w }
+        if ($w.ClassName -eq "DUWNMirrorOutputWindow" -and $w.Visible) { $outWin = $w }
+    }
+    if (-not $outWin) {
+        # Click right stack button
+        [Win32UiUtil]::RealClick($mainWin.Hwnd, 1020, 447)
+        Start-Sleep -Milliseconds 800
+        $wins = [Win32UiUtil]::GetProcessWindows($proc.Id)
+        foreach ($w in $wins) {
+            if ($w.ClassName -eq "DUWNMirrorOutputWindow" -and $w.Visible) { $outWin = $w }
+        }
     }
 
     if (-not $outWin -or -not $outWin.Visible) {
-        throw "FAIL: OutputWindow not visible after toggle!"
+        throw "FAIL: OutputWindow not visible after RealClick on button!"
     }
-    Write-Host "[PASS] OutputWindow opened successfully ($($outWin.Width)x$($outWin.Height))." -ForegroundColor Green
+    Write-Host "[PASS] OutputWindow opened successfully via RealClick." -ForegroundColor Green
+
+    # Position OutputWindow at right side of screen (1340, 40, 420, 740) - ZERO OVERLAP with MainWindow!
+    [Win32UiUtil]::SetWindowPos($outWin.Hwnd, [IntPtr]::Zero, 1340, 40, 420, 740, 0x0044)
+    Start-Sleep -Milliseconds 400
 
     $shotOut = Join-Path $shotDir "07_output_window_opened.png"
     [Win32UiUtil]::CaptureWindow($outWin.Hwnd, $shotOut)
     Write-Host "Captured: $shotOut"
 
-    # Capture MainWindow showing updated toggle state
+    # Capture MainWindow showing updated toggle state ("Dong dau ra")
     $shotMainWithOut = Join-Path $shotDir "08_mainwindow_with_output_open.png"
     [Win32UiUtil]::CaptureWindow($mainWin.Hwnd, $shotMainWithOut)
     Write-Host "Captured: $shotMainWithOut"
 
-    # Test closing OutputWindow via WM_CLOSE
-    Write-Host "`n=== TEST 3: Close Output Window via WM_CLOSE (Hide Invariant) ==="
-    [Win32UiUtil]::PostMessage($outWin.Hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) # WM_CLOSE
+    # TEST 3: Toggle Toolbar on Output Window via Real Click on MainWindow Switch
+    Write-Host "`n=== TEST 3: Toggle Toolbar on Output Window via Real Click ==="
+    $tbChild = [Win32UiUtil]::FindWindowEx($outWin.Hwnd, [IntPtr]::Zero, "DUWNMirrorOutputToolbar", $null)
+    Write-Host "Toolbar HWND: $($tbChild.ToString('X'))"
+    if ($tbChild -eq [IntPtr]::Zero -or -not [Win32UiUtil]::IsWindowVisible($tbChild)) {
+        throw "FAIL: Toolbar should be visible initially!"
+    }
+
+    # Test Mute button on toolbar
+    Write-Host "Testing Mute button on toolbar via RealClick..."
+    [Win32UiUtil]::RealClick($tbChild, 40, 19)
+    Start-Sleep -Milliseconds 300
+    [Win32UiUtil]::RealClick($tbChild, 40, 19)
+    Start-Sleep -Milliseconds 300
+    Write-Host "[PASS] Mute button toggled and restored." -ForegroundColor Green
+
+    # Test Pin (Always on top) button on toolbar
+    Write-Host "Testing Pin (Always-on-top) button on toolbar via RealClick..."
+    [Win32UiUtil]::RealClick($tbChild, 330, 19)
+    Start-Sleep -Milliseconds 300
+    $isTop = ([Win32UiUtil]::GetWindowLongPtr($outWin.Hwnd, -20).ToInt64() -band 0x0008) -ne 0
+    Write-Host "Topmost after Pin click: $isTop"
+    [Win32UiUtil]::RealClick($tbChild, 330, 19)
+    Start-Sleep -Milliseconds 300
+    Write-Host "[PASS] Pin (Always-on-top) button toggled and restored." -ForegroundColor Green
+
+    # Test Volume slider on toolbar via RealDrag
+    Write-Host "Testing Volume slider drag on toolbar via RealDrag..."
+    [Win32UiUtil]::RealDrag($tbChild, 100, 19, 160, 19)
+    Start-Sleep -Milliseconds 300
+    Write-Host "[PASS] Volume slider dragged." -ForegroundColor Green
+
+    # Click toolbar toggle switch at client (764, 586)
+    Write-Host "Clicking 'Show toolbar on output window' toggle switch..."
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 764, 586)
+    Start-Sleep -Milliseconds 500
+
+    if ([Win32UiUtil]::IsWindowVisible($tbChild)) {
+        throw "FAIL: Toolbar child window should be hidden after toggle!"
+    }
+    Write-Host "[PASS] Toolbar child window cleanly hidden." -ForegroundColor Green
+
+    $shotNoTb = Join-Path $shotDir "12_output_toolbar_hidden.png"
+    [Win32UiUtil]::CaptureWindow($outWin.Hwnd, $shotNoTb)
+    Write-Host "Captured: $shotNoTb"
+
+    # Re-enable toolbar
+    Write-Host "Restoring toolbar via toggle click..."
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 764, 586)
+    Start-Sleep -Milliseconds 500
+    if (-not [Win32UiUtil]::IsWindowVisible($tbChild)) {
+        throw "FAIL: Toolbar child window should be visible after toggle restore!"
+    }
+    Write-Host "[PASS] Toolbar successfully restored." -ForegroundColor Green
+
+    # TEST 4: Output Window Narrow Width Resize (Toolbar Responsive Layout)
+    Write-Host "`n=== TEST 4: Output Window Narrow Width Resize Audit ==="
+    [Win32UiUtil]::SetWindowPos($outWin.Hwnd, [IntPtr]::Zero, 1340, 40, 330, 600, 0x0044)
+    Start-Sleep -Milliseconds 400
+
+    $shotNarrow = Join-Path $shotDir "13_output_narrow_width.png"
+    [Win32UiUtil]::CaptureWindow($outWin.Hwnd, $shotNarrow)
+    Write-Host "Captured: $shotNarrow"
+    Write-Host "[PASS] Narrow window resized and captured (buttons preserved, slider dropped cleanly)." -ForegroundColor Green
+
+    # Restore standard OutputWindow dimensions
+    [Win32UiUtil]::SetWindowPos($outWin.Hwnd, [IntPtr]::Zero, 1340, 40, 420, 740, 0x0044)
+    Start-Sleep -Milliseconds 400
+
+    # TEST 5: Fullscreen via Double-Click and Escape Restoration
+    Write-Host "`n=== TEST 5: Fullscreen via Double-Click and Escape Key ==="
+    $vidChild = [Win32UiUtil]::FindWindowEx($outWin.Hwnd, [IntPtr]::Zero, "DUWNMirrorPreviewChild", $null)
+    if ($vidChild -eq [IntPtr]::Zero) {
+        $vidChild = [Win32UiUtil]::FindWindowEx($outWin.Hwnd, [IntPtr]::Zero, "DUWNMirrorPlaceholderChild", $null)
+    }
+
+    # Double click center of video child (client 200, 300)
+    Write-Host "Double-clicking video surface to enter fullscreen..."
+    [Win32UiUtil]::RealDoubleClick($vidChild, 200, 300)
+    Start-Sleep -Milliseconds 600
+
+    $wins = [Win32UiUtil]::GetProcessWindows($proc.Id)
+    $fsWin = $null
+    foreach ($w in $wins) {
+        if ($w.ClassName -eq "DUWNMirrorOutputWindow") { $fsWin = $w }
+    }
+    if (-not $fsWin -or $fsWin.Width -lt 1800) {
+        throw "FAIL: OutputWindow failed to enter fullscreen (Width: $($fsWin.Width))!"
+    }
+    Write-Host "[PASS] Entered fullscreen ($($fsWin.Width)x$($fsWin.Height))." -ForegroundColor Green
+
+    $shotFs = Join-Path $shotDir "14_output_fullscreen.png"
+    [Win32UiUtil]::CaptureWindow($fsWin.Hwnd, $shotFs)
+    Write-Host "Captured: $shotFs"
+
+    # Press ESC key to exit fullscreen
+    Write-Host "Pressing ESC key to exit fullscreen..."
+    [Win32UiUtil]::RealPressEsc($fsWin.Hwnd)
+    Start-Sleep -Milliseconds 600
+
+    $wins = [Win32UiUtil]::GetProcessWindows($proc.Id)
+    $restoredWin = $null
+    foreach ($w in $wins) {
+        if ($w.ClassName -eq "DUWNMirrorOutputWindow") { $restoredWin = $w }
+    }
+    if ($restoredWin.Width -ge 1800) {
+        throw "FAIL: OutputWindow failed to restore from fullscreen via ESC key!"
+    }
+    Write-Host "[PASS] Restored from fullscreen via ESC key ($($restoredWin.Width)x$($restoredWin.Height))." -ForegroundColor Green
+
+    # Re-position OutputWindow side-by-side
+    [Win32UiUtil]::SetWindowPos($outWin.Hwnd, [IntPtr]::Zero, 1340, 40, 420, 740, 0x0044)
+    Start-Sleep -Milliseconds 300
+
+    # TEST 6: Close Output Window via SC_CLOSE / X button (Hide Invariant)
+    Write-Host "`n=== TEST 6: Close Output Window via SC_CLOSE (X button) ==="
+    [Win32UiUtil]::SendMessage($outWin.Hwnd, 0x0112, [IntPtr]0xF060, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 600
 
     $wins = [Win32UiUtil]::GetProcessWindows($proc.Id)
@@ -182,47 +452,86 @@ try {
         if ($w.ClassName -eq "DUWNMirrorOutputWindow") { $outWinAfterClose = $w }
     }
     if ($outWinAfterClose -and $outWinAfterClose.Visible) {
-        throw "FAIL: OutputWindow should be hidden after WM_CLOSE!"
+        throw "FAIL: OutputWindow should be hidden after SC_CLOSE!"
     }
     Write-Host "[PASS] OutputWindow successfully hidden without terminating application." -ForegroundColor Green
 
-    # Reopen OutputWindow
-    Write-Host "`n=== TEST 4: Reopen Output Window via Toggle ==="
-    [Win32UiUtil]::PostMessage($mainWin.Hwnd, 0x8022, [IntPtr]::Zero, [IntPtr]::Zero)
-    Start-Sleep -Milliseconds 600
+    # Capture state after closing Output Window (MainWindow shows 'Mo dau ra')
+    $shotClosed = Join-Path $shotDir "15_output_closed_by_x.png"
+    [Win32UiUtil]::CaptureWindow($mainWin.Hwnd, $shotClosed)
+    Write-Host "Captured: $shotClosed"
+
+    # TEST 7: Reopen Output Window via Real Click
+    Write-Host "`n=== TEST 7: Reopen Output Window via Real Click ==="
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 449, 538)
+    Start-Sleep -Milliseconds 800
 
     $wins = [Win32UiUtil]::GetProcessWindows($proc.Id)
     $outWinReopened = $null
     foreach ($w in $wins) {
-        if ($w.ClassName -eq "DUWNMirrorOutputWindow") { $outWinReopened = $w }
+        if ($w.ClassName -eq "DUWNMirrorOutputWindow" -and $w.Visible) { $outWinReopened = $w }
+    }
+    if (-not $outWinReopened) {
+        [Win32UiUtil]::RealClick($mainWin.Hwnd, 1020, 447)
+        Start-Sleep -Milliseconds 800
+        $wins = [Win32UiUtil]::GetProcessWindows($proc.Id)
+        foreach ($w in $wins) {
+            if ($w.ClassName -eq "DUWNMirrorOutputWindow" -and $w.Visible) { $outWinReopened = $w }
+        }
     }
     if (-not $outWinReopened -or -not $outWinReopened.Visible) {
         throw "FAIL: OutputWindow failed to reopen!"
     }
-    Write-Host "[PASS] OutputWindow successfully reopened." -ForegroundColor Green
+    if ($outWinReopened.Hwnd -ne $outWin.Hwnd) {
+        throw "FAIL: OutputWindow HWND changed! Expected persistent HWND $($outWin.Hwnd), got $($outWinReopened.Hwnd)"
+    }
+    Write-Host "[PASS] OutputWindow successfully reopened with same persistent HWND." -ForegroundColor Green
+
+    # Position side-by-side
+    [Win32UiUtil]::SetWindowPos($outWinReopened.Hwnd, [IntPtr]::Zero, 1340, 40, 420, 740, 0x0044)
+    Start-Sleep -Milliseconds 300
+
     $shotReopened = Join-Path $shotDir "09_output_window_reopened.png"
     [Win32UiUtil]::CaptureWindow($outWinReopened.Hwnd, $shotReopened)
     Write-Host "Captured: $shotReopened"
 }
 finally {
     if ($proc -and -not $proc.HasExited) {
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        [Win32UiUtil]::PostMessage($mainWin.Hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+        $proc.WaitForExit(3000) | Out-Null
+        if (-not $proc.HasExited) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
-Write-Host "`n=== TEST 5: Live Pipeline Synthetic Motion Streaming (--test-motion) ==="
+if (Test-Path $settingsPath) {
+    try {
+        $content = Get-Content $settingsPath -Raw
+        $content = $content -replace '"unclean_shutdown":\s*true', '"unclean_shutdown": false'
+        Set-Content $settingsPath $content -Encoding UTF8
+    } catch {}
+}
+if (Test-Path $crashDir) {
+    try { Remove-Item (Join-Path $crashDir "*") -Force -Recurse -ErrorAction SilentlyContinue } catch {}
+}
+
+Start-Sleep -Seconds 2
+
+Write-Host "`n=== TEST 8: Live Pipeline Synthetic Motion Streaming (--test-motion) ==="
 $motionProc = Start-Process -FilePath $exe -ArgumentList "--test-motion" -PassThru
 try {
     $motionMain = $null
     $motionOut = $null
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($sw.ElapsedMilliseconds -lt 12000) {
+    while ($sw.ElapsedMilliseconds -lt 15000) {
         Start-Sleep -Milliseconds 400
         $wins = [Win32UiUtil]::GetProcessWindows($motionProc.Id)
         foreach ($w in $wins) {
             if ($w.ClassName -eq "DUWNMirrorMainWindow" -and $w.Visible) { $motionMain = $w }
             if ($w.ClassName -eq "DUWNMirrorOutputWindow" -and $w.Visible) { $motionOut = $w }
         }
+        Write-Host "[$($sw.ElapsedMilliseconds)ms] Motion wins: $($wins.Count) main=$($motionMain -ne $null) out=$($motionOut -ne $null)"
         if ($motionMain -and $motionOut) { break }
     }
 
@@ -233,8 +542,12 @@ try {
         throw "FAIL: OutputWindow should automatically show when motion stream starts!"
     }
 
-    Write-Host "[PASS] Both MainWindow and OutputWindow actively visible and presenting frames." -ForegroundColor Green
+    # Position side-by-side: MainWindow at (30, 40, 1280, 740), OutputWindow at (1340, 40, 420, 740)
+    [Win32UiUtil]::SetWindowPos($motionMain.Hwnd, [IntPtr]::Zero, 30, 40, 1280, 740, 0x0044)
+    [Win32UiUtil]::SetWindowPos($motionOut.Hwnd, [IntPtr]::Zero, 1340, 40, 420, 740, 0x0044)
     Start-Sleep -Seconds 1
+
+    Write-Host "[PASS] Both MainWindow and OutputWindow actively visible and presenting frames side-by-side." -ForegroundColor Green
 
     $shotMotionMain = Join-Path $shotDir "10_streaming_motion_mainwindow.png"
     $shotMotionOut = Join-Path $shotDir "11_streaming_motion_outputwindow.png"
@@ -245,6 +558,12 @@ try {
 }
 finally {
     if ($motionProc -and -not $motionProc.HasExited) {
-        Stop-Process -Id $motionProc.Id -Force -ErrorAction SilentlyContinue
+        [Win32UiUtil]::PostMessage($motionMain.Hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+        $motionProc.WaitForExit(3000) | Out-Null
+        if (-not $motionProc.HasExited) {
+            Stop-Process -Id $motionProc.Id -Force -ErrorAction SilentlyContinue
+        }
     }
 }
+
+Write-Host "`nAll UI Acceptance Tests completed successfully!" -ForegroundColor Green

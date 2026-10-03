@@ -202,7 +202,7 @@ struct UiState {
     bool remember_output_pos{true};
 
     // Window & Output Control Toggles
-    bool output_window_visible{true};
+    bool output_window_visible{false};
     bool output_fullscreen{false};
     bool aspect_locked{true};
     bool always_on_top{false};

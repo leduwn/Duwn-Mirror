@@ -1135,6 +1135,11 @@ bool App::Init() noexcept {
         }
     });
 
+    if (m_window) {
+        m_window->State().output_window_visible = m_output_window->IsVisible();
+        m_window->State().show_output_toolbar   = m_settings.show_output_toolbar;
+    }
+
     if (m_settings.output_x != Settings::kDefaultWindowPos &&
         m_settings.output_y != Settings::kDefaultWindowPos &&
         m_settings.output_window_w > 0 && m_settings.output_window_h > 0) {

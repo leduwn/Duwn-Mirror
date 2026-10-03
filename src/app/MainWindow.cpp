@@ -100,9 +100,12 @@ bool MainWindow::Create(const Settings& settings) noexcept {
 
     SetAppWindowIcons(m_hwnd);
 
-    m_state.aspect_locked = settings.aspect_ratio_locked;
-    m_state.always_on_top = settings.always_on_top;
-    m_state.audio_muted   = settings.audio_muted;
+    m_state.aspect_locked       = settings.aspect_ratio_locked;
+    m_state.always_on_top       = settings.always_on_top;
+    m_state.audio_muted         = settings.audio_muted;
+    m_state.audio_volume        = settings.monitor_volume;
+    m_state.show_output_toolbar = settings.show_output_toolbar;
+    m_state.output_window_visible = false;
 
     ApplyImmersiveDarkMode();
 

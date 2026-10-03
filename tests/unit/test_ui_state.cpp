@@ -21,7 +21,7 @@ DUWN_TEST(UiState_DefaultValuesAreSanitized) {
     DUWN_ASSERT(!state.audio_muted);
     DUWN_ASSERT(state.active_tab == duwn::ui::NavTab::Mirror);
     DUWN_ASSERT(state.aspect_locked == true);
-    DUWN_ASSERT(state.output_window_visible == true);
+    DUWN_ASSERT(state.output_window_visible == false);
 }
 
 DUWN_TEST(UiState_ConnectionStatusTransitions) {
