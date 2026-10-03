@@ -602,6 +602,17 @@ enum class S {
     Common_BackToWorkspace,
     Common_QuickVolume,
 
+    // Standalone Output & Toolbar additions
+    Mirror_Toggle_OutputToolbar,
+    Mirror_Btn_DisconnectSession,
+    Mirror_Btn_DisconnectDisabledTooltip,
+    Output_WaitingForFrame,
+    Output_Fit,
+    Output_AlwaysOnTop,
+    Output_Fullscreen,
+    Output_Mute,
+    Output_Unmute,
+
     _COUNT
 };
 

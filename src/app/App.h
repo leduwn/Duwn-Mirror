@@ -93,6 +93,8 @@ private:
     void HandleWiredControlAction(int action_id) noexcept;
     void StartWiredControl() noexcept;
     void StopWiredControl() noexcept;
+    void ToggleMute() noexcept;
+    void SetVolume(float vol) noexcept;
     video::AspectRatioMode GetEffectiveAspectRatioMode() const noexcept;
     video::OutputDimensions ComputeCurrentOutputDimensions(
         uint32_t src_w, uint32_t src_h,
@@ -142,8 +144,8 @@ private:
     Settings  m_settings;
 
     std::unique_ptr<MainWindow>      m_window;        // Control Window (title bar, status)
-    std::unique_ptr<OutputWindow>    m_output_window; // Borderless video output — OBS target
-    std::unique_ptr<PreviewWindow>   m_preview_window;// User-facing preview viewer window
+    std::unique_ptr<OutputWindow>    m_output_window; // Standalone Output Window
+    HWND                             m_capture_host_hwnd{nullptr}; // Off-screen surface for clean export renderer
     std::unique_ptr<video::D3D11Device>   m_d3d;
     std::unique_ptr<video::VideoDecoder>  m_video_decoder;
     std::unique_ptr<video::FrameScheduler> m_scheduler;

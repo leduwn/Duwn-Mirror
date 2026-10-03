@@ -63,9 +63,11 @@ public:
     bool OnKeyDown(WPARAM vk, UiState& state) noexcept;
 
     using VolumeCallback = std::function<void(float)>;
+    using BoolCallback = std::function<void(bool)>;
 
     // Callbacks binding
     void SetOnToggleOutputWindow(ActionCallback cb) noexcept { m_on_toggle_output = std::move(cb); }
+    void SetOnToggleOutputToolbar(BoolCallback cb) noexcept { m_on_toggle_output_toolbar = std::move(cb); }
     void SetOnToggleFullscreen(ActionCallback cb) noexcept { m_on_toggle_fullscreen = std::move(cb); }
     void SetOnToggleAspectLock(ActionCallback cb) noexcept { m_on_toggle_aspect_lock = std::move(cb); }
     void SetOnToggleAlwaysOnTop(ActionCallback cb) noexcept { m_on_toggle_always_on_top = std::move(cb); }
@@ -163,6 +165,7 @@ private:
 
     // Callbacks
     ActionCallback                  m_on_toggle_output;
+    BoolCallback                    m_on_toggle_output_toolbar;
     ActionCallback                  m_on_toggle_fullscreen;
     ActionCallback                  m_on_toggle_aspect_lock;
     ActionCallback                  m_on_toggle_always_on_top;

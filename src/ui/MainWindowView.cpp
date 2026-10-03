@@ -411,6 +411,11 @@ bool MainWindowView::OnMouseUp(int x, int y, UiState& state) noexcept {
             state.output_window_visible = !state.output_window_visible;
             if (m_on_toggle_output) m_on_toggle_output();
             break;
+        case Control_Toggle_OutputToolbar:
+            state.show_output_toolbar = !state.show_output_toolbar;
+            if (m_on_toggle_output_toolbar) m_on_toggle_output_toolbar(state.show_output_toolbar);
+            if (m_on_setting_changed) m_on_setting_changed(Control_Toggle_OutputToolbar, state.show_output_toolbar ? 1 : 0);
+            break;
         case Control_Btn_FullscreenPreview:
             if (m_on_fullscreen_preview) m_on_fullscreen_preview();
             break;
@@ -435,7 +440,13 @@ bool MainWindowView::OnMouseUp(int x, int y, UiState& state) noexcept {
             if (m_on_toggle_mute) m_on_toggle_mute();
             break;
         case Control_Btn_Disconnect:
-            if (m_on_disconnect) m_on_disconnect();
+            if (state.status == ConnectionStatus::Streaming ||
+                state.status == ConnectionStatus::Connecting ||
+                state.session_state == airplay::AirPlaySessionState::Streaming ||
+                state.session_state == airplay::AirPlaySessionState::Connected ||
+                state.session_state == airplay::AirPlaySessionState::Paused) {
+                if (m_on_disconnect) m_on_disconnect();
+            }
             break;
         case Control_Btn_FlushPipeline:
             if (m_on_flush_pipeline) m_on_flush_pipeline();
@@ -791,13 +802,10 @@ void MainWindowView::Render(const UiState& state) noexcept {
     }
 
     if (state.active_tab == NavTab::Mirror) {
-        if (state.is_first_run) {
-            RenderFirstRunWelcome(state, D2D1::RectF(sidebar_w, content_y, total_w, content_y + content_h));
-        } else {
-            RenderConnectionModeSelector(state,
-                D2D1::RectF(sidebar_w, content_y, total_w, content_y + 84.0f));
-            const float mirror_y = content_y + 84.0f;
-            const float mirror_h = content_h - 84.0f;
+        RenderConnectionModeSelector(state,
+            D2D1::RectF(sidebar_w, content_y, total_w, content_y + 84.0f));
+        const float mirror_y = content_y + 84.0f;
+        const float mirror_h = content_h - 84.0f;
             if (state.connection_mode == 1) {
                 RenderWiredMirrorView(state, D2D1::RectF(sidebar_w, mirror_y, total_w, mirror_y + mirror_h));
             } else if (m_tier == LayoutTier::Large) {
@@ -836,7 +844,6 @@ void MainWindowView::Render(const UiState& state) noexcept {
                     RenderDevicePreview(state, preview_rc);
                 }
             }
-        }
     } else {
         D2D1_RECT_F full_content_rc = D2D1::RectF(sidebar_w, content_y, total_w, content_y + body_h);
         if (state.active_tab == NavTab::Video) {
@@ -1572,39 +1579,42 @@ void MainWindowView::RenderDevicePreview(const UiState& state, const D2D1_RECT_F
             );
         }
 
-        // Action Buttons: Open/Hide Preview & Open/Hide Output
-        float action_y = grid_top + tile_h * 2.0f + 24.0f;
-        float action_w = 400.0f;
-        float action_h = 44.0f;
+        // Action Controls: Open/Hide Output, Disconnect, Toolbar Toggle
+        float action_y = grid_top + tile_h * 2.0f + 20.0f;
+        float action_w = std::min(440.0f, card_rc.right - card_rc.left - 40.0f);
+        float action_h = 40.0f;
         float btn_half_w = (action_w - 12.0f) * 0.5f;
 
-        // Preview button
-        D2D1_RECT_F prev_act_rc = D2D1::RectF(cx - action_w * 0.5f, action_y, cx - action_w * 0.5f + btn_half_w, action_y + action_h);
-        RegisterClickable(prev_act_rc, Control_Btn_TogglePreview);
-        bool ph = (state.hovered_control == Control_Btn_TogglePreview);
-        bool pp = (state.pressed_control == Control_Btn_TogglePreview);
-        std::wstring_view prev_act_lbl = state.preview_visible
-            ? loc::Get(loc::S::Mirror_Btn_HidePreview)
-            : loc::Get(loc::S::Mirror_Btn_ShowPreview);
-        m_renderer.DrawButton(prev_act_rc, prev_act_lbl, state.preview_visible, ph, pp, IconType::Monitor);
-
-        // Output button
-        D2D1_RECT_F out_act_rc = D2D1::RectF(cx - action_w * 0.5f + btn_half_w + 12.0f, action_y, cx + action_w * 0.5f, action_y + action_h);
-        RegisterClickable(out_act_rc, Control_Btn_ToggleOutput);
+        // 1. Output Button (Hiện/Ẩn output)
+        D2D1_RECT_F out_act_rc = D2D1::RectF(cx - action_w * 0.5f, action_y, cx - action_w * 0.5f + btn_half_w, action_y + action_h);
+        RegisterClickable(out_act_rc, Control_Btn_ToggleOutput, loc::Get(loc::S::Mirror_Btn_ShowOutput));
         bool oh = (state.hovered_control == Control_Btn_ToggleOutput);
         bool op = (state.pressed_control == Control_Btn_ToggleOutput);
         std::wstring_view out_act_lbl = state.output_window_visible
             ? loc::Get(loc::S::Mirror_Btn_HideOutput)
             : loc::Get(loc::S::Mirror_Btn_ShowOutput);
-        m_renderer.DrawButton(out_act_rc, out_act_lbl, false, oh, op, IconType::Monitor);
+        m_renderer.DrawButton(out_act_rc, out_act_lbl, state.output_window_visible, oh, op, IconType::Monitor);
 
-        // Hint text below button
-        D2D1_RECT_F hint_rc = D2D1::RectF(card_rc.left + 20.0f, action_y + action_h + 8.0f, card_rc.right - 20.0f, action_y + action_h + 28.0f);
-        m_renderer.DrawTextSimple(
-            loc::Get(loc::S::Mirror_CleanHwndDesc),
-            m_renderer.FontSmall(), hint_rc,
-            m_renderer.BrushTextMuted(), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER
-        );
+        // 2. Disconnect Button (Ngắt kết nối)
+        D2D1_RECT_F disc_act_rc = D2D1::RectF(cx - action_w * 0.5f + btn_half_w + 12.0f, action_y, cx + action_w * 0.5f, action_y + action_h);
+        RegisterClickable(disc_act_rc, Control_Btn_Disconnect, loc::Get(loc::S::Mirror_Btn_DisconnectSession));
+        bool dh = (state.hovered_control == Control_Btn_Disconnect);
+        bool dp = (state.pressed_control == Control_Btn_Disconnect);
+        m_renderer.DrawButton(disc_act_rc, loc::Get(loc::S::Mirror_Btn_DisconnectSession), false, dh, dp, IconType::Power);
+
+        // 3. Toggle: Show toolbar on output window
+        float toggle_y = action_y + action_h + 16.0f;
+        D2D1_RECT_F toggle_rc = D2D1::RectF(cx - action_w * 0.5f, toggle_y, cx + action_w * 0.5f, toggle_y + 24.0f);
+        m_renderer.DrawTextSimple(loc::Get(loc::S::Mirror_Toggle_OutputToolbar), m_renderer.FontBody(),
+            D2D1::RectF(toggle_rc.left, toggle_rc.top, toggle_rc.right - 46.0f, toggle_rc.bottom),
+            m_renderer.BrushTextSecondary(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        D2D1_RECT_F pill = D2D1::RectF(toggle_rc.right - 36.0f, toggle_rc.top + 3.0f, toggle_rc.right, toggle_rc.bottom - 3.0f);
+        m_renderer.FillRoundedRect(pill, 9.0f, state.show_output_toolbar ? m_renderer.BrushBrandBlue() : m_renderer.BrushCardBorder());
+        float thumb_x = state.show_output_toolbar ? (pill.right - 14.0f) : (pill.left + 2.0f);
+        D2D1_RECT_F thumb = D2D1::RectF(thumb_x, pill.top + 2.0f, thumb_x + 12.0f, pill.bottom - 2.0f);
+        m_renderer.FillRoundedRect(thumb, 6.0f, m_renderer.BrushTextPrimary());
+        RegisterClickable(toggle_rc, Control_Toggle_OutputToolbar, loc::Get(loc::S::Mirror_Toggle_OutputToolbar));
 
     } else if (state.status == ConnectionStatus::Connecting) {
         // CONNECTING / STARTING STATE
@@ -1691,40 +1701,11 @@ void MainWindowView::RenderDevicePreview(const UiState& state, const D2D1_RECT_F
             m_renderer.BrushTextSecondary(), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER
         );
 
-        // Embedded preview placeholder frame
-        float prev_w = std::min(440.0f, card_rc.right - card_rc.left - 40.0f);
-        float prev_h = 60.0f;
-        float prev_x = cx - prev_w * 0.5f;
-        float prev_y = top_y + 202.0f;
-        D2D1_RECT_F prev_rc = D2D1::RectF(prev_x, prev_y, prev_x + prev_w, prev_y + prev_h);
-        m_renderer.DrawInset(prev_rc, 8.0f);
-        m_renderer.DrawIcon(IconType::Monitor, D2D1::RectF(prev_x + 14.0f, prev_y + 18.0f, prev_x + 36.0f, prev_y + 40.0f), colors::BrandBlue, 1.8f);
-        m_renderer.DrawTextSimple(loc::Get(loc::S::Mirror_Waiting_Video), m_renderer.FontSmallBold(),
-            D2D1::RectF(prev_x + 44.0f, prev_y + 12.0f, prev_x + prev_w - 14.0f, prev_y + 32.0f),
-            m_renderer.BrushTextSecondary(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
-        std::wstring rec_preset_str;
-        switch (state.receiver_quality) {
-        case 0: rec_preset_str = loc::Get(loc::S::Opt_Rec_Auto); break;
-        case 1: rec_preset_str = loc::Get(loc::S::Opt_Rec_720p30); break;
-        case 2: rec_preset_str = loc::Get(loc::S::Opt_Rec_720p60); break;
-        case 3: rec_preset_str = loc::Get(loc::S::Opt_Rec_1080p30); break;
-        case 4: rec_preset_str = loc::Get(loc::S::Opt_Rec_1080p60); break;
-        case 5: rec_preset_str = loc::Get(loc::S::Opt_Rec_1440p60); break;
-        case 6: rec_preset_str = loc::Get(loc::S::Opt_Rec_Original60); break;
-        default: rec_preset_str = loc::Get(loc::S::Opt_Rec_Auto); break;
-        }
-        std::wstring prev_sub = std::format(L"{} • {}", rec_preset_str,
-            state.is_public_network ? L"Public Network" : L"LAN / Wi-Fi");
-        m_renderer.DrawTextSimple(prev_sub, m_renderer.FontSmall(),
-            D2D1::RectF(prev_x + 44.0f, prev_y + 32.0f, prev_x + prev_w - 14.0f, prev_y + 50.0f),
-            m_renderer.BrushTextMuted(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-
         // 3-Step Connection Guide Box
         float box_w = std::min(440.0f, card_rc.right - card_rc.left - 40.0f);
         float box_h = 100.0f;
         float box_x = cx - box_w * 0.5f;
-        float box_y = prev_y + prev_h + 12.0f;
+        float box_y = top_y + 200.0f;
         D2D1_RECT_F guide_rc = D2D1::RectF(box_x, box_y, box_x + box_w, box_y + box_h);
 
         m_renderer.DrawInset(guide_rc, 10.0f);
@@ -1746,19 +1727,40 @@ void MainWindowView::RenderDevicePreview(const UiState& state, const D2D1_RECT_F
             m_renderer.BrushTextAccent(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER
         );
 
-        // Factual engine note at bottom
-        D2D1_RECT_F foot_rc = D2D1::RectF(card_rc.left + 20.0f, box_y + box_h + 16.0f, card_rc.right - 20.0f, box_y + box_h + 38.0f);
-        m_renderer.DrawTextSimple(
-            loc::Get(loc::S::Mirror_EngineNote),
-            m_renderer.FontSmall(), foot_rc,
-            m_renderer.BrushTextMuted(), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER
-        );
-        D2D1_RECT_F restart = D2D1::RectF(cx - 125.0f, box_y + box_h + 48.0f,
-            cx + 125.0f, box_y + box_h + 86.0f);
-        RegisterClickable(restart, Control_Btn_Disconnect, loc::Get(loc::S::Wireless_RestartService), true);
-        m_renderer.DrawButton(restart, loc::Get(loc::S::Wireless_RestartService), false,
-            state.hovered_control == Control_Btn_Disconnect,
-            state.pressed_control == Control_Btn_Disconnect, IconType::Refresh);
+        // Action controls: Open/Hide Output, Disconnect (disabled), Toolbar Toggle
+        float action_y = box_y + box_h + 20.0f;
+        float action_w = box_w;
+        float action_h = 40.0f;
+        float btn_half_w = (action_w - 12.0f) * 0.5f;
+
+        // 1. Output Button (Hiện/Ẩn output)
+        D2D1_RECT_F out_act_rc = D2D1::RectF(cx - action_w * 0.5f, action_y, cx - action_w * 0.5f + btn_half_w, action_y + action_h);
+        RegisterClickable(out_act_rc, Control_Btn_ToggleOutput, loc::Get(loc::S::Mirror_Btn_ShowOutput));
+        bool oh = (state.hovered_control == Control_Btn_ToggleOutput);
+        bool op = (state.pressed_control == Control_Btn_ToggleOutput);
+        std::wstring_view out_act_lbl = state.output_window_visible
+            ? loc::Get(loc::S::Mirror_Btn_HideOutput)
+            : loc::Get(loc::S::Mirror_Btn_ShowOutput);
+        m_renderer.DrawButton(out_act_rc, out_act_lbl, state.output_window_visible, oh, op, IconType::Monitor);
+
+        // 2. Disconnect Button (Disabled when not connected)
+        D2D1_RECT_F disc_act_rc = D2D1::RectF(cx - action_w * 0.5f + btn_half_w + 12.0f, action_y, cx + action_w * 0.5f, action_y + action_h);
+        RegisterClickable(disc_act_rc, Control_Btn_Disconnect, loc::Get(loc::S::Mirror_Btn_DisconnectDisabledTooltip));
+        m_renderer.DrawButton(disc_act_rc, loc::Get(loc::S::Mirror_Btn_DisconnectSession), false, false, false, IconType::Power);
+
+        // 3. Toggle: Show toolbar on output window
+        float toggle_y = action_y + action_h + 16.0f;
+        D2D1_RECT_F toggle_rc = D2D1::RectF(cx - action_w * 0.5f, toggle_y, cx + action_w * 0.5f, toggle_y + 24.0f);
+        m_renderer.DrawTextSimple(loc::Get(loc::S::Mirror_Toggle_OutputToolbar), m_renderer.FontBody(),
+            D2D1::RectF(toggle_rc.left, toggle_rc.top, toggle_rc.right - 46.0f, toggle_rc.bottom),
+            m_renderer.BrushTextSecondary(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        D2D1_RECT_F pill = D2D1::RectF(toggle_rc.right - 36.0f, toggle_rc.top + 3.0f, toggle_rc.right, toggle_rc.bottom - 3.0f);
+        m_renderer.FillRoundedRect(pill, 9.0f, state.show_output_toolbar ? m_renderer.BrushBrandBlue() : m_renderer.BrushCardBorder());
+        float thumb_x = state.show_output_toolbar ? (pill.right - 14.0f) : (pill.left + 2.0f);
+        D2D1_RECT_F thumb = D2D1::RectF(thumb_x, pill.top + 2.0f, thumb_x + 12.0f, pill.bottom - 2.0f);
+        m_renderer.FillRoundedRect(thumb, 6.0f, m_renderer.BrushTextPrimary());
+        RegisterClickable(toggle_rc, Control_Toggle_OutputToolbar, loc::Get(loc::S::Mirror_Toggle_OutputToolbar));
     }
 
     m_renderer.PopClip();
@@ -1980,12 +1982,15 @@ void MainWindowView::RenderControlsCard(const UiState& state, const D2D1_RECT_F&
     float pri_h = 32.0f;
     float btn_w = (card_rc.right - card_rc.left - 28.0f - 8.0f) * 0.5f;
 
-    // 1. Chỉ màn hình (Screen Only) button
-    D2D1_RECT_F screen_btn_rc = D2D1::RectF(card_rc.left + 14.0f, pri_top, card_rc.left + 14.0f + btn_w, pri_top + pri_h);
-    RegisterClickable(screen_btn_rc, Control_Btn_ToggleScreenOnly, loc::Get(loc::S::Common_ScreenOnly));
-    bool scr_h = (state.hovered_control == Control_Btn_ToggleScreenOnly);
-    bool scr_p = (state.pressed_control == Control_Btn_ToggleScreenOnly);
-    m_renderer.DrawButton(screen_btn_rc, loc::Get(loc::S::Common_ScreenOnly), true, scr_h, scr_p, IconType::Maximize);
+    // 1. Hiện/Ẩn Output (Toggle Output Window) button
+    D2D1_RECT_F out_btn_rc = D2D1::RectF(card_rc.left + 14.0f, pri_top, card_rc.left + 14.0f + btn_w, pri_top + pri_h);
+    RegisterClickable(out_btn_rc, Control_Btn_ToggleOutput, loc::Get(loc::S::Mirror_Btn_ShowOutput));
+    bool out_h = (state.hovered_control == Control_Btn_ToggleOutput);
+    bool out_p = (state.pressed_control == Control_Btn_ToggleOutput);
+    std::wstring_view out_lbl = state.output_window_visible
+        ? loc::Get(loc::S::Mirror_Btn_HideOutput)
+        : loc::Get(loc::S::Mirror_Btn_ShowOutput);
+    m_renderer.DrawButton(out_btn_rc, out_lbl, state.output_window_visible, out_h, out_p, IconType::Monitor);
 
     // 2. Toàn màn hình (Fullscreen) button
     D2D1_RECT_F full_btn_rc = D2D1::RectF(card_rc.left + 14.0f + btn_w + 8.0f, pri_top, card_rc.right - 14.0f, pri_top + pri_h);
@@ -2405,7 +2410,7 @@ void MainWindowView::RenderPerformanceView(const UiState& state, const D2D1_RECT
     m_renderer.DrawTextSimple(state.audio_active ? loc::Get(loc::S::Perf_Active) : loc::Get(loc::S::Status_Idle), m_renderer.FontSubheader(), c4_st_val, state.audio_active ? m_renderer.BrushStatusGreen() : m_renderer.BrushTextPrimary());
 
     D2D1_RECT_F c4_buf_lbl = D2D1::RectF(c4_right_col, c3_r1_top, c4_right_col + c4_half_w, c3_r1_top + 14.0f);
-    m_renderer.DrawTextSimple(loc::Get(loc::S::Audio_BufferLbl), m_renderer.FontSmall(), c4_buf_lbl, m_renderer.BrushTextMuted());
+    m_renderer.DrawTextSimple(loc::Get(loc::S::Audio_BufferMs), m_renderer.FontSmall(), c4_buf_lbl, m_renderer.BrushTextMuted());
     D2D1_RECT_F c4_buf_val = D2D1::RectF(c4_right_col, c3_r1_top + 14.0f, c4_right_col + c4_half_w, c3_r1_top + 36.0f);
     m_renderer.DrawTextSimple(std::format(L"{:.1f} ms", state.audio_buffer_ms), m_renderer.FontSubheader(), c4_buf_val, m_renderer.BrushTextPrimary());
 

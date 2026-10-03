@@ -253,6 +253,12 @@ Settings Settings::Load() noexcept {
     s.preferred_monitor       = ParseInt(FindJsonKeyValue(json, "preferred_monitor"),         s.preferred_monitor);
     s.hide_cursor             = ParseBool(FindJsonKeyValue(json, "hide_cursor"),             s.hide_cursor);
     s.remember_output_pos     = ParseBool(FindJsonKeyValue(json, "remember_output_pos"),     s.remember_output_pos);
+    s.show_output_toolbar     = ParseBool(FindJsonKeyValue(json, "show_output_toolbar"),     s.show_output_toolbar);
+    s.output_x                = ParseInt(FindJsonKeyValue(json, "output_x"),                 s.output_x);
+    s.output_y                = ParseInt(FindJsonKeyValue(json, "output_y"),                 s.output_y);
+    s.output_window_w         = static_cast<uint32_t>(std::max(0, ParseInt(FindJsonKeyValue(json, "output_window_w"), static_cast<int>(s.output_window_w))));
+    s.output_window_h         = static_cast<uint32_t>(std::max(0, ParseInt(FindJsonKeyValue(json, "output_window_h"), static_cast<int>(s.output_window_h))));
+    s.output_always_on_top    = ParseBool(FindJsonKeyValue(json, "output_always_on_top"),    s.output_always_on_top);
 
     uint32_t raw_schema = static_cast<uint32_t>(ParseInt(FindJsonKeyValue(json, "schema_version"), 0));
 
@@ -475,6 +481,12 @@ void Settings::Save() const noexcept {
         "  \"preferred_monitor\": {},\n"
         "  \"hide_cursor\": {},\n"
         "  \"remember_output_pos\": {},\n"
+        "  \"show_output_toolbar\": {},\n"
+        "  \"output_x\": {},\n"
+        "  \"output_y\": {},\n"
+        "  \"output_window_w\": {},\n"
+        "  \"output_window_h\": {},\n"
+        "  \"output_always_on_top\": {},\n"
         "  \"preview_x\": {},\n"
         "  \"preview_y\": {},\n"
         "  \"preview_width\": {},\n"
@@ -525,6 +537,12 @@ void Settings::Save() const noexcept {
         preferred_monitor,
         hide_cursor             ? "true" : "false",
         remember_output_pos     ? "true" : "false",
+        show_output_toolbar     ? "true" : "false",
+        output_x,
+        output_y,
+        output_window_w,
+        output_window_h,
+        output_always_on_top    ? "true" : "false",
         preview_x,
         preview_y,
         preview_width,

@@ -193,6 +193,12 @@ struct Settings {
     int32_t preferred_monitor{0};
     bool hide_cursor{false};
     bool remember_output_pos{true};
+    bool show_output_toolbar{true};
+    int32_t output_x{kDefaultWindowPos};
+    int32_t output_y{kDefaultWindowPos};
+    uint32_t output_window_w{0};
+    uint32_t output_window_h{0};
+    bool output_always_on_top{false};
 
     // Preview Window preferences
     static constexpr int32_t kDefaultWindowPos = static_cast<int32_t>(0x80000000); // Matches CW_USEDEFAULT

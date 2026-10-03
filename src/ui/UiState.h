@@ -206,6 +206,7 @@ struct UiState {
     bool output_fullscreen{false};
     bool aspect_locked{true};
     bool always_on_top{false};
+    bool show_output_toolbar{true};
     bool is_screen_only{false};
     bool preview_visible{false};
     bool preview_always_on_top{false};
@@ -258,6 +259,7 @@ enum ControlId : int {
     Control_Toggle_PreviewAlwaysOnTop = 41,
     Control_Slider_QuickVolume = 42,
     Control_Slider_AudioVolume = 43,
+    Control_Toggle_OutputToolbar = 44,
 
     // Advanced / Diagnostics Action
     Control_Btn_FlushPipeline,

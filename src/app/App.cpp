@@ -445,26 +445,20 @@ int App::Run(bool test_motion, bool verify_capture) noexcept {
 
                 uint32_t fh = static_cast<uint32_t>(msg.lParam);
 
-                if (m_output_window && m_settings.auto_open_output_window) {
-
-                    m_output_window->ShowNoActivate();
-
-                    if (m_window) {
-
-                        m_window->SetOutputControlsState(true, m_output_window->IsFullscreen(),
-
-                            m_output_window->IsAspectLocked(), m_output_window->IsAlwaysOnTop());
-
+                if (m_output_window) {
+                    m_output_window->SetHasFrame(true);
+                    m_output_window->SetVideoGeometry(fw, fh);
+                    if (!m_output_window->IsUserHiddenForSession()) {
+                        m_output_window->ShowNoActivate();
                     }
-
-                }
-
-                if (m_preview_window) {
-                    m_preview_window->SetVideoGeometry(fw, fh);
-                }
-                if (m_window) {
-                    m_window->LayoutVideoSurface();
-                    ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+                    if (m_window) {
+                        m_window->SetOutputControlsState(m_output_window->IsVisible(),
+                            m_output_window->IsFullscreen(),
+                            m_output_window->IsAspectLocked(),
+                            m_output_window->IsAlwaysOnTop());
+                        m_window->State().output_window_visible = m_output_window->IsVisible();
+                        ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+                    }
                 }
                 PublishMetadataSnapshot();
 
@@ -547,6 +541,34 @@ int App::Run(bool test_motion, bool verify_capture) noexcept {
 
 
 
+void App::ToggleMute() noexcept {
+    bool next_muted = !m_settings.audio_muted;
+    if (m_wasapi) m_wasapi->SetMuted(next_muted);
+    m_settings.audio_muted = next_muted;
+    m_settings.Save();
+    if (m_window) {
+        m_window->State().audio_muted = next_muted;
+        ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+    }
+    if (m_output_window) {
+        m_output_window->SetAudioState(next_muted, m_settings.monitor_volume);
+    }
+}
+
+void App::SetVolume(float vol) noexcept {
+    float clamped = std::clamp(vol, 0.0f, 1.0f);
+    if (m_wasapi) m_wasapi->SetVolume(clamped);
+    m_settings.monitor_volume = clamped;
+    m_settings.Save();
+    if (m_window) {
+        m_window->State().audio_volume = clamped;
+        ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+    }
+    if (m_output_window) {
+        m_output_window->SetAudioState(m_settings.audio_muted, clamped);
+    }
+}
+
 bool App::Init() noexcept {
 
     // COM must be initialised on the main thread
@@ -602,162 +624,90 @@ bool App::Init() noexcept {
     // Connect UI Action Callbacks
 
     m_window->SetOnToggleOutputWindow([this] {
-
         if (m_output_window) {
-
-            bool vis = ::IsWindowVisible(m_output_window->Hwnd());
-
-            if (vis) m_output_window->Hide();
-
-            else m_output_window->Show();
-
+            bool vis = m_output_window->IsVisible();
+            if (vis) {
+                m_output_window->Hide();
+                m_output_window->SetUserHiddenForSession(true);
+            } else {
+                m_output_window->Show();
+                m_output_window->SetUserHiddenForSession(false);
+            }
             const bool now_vis = !vis;
-
             m_window->SetOutputControlsState(now_vis, m_output_window->IsFullscreen(),
-
                                              m_output_window->IsAspectLocked(),
-
                                              m_output_window->IsAlwaysOnTop());
-
             m_window->State().output_window_visible = now_vis;
-
             ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
-
         }
+    });
 
+    m_window->SetOnToggleOutputToolbar([this](bool visible) {
+        m_settings.show_output_toolbar = visible;
+        m_settings.Save();
+        m_window->State().show_output_toolbar = visible;
+        if (m_output_window) {
+            m_output_window->SetToolbarVisible(visible);
+        }
+        ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
     });
 
     m_window->SetOnToggleFullscreen([this] {
-
         if (m_output_window) {
-
             m_output_window->ToggleFullscreen();
-
-            m_window->SetOutputControlsState(::IsWindowVisible(m_output_window->Hwnd()),
-
+            m_window->SetOutputControlsState(m_output_window->IsVisible(),
                                              m_output_window->IsFullscreen(),
-
                                              m_output_window->IsAspectLocked(),
-
                                              m_output_window->IsAlwaysOnTop());
-
         }
-
     });
 
     m_window->SetOnToggleAspectLock([this] {
-
         if (m_output_window) {
-
             m_output_window->ToggleAspectLock();
-
-            m_window->SetOutputControlsState(::IsWindowVisible(m_output_window->Hwnd()),
-
+            m_window->SetOutputControlsState(m_output_window->IsVisible(),
                                              m_output_window->IsFullscreen(),
-
                                              m_output_window->IsAspectLocked(),
-
                                              m_output_window->IsAlwaysOnTop());
-
         }
-
     });
 
     m_window->SetOnToggleAlwaysOnTop([this] {
-
         if (m_output_window) {
-
             m_output_window->ToggleAlwaysOnTop();
-
-            m_window->SetOutputControlsState(::IsWindowVisible(m_output_window->Hwnd()),
-
+            m_window->SetOutputControlsState(m_output_window->IsVisible(),
                                              m_output_window->IsFullscreen(),
-
                                              m_output_window->IsAspectLocked(),
-
                                              m_output_window->IsAlwaysOnTop());
-
         }
-
     });
 
     m_window->SetOnTogglePreview([this] {
-
-        if (m_preview_window) {
-
-            m_preview_window->ToggleVisibility();
-
-            const bool prev_vis = m_preview_window->IsVisible();
-
-            m_window->State().preview_visible = prev_vis;
-
+        if (m_output_window) {
+            m_output_window->ToggleVisibility();
+            m_window->State().output_window_visible = m_output_window->IsVisible();
             ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
-
-            PublishMetadataSnapshot();
-
         }
-
     });
 
     m_window->SetOnFullscreenPreview([this] {
-
-        if (m_preview_window) {
-
-            m_preview_window->ToggleFullscreen();
-
-            if (m_preview_renderer) {
-
-                m_preview_renderer->LogSwapChainConfig(
-
-                    m_preview_window->IsFullscreen() ? "PreviewWindow (Fullscreen)" : "PreviewWindow (Windowed)");
-
-            }
-
+        if (m_output_window) {
+            m_output_window->ToggleFullscreen();
         }
-
     });
 
     m_window->SetOnTogglePreviewAlwaysOnTop([this] {
-
-        if (m_preview_window) {
-
-            bool next_top = !m_preview_window->IsAlwaysOnTop();
-
-            m_preview_window->SetAlwaysOnTop(next_top);
-
-            m_settings.preview_always_on_top = next_top;
-
-            m_window->State().preview_always_on_top = next_top;
-
-            ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
-
+        if (m_output_window) {
+            m_output_window->ToggleAlwaysOnTop();
         }
-
     });
 
     m_window->SetOnToggleMute([this] {
-        if (m_wasapi) {
-            bool muted = !m_wasapi->IsMuted();
-            m_wasapi->SetMuted(muted);
-            m_settings.audio_muted = muted;
-            m_settings.Save();
-            if (m_window) {
-                m_window->State().audio_muted = muted;
-                ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
-            }
-        }
+        ToggleMute();
     });
 
     m_window->SetOnVolumeChanged([this](float vol) {
-        if (m_wasapi) {
-            m_wasapi->SetVolume(vol);
-        }
-        m_settings.monitor_volume = vol;
-        m_settings.Save();
-        if (m_window) {
-            m_window->State().audio_volume = vol;
-            ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
-        }
+        SetVolume(vol);
     });
 
     m_window->SetOnToggleScreenOnly([this] {
@@ -768,13 +718,14 @@ bool App::Init() noexcept {
     });
 
     m_window->SetOnDisconnect([this] {
-
+        if (m_output_window) {
+            m_output_window->Hide();
+            m_output_window->SetHasFrame(false);
+            m_output_window->SetUserHiddenForSession(false);
+        }
         if (m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WirelessAirPlay)
-
             RestartAirPlaySidecar();
-
         else RefreshWiredDevices();
-
     });
 
     m_window->SetOnFlushPipeline([this] {
@@ -1158,177 +1109,82 @@ bool App::Init() noexcept {
 
     // Output Window — borderless, black, no title bar.
 
-    // VideoRenderer attaches here, not to MainWindow.
-
-    // OBS / TikTok Live Studio should capture this window.
-
+    // Standalone Output Window — user-facing window for live stream viewing
     m_output_window = std::make_unique<OutputWindow>();
 
     const uint32_t kInitW = m_settings.output_width;
-
     const uint32_t kInitH = m_settings.output_height;
 
     if (!m_output_window->Create(kInitW, kInitH,
-
             [this](uint32_t w, uint32_t h) {
-
-                // WM_SIZE callback (UI thread) — signal the render thread to resize.
-
-                // The actual ResizeBuffers happens on the render thread in Present().
-
-                if (m_renderer) m_renderer->SignalResize(w, h);
-
+                if (m_preview_renderer) m_preview_renderer->SignalResize(w, h);
             })) {
-
         DUWN_LOG_ERROR("App", "OutputWindow creation failed");
-
         return false;
-
     }
 
+    m_output_window->SetToolbarVisible(m_settings.show_output_toolbar);
+    m_output_window->SetAlwaysOnTop(m_settings.output_always_on_top);
+    m_output_window->SetAudioState(m_settings.audio_muted, m_settings.monitor_volume);
+    m_output_window->SetOnToggleMute([this] { ToggleMute(); });
+    m_output_window->SetOnVolumeChanged([this](float vol) { SetVolume(vol); });
+    m_output_window->SetOnVisibilityChanged([this](bool visible) {
+        if (m_window) {
+            m_window->State().output_window_visible = visible;
+            ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+        }
+    });
 
+    if (m_settings.output_x != Settings::kDefaultWindowPos &&
+        m_settings.output_y != Settings::kDefaultWindowPos &&
+        m_settings.output_window_w > 0 && m_settings.output_window_h > 0) {
+        m_output_window->SetWindowRect(m_settings.output_x, m_settings.output_y,
+                                       m_settings.output_window_w, m_settings.output_window_h);
+    }
 
-    // Video renderer — attached to OutputWindow, not MainWindow
+    // Export renderer — attached to dedicated hidden capture surface at configured resolution
+    m_capture_host_hwnd = ::CreateWindowExW(
+        0, L"Static", L"DuwnMirrorCaptureHost", WS_POPUP,
+        0, 0, kInitW, kInitH, nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
 
     if (m_d3d->IsHardware())
-
-        m_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, m_output_window->Hwnd());
-
+        m_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, m_capture_host_hwnd);
     else
-
-        m_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, m_output_window->Hwnd());
+        m_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, m_capture_host_hwnd);
 
     if (!m_renderer->Init(kInitW, kInitH)) {
-
         DUWN_LOG_ERROR("App", "VideoRenderer init failed");
-
         return false;
-
     }
 
     m_renderer->SetAspectRatioMode(GetEffectiveAspectRatioMode());
-
     m_renderer->SetPixelPerfect(static_cast<int>(m_settings.pixel_perfect));
-
     m_renderer->SetScalingQuality(static_cast<int>(m_settings.scaling_quality));
-
     m_renderer->SetColorSpace(static_cast<int>(m_settings.color_range), static_cast<int>(m_settings.color_matrix));
 
     const int initial_color[] = {m_settings.brightness, m_settings.contrast, m_settings.saturation,
-
                                  m_settings.hue, m_settings.sharpness};
-
     for (size_t i = 0; i < 5; ++i) m_renderer->SetColorControl(i, initial_color[i]);
-
-    m_renderer->LogSwapChainConfig("OutputWindow");
+    m_renderer->LogSwapChainConfig("ExportRenderer");
 
     m_scheduler->SetDxgiWaitableProvider([this]() -> void* {
-
         return m_renderer ? m_renderer->GetFrameLatencyWaitableObject() : nullptr;
-
     });
 
-
-
-    m_output_window->SetOnVisibilityChanged([this](bool visible) {
-
-        if (m_window) {
-
-            m_window->State().output_window_visible = visible;
-
-            ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
-
-        }
-
-    });
-
-
-
-    // Preview Window — independent user-facing viewer window.
-
-    // User can resize, move, maximize, or fullscreen without altering capture resolution.
-
-    m_preview_window = std::make_unique<PreviewWindow>();
-
-    const uint32_t kPrevInitW = (m_settings.preview_width > 0) ? static_cast<uint32_t>(m_settings.preview_width) : kInitW;
-
-    const uint32_t kPrevInitH = (m_settings.preview_height > 0) ? static_cast<uint32_t>(m_settings.preview_height) : kInitH;
-
-    if (!m_preview_window->Create(kPrevInitW, kPrevInitH,
-
-            [this](uint32_t w, uint32_t h) {
-
-                if (m_preview_renderer) m_preview_renderer->SignalResize(w, h);
-
-            })) {
-
-        DUWN_LOG_ERROR("App", "PreviewWindow creation failed");
-
-        return false;
-
-    }
-
-    if (m_settings.preview_always_on_top) {
-
-        m_preview_window->SetAlwaysOnTop(true);
-
-    }
-
-    if (m_settings.preview_x != -1 && m_settings.preview_y != -1 &&
-
-        m_settings.preview_width > 0 && m_settings.preview_height > 0) {
-
-        m_preview_window->SetWindowRect(m_settings.preview_x, m_settings.preview_y,
-
-                                       m_settings.preview_width, m_settings.preview_height);
-
-    }
-
-    m_preview_window->SetOnVisibilityChanged([this](bool visible) {
-
-        if (m_window) {
-
-            m_window->State().preview_visible = visible;
-
-            ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
-
-        }
-
-    });
-
-
-
-    // Preview Renderer — attached to embedded video surface inside MainWindow (single-window Workspace)
-    HWND preview_target_hwnd = (m_window && m_window->VideoSurfaceHwnd())
-        ? m_window->VideoSurfaceHwnd()
-        : m_preview_window->Hwnd();
-
+    // Local presentation renderer — attached to child video surface of OutputWindow
     if (m_d3d->IsHardware())
-        m_preview_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, preview_target_hwnd);
+        m_preview_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, m_output_window->VideoSurfaceHwnd());
     else
-        m_preview_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, preview_target_hwnd);
+        m_preview_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, m_output_window->VideoSurfaceHwnd());
 
     m_preview_renderer->SetNonBlocking(true);
-
-    if (m_window) {
-        m_window->SetOnVideoSurfaceResize([this](uint32_t w, uint32_t h) {
-            if (m_preview_renderer) m_preview_renderer->SignalResize(w, h);
-        });
-    }
-
-    const uint32_t p_client_w = 640;
-    const uint32_t p_client_h = 360;
-
-    if (!m_preview_renderer->Init(p_client_w, p_client_h)) {
-        DUWN_LOG_ERROR("App", "Preview VideoRenderer init failed");
-        return false;
-    }
-
+    m_preview_renderer->Init(m_output_window->VideoSurfaceWidth(), m_output_window->VideoSurfaceHeight());
     m_preview_renderer->SetAspectRatioMode(GetEffectiveAspectRatioMode());
     m_preview_renderer->SetPixelPerfect(static_cast<int>(m_settings.pixel_perfect));
     m_preview_renderer->SetScalingQuality(static_cast<int>(m_settings.scaling_quality));
     m_preview_renderer->SetColorSpace(static_cast<int>(m_settings.color_range), static_cast<int>(m_settings.color_matrix));
     for (size_t i = 0; i < 5; ++i) m_preview_renderer->SetColorControl(i, initial_color[i]);
+    m_preview_renderer->LogSwapChainConfig("OutputWindow");
 
     // Export server & shared texture initialization
     m_capture_server = std::make_unique<capture::CaptureServer>();
@@ -1817,15 +1673,11 @@ void App::UpdateWiredConnection() noexcept {
             if (m_audio_engine) m_audio_engine->Flush();
 
             if (m_renderer) m_renderer->PresentBlack();
-
             if (m_preview_renderer) m_preview_renderer->PresentBlack();
-
-            if (m_settings.hide_preview_on_disconnect && m_preview_window) {
-
-                m_preview_window->Hide();
-
+            if (m_output_window) {
+                m_output_window->Hide();
+                m_output_window->SetHasFrame(false);
             }
-
             ResetSessionFirstEvents();
 
             m_last_preview_src_w = 0;
@@ -2206,68 +2058,54 @@ bool App::RecreateVideoPipeline() noexcept {
 
         m_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, m_output_window->Hwnd());
 
+    const uint32_t exp_w = m_settings.output_width;
+    const uint32_t exp_h = m_settings.output_height;
+
+    if (!m_capture_host_hwnd) {
+        m_capture_host_hwnd = ::CreateWindowExW(
+            0, L"Static", L"DuwnMirrorCaptureHost", WS_POPUP,
+            0, 0, exp_w, exp_h, nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
+    }
+
+    if (m_d3d->IsHardware())
+        m_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, m_capture_host_hwnd);
     else
+        m_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, m_capture_host_hwnd);
 
-        m_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, m_output_window->Hwnd());
-
-    if (!m_renderer->Init(m_output_window->ClientWidth(), m_output_window->ClientHeight())) {
-
+    if (!m_renderer->Init(exp_w, exp_h)) {
         m_window->SetStatusText(L"Renderer unavailable. Choose Auto or Compatibility.");
-
         return false;
-
     }
 
     m_renderer->SetAspectRatioMode(GetEffectiveAspectRatioMode());
-
     m_renderer->SetPixelPerfect(static_cast<int>(m_settings.pixel_perfect));
-
     m_renderer->SetScalingQuality(static_cast<int>(m_settings.scaling_quality));
-
     m_renderer->SetColorSpace(static_cast<int>(m_settings.color_range), static_cast<int>(m_settings.color_matrix));
 
     const int values[] = {m_settings.brightness, m_settings.contrast, m_settings.saturation,
-
                           m_settings.hue, m_settings.sharpness};
-
     for (size_t i = 0; i < 5; ++i) m_renderer->SetColorControl(i, values[i]);
 
-    if (m_preview_window && m_preview_window->Hwnd()) {
-
-        HWND prev_hwnd = m_preview_window->Hwnd();
-
-        const uint32_t pw = m_preview_window->ClientWidth() > 0 ? m_preview_window->ClientWidth() : 640;
-
-        const uint32_t ph = m_preview_window->ClientHeight() > 0 ? m_preview_window->ClientHeight() : 360;
+    if (m_output_window && m_output_window->VideoSurfaceHwnd()) {
+        HWND prev_hwnd = m_output_window->VideoSurfaceHwnd();
+        const uint32_t pw = m_output_window->VideoSurfaceWidth() > 0 ? m_output_window->VideoSurfaceWidth() : 640;
+        const uint32_t ph = m_output_window->VideoSurfaceHeight() > 0 ? m_output_window->VideoSurfaceHeight() : 360;
 
         if (m_d3d->IsHardware())
-
             m_preview_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, prev_hwnd);
-
         else
-
             m_preview_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, prev_hwnd);
 
         m_preview_renderer->SetNonBlocking(true);
-
         if (m_preview_renderer->Init(pw, ph)) {
-
             m_preview_renderer->SetAspectRatioMode(GetEffectiveAspectRatioMode());
-
             m_preview_renderer->SetPixelPerfect(static_cast<int>(m_settings.pixel_perfect));
-
             m_preview_renderer->SetScalingQuality(static_cast<int>(m_settings.scaling_quality));
-
             m_preview_renderer->SetColorSpace(static_cast<int>(m_settings.color_range), static_cast<int>(m_settings.color_matrix));
-
             for (size_t i = 0; i < 5; ++i) m_preview_renderer->SetColorControl(i, values[i]);
-
         } else {
-
-            DUWN_LOG_WARN("App", "Preview VideoRenderer init failed during pipeline recreation");
-
+            DUWN_LOG_WARN("App", "Output VideoRenderer init failed during pipeline recreation");
         }
-
     }
 
     m_scheduler->Start();
@@ -3580,29 +3418,15 @@ void App::Shutdown() noexcept {
     }
 
     if (m_output_window) {
-
+        int ox = 0, oy = 0, ow = 0, oh = 0;
+        m_output_window->GetWindowRect(ox, oy, ow, oh);
+        m_settings.output_x = ox;
+        m_settings.output_y = oy;
+        m_settings.output_window_w = ow;
+        m_settings.output_window_h = oh;
+        m_settings.output_always_on_top = m_output_window->IsAlwaysOnTop();
+        m_settings.show_output_toolbar = m_output_window->IsToolbarVisible();
         m_settings.aspect_ratio_locked = m_output_window->IsAspectLocked();
-
-        m_settings.always_on_top = m_output_window->IsAlwaysOnTop();
-
-    }
-
-    if (m_preview_window) {
-
-        int px = 0, py = 0, pw = 0, ph = 0;
-
-        m_preview_window->GetWindowRect(px, py, pw, ph);
-
-        m_settings.preview_x = px;
-
-        m_settings.preview_y = py;
-
-        m_settings.preview_width = pw;
-
-        m_settings.preview_height = ph;
-
-        m_settings.preview_always_on_top = m_preview_window->IsAlwaysOnTop();
-
     }
 
     if (m_wasapi) {
@@ -3667,9 +3491,12 @@ void App::Shutdown() noexcept {
 
     m_d3d.reset();
 
-    m_preview_window.reset();
-
     m_output_window.reset();
+
+    if (m_capture_host_hwnd) {
+        ::DestroyWindow(m_capture_host_hwnd);
+        m_capture_host_hwnd = nullptr;
+    }
 
     m_window.reset();
 
@@ -4017,8 +3844,14 @@ void App::HandleSessionPhaseOnMainThread(const SessionPhaseEvent& ev, bool quali
     using P = airplay::SessionPhase;
     switch (ev.next) {
     case P::Advertising:
-        if (m_settings.hide_preview_on_disconnect && m_preview_window) {
-            m_preview_window->Hide();
+        if (m_output_window) {
+            m_output_window->Hide();
+            m_output_window->SetHasFrame(false);
+            m_output_window->SetUserHiddenForSession(false);
+            if (m_window) {
+                m_window->State().output_window_visible = false;
+                ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+            }
         }
         if (m_window) {
             m_window->SetStatusText(m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WiredUsb
@@ -4027,12 +3860,26 @@ void App::HandleSessionPhaseOnMainThread(const SessionPhaseEvent& ev, bool quali
         break;
 
     case P::Connecting:
+        if (m_output_window && !m_output_window->IsUserHiddenForSession()) {
+            m_output_window->ShowNoActivate();
+            if (m_window) {
+                m_window->State().output_window_visible = m_output_window->IsVisible();
+                ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+            }
+        }
         if (m_window) {
             m_window->SetStatusText(L"Connecting…");
         }
         break;
 
     case P::Streaming:
+        if (m_output_window && !m_output_window->IsUserHiddenForSession() && !m_output_window->IsVisible()) {
+            m_output_window->ShowNoActivate();
+            if (m_window) {
+                m_window->State().output_window_visible = m_output_window->IsVisible();
+                ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+            }
+        }
         if (m_window) {
             bool has_frame = m_first_output_present_recorded.load(std::memory_order_relaxed);
             m_window->SetStatusText(has_frame ? ui::loc::Get(ui::loc::S::Status_Streaming) : ui::loc::Get(ui::loc::S::Status_ConnectedWaitingVideo));
@@ -4045,8 +3892,12 @@ void App::HandleSessionPhaseOnMainThread(const SessionPhaseEvent& ev, bool quali
         if (m_window) {
             m_window->SetStatusText(L"Reconnecting…");
         }
-        if (m_settings.hide_preview_on_disconnect && m_preview_window) {
-            m_preview_window->Hide();
+        if (m_output_window) {
+            m_output_window->Hide();
+            if (m_window) {
+                m_window->State().output_window_visible = false;
+                ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+            }
         }
         break;
 
@@ -4120,8 +3971,8 @@ void App::OnMetadata(const airplay::StreamMetadata& meta) noexcept {
             }
         }
 
-        if (m_preview_window) {
-            m_preview_window->SetVideoGeometry(w, h);
+        if (m_output_window) {
+            m_output_window->SetVideoGeometry(w, h);
         }
 
         // Update window title
@@ -4173,66 +4024,35 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
 
 
 
-    // First presented frame / rotation handling for PreviewWindow and OutputWindow
-
+    // First presented frame / rotation handling for OutputWindow
     if (frame.visible_width > 0 && frame.visible_height > 0) {
-
         bool was_handled = m_session_first_frame_handled.exchange(true, std::memory_order_relaxed);
-
         if (!was_handled) {
-
             HWND main_hwnd = m_main_hwnd.load(std::memory_order_acquire);
-
             if (main_hwnd) {
-
                 ::PostMessageW(main_hwnd, WM_DUWN_FIRST_FRAME,
-
                     static_cast<WPARAM>(frame.visible_width),
-
                     static_cast<LPARAM>(frame.visible_height));
-
-            } else {
-
-                if (m_output_window && m_settings.auto_open_output_window) {
-
+            } else if (m_output_window) {
+                m_output_window->SetHasFrame(true);
+                m_output_window->SetVideoGeometry(frame.visible_width, frame.visible_height);
+                if (!m_output_window->IsUserHiddenForSession()) {
                     m_output_window->ShowNoActivate();
-
-                }
-
-                if (m_preview_window) {
-                    m_preview_window->SetVideoGeometry(frame.visible_width, frame.visible_height);
-                }
-                if (m_window) {
-                    m_window->LayoutVideoSurface();
                 }
             }
-
             m_last_preview_src_w = frame.visible_width;
-
             m_last_preview_src_h = frame.visible_height;
-
         } else {
-
             bool prev_is_land = (m_last_preview_src_w >= m_last_preview_src_h);
-
             bool curr_is_land = (frame.visible_width >= frame.visible_height);
-
             if (m_last_preview_src_w > 0 && m_last_preview_src_h > 0 && prev_is_land != curr_is_land) {
-
-                if (m_preview_window) {
-
-                    m_preview_window->OnStreamGeometryChanged(frame.visible_width, frame.visible_height);
-
+                if (m_output_window) {
+                    m_output_window->OnStreamGeometryChanged(frame.visible_width, frame.visible_height);
                 }
-
             }
-
             m_last_preview_src_w = frame.visible_width;
-
             m_last_preview_src_h = frame.visible_height;
-
         }
-
     }
 
 
@@ -4669,7 +4489,7 @@ StreamingPolicy App::GetActiveStreamingPolicy() const noexcept {
 }
 
 void App::PublishMetadataSnapshot() noexcept {
-    const bool prev_vis = m_preview_window ? m_preview_window->IsVisible() : false;
+    const bool prev_vis = m_output_window ? m_output_window->IsVisible() : false;
     m_meta_coord.PublishSnapshot(GetActiveTransportString(), GetActiveStreamingPolicy(), prev_vis);
 }
 
@@ -4983,18 +4803,12 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
         uint32_t prev_h = 0;
 
-        if (m_preview_window && m_preview_window->Hwnd()) {
-
+        if (m_output_window && m_output_window->VideoSurfaceHwnd()) {
             RECT prc{};
-
-            if (::GetClientRect(m_preview_window->Hwnd(), &prc)) {
-
+            if (::GetClientRect(m_output_window->VideoSurfaceHwnd(), &prc)) {
                 prev_w = static_cast<uint32_t>(prc.right - prc.left);
-
                 prev_h = static_cast<uint32_t>(prc.bottom - prc.top);
-
             }
-
         }
 
 
@@ -5580,7 +5394,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
             state.output_height = cap_h;
 
-            state.preview_visible = m_preview_window ? m_preview_window->IsVisible() : false;
+            state.preview_visible = m_output_window ? m_output_window->IsVisible() : false;
 
             state.output_window_visible = m_output_window ? (::IsWindowVisible(m_output_window->Hwnd()) != 0) : false;
 

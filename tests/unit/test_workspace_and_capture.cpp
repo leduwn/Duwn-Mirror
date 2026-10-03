@@ -496,7 +496,7 @@ DUWN_TEST(SharedTexture_RecreateSlot_IsolatesRetiredResource) {
     DUWN_ASSERT(st.Create(device.Get(), 1920, 1080));
     DUWN_ASSERT(st.ResourceGeneration() == 1);
     HANDLE old_handle_1 = st.SharedHandle(1);
-    ID3D11Texture2D* old_tex_1 = st.Texture(1);
+    ComPtr<ID3D11Texture2D> old_tex_1 = st.Texture(1);
     DUWN_ASSERT(old_handle_1 != nullptr && old_tex_1 != nullptr);
 
     // Recreate slot 1 (simulate consumer crash isolation)
@@ -506,7 +506,7 @@ DUWN_TEST(SharedTexture_RecreateSlot_IsolatesRetiredResource) {
     ID3D11Texture2D* new_tex_1 = st.Texture(1);
     DUWN_ASSERT(new_handle_1 != nullptr && new_tex_1 != nullptr);
     DUWN_ASSERT(new_handle_1 != old_handle_1); // Completely fresh shared handle!
-    DUWN_ASSERT(new_tex_1 != old_tex_1);       // Brand-new DirectX texture allocation!
+    DUWN_ASSERT(new_tex_1 != old_tex_1.Get()); // Brand-new DirectX texture allocation!
 
     // Slots 0, 2, 3 intact
     DUWN_ASSERT(st.SharedHandle(0) != nullptr);
