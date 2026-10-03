@@ -33,6 +33,7 @@ target_link_libraries(duwn-virtualcam
         shlwapi
         ole32
         oleaut32
+        winmm
 )
 
 target_compile_features(duwn-virtualcam PRIVATE cxx_std_20)

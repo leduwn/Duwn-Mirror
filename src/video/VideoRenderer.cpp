@@ -675,6 +675,17 @@ PresentResult VideoRenderer::Present(VideoFrame& frame, bool skip_wait) noexcept
                     m_device.Context()->CopyResource(m_export_target, bb.Get());
                     if (m_export_query) {
                         m_device.Context()->End(m_export_query);
+                    } else {
+                        static int s_no_query = 0;
+                        if (++s_no_query <= 3) {
+                            DUWN_LOG_WARNF("VideoRenderer", "Pre-Present copy: m_export_query is null!");
+                        }
+                    }
+                } else {
+                    static int s_mismatch = 0;
+                    if (++s_mismatch <= 5) {
+                        DUWN_LOG_WARNF("VideoRenderer", "Pre-Present copy size mismatch: bb={}x{} exp={}x{}",
+                                       bb_desc.Width, bb_desc.Height, exp_desc.Width, exp_desc.Height);
                     }
                 }
             }

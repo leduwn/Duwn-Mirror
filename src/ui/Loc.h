@@ -601,6 +601,7 @@ enum class S {
     Common_ScreenOnly,
     Common_BackToWorkspace,
     Common_QuickVolume,
+    Common_NoData,
 
     // Standalone Output & Toolbar additions
     Mirror_Toggle_OutputToolbar,

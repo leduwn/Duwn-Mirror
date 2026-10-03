@@ -1,4 +1,5 @@
 #include "SharedTexture.h"
+#include "common/logging/Logger.h"
 #include <dxgi.h>
 
 namespace duwn::capture {
@@ -133,14 +134,19 @@ bool SharedTexture::SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index) n
     ::QueryPerformanceCounter(&start);
     const int64_t max_ticks = (freq.QuadPart * 12) / 1000; // 12ms timeout
 
-    while (context->GetData(m_queries[ring_index].Get(), nullptr, 0, 0) == S_FALSE) {
+    int poll_count = 0;
+    HRESULT hr = S_FALSE;
+    while ((hr = context->GetData(m_queries[ring_index].Get(), nullptr, 0, 0)) == S_FALSE) {
+        ++poll_count;
         ::QueryPerformanceCounter(&now);
         if (now.QuadPart - start.QuadPart > max_ticks) {
+            DUWN_LOG_WARNF("SharedTexture", "SyncGpu TIMEOUT slot={} query={} poll_count={} elapsed_ticks={}",
+                           ring_index, (void*)m_queries[ring_index].Get(), poll_count, now.QuadPart - start.QuadPart);
             return false;
         }
         YieldProcessor();
     }
-    return true;
+    return SUCCEEDED(hr);
 }
 
 bool SharedTexture::EnsureSlotReady(ID3D11DeviceContext* context, uint32_t ring_index) noexcept {

@@ -1548,7 +1548,7 @@ void MainWindowView::RenderDevicePreview(const UiState& state, const D2D1_RECT_F
 
         std::wstring drops_str = std::format(L"{}", state.dropped_frames);
         std::wstring lat_str = state.pipeline_latency_ms > 0.0 ?
-            std::format(L"{:.1f} ms", state.pipeline_latency_ms) : L"—";
+            std::format(L"{:.1f} ms", state.pipeline_latency_ms) : loc::Get(loc::S::Common_NoData);
 
         MetricBox boxes[6] = {
             { loc::Get(loc::S::Mirror_Metric_Resolution), res_str, colors::BrandBlue },
@@ -1932,8 +1932,8 @@ void MainWindowView::RenderPerformanceCard(const UiState& state, const D2D1_RECT
         D2D1_COLOR_F color;
     };
 
-    std::wstring fps_disp = state.render_fps > 0.0 ? std::format(L"{:.1f} FPS", state.render_fps) : L"—";
-    std::wstring lat_disp = state.pipeline_latency_ms > 0.0 ? std::format(L"{:.1f} ms", state.pipeline_latency_ms) : L"—";
+    std::wstring fps_disp = state.render_fps > 0.0 ? std::format(L"{:.1f} FPS", state.render_fps) : loc::Get(loc::S::Common_NoData);
+    std::wstring lat_disp = state.pipeline_latency_ms > 0.0 ? std::format(L"{:.1f} ms", state.pipeline_latency_ms) : loc::Get(loc::S::Common_NoData);
     std::wstring q_disp   = std::format(L"{} {}", state.queue_depth, state.queue_depth == 1 ? loc::Get(loc::S::Right_FrameSingular) : loc::Get(loc::S::Right_FramesPlural));
 
     MetricTile tiles[4] = {
@@ -2284,7 +2284,8 @@ void MainWindowView::RenderPerformanceView(const UiState& state, const D2D1_RECT
     D2D1_RECT_F lat_lbl = D2D1::RectF(c1_right_col, m_r2_top, c1_right_col + c1_half_w, m_r2_top + 14.0f);
     m_renderer.DrawTextSimple(loc::Get(loc::S::Right_Tile_AvLag), m_renderer.FontSmall(), lat_lbl, m_renderer.BrushTextMuted());
     D2D1_RECT_F lat_val = D2D1::RectF(c1_right_col, m_r2_top + 14.0f, c1_right_col + c1_half_w, m_r2_top + 36.0f);
-    m_renderer.DrawTextSimple(std::format(L"{:.1f} ms", state.pipeline_latency_ms), m_renderer.FontSubheader(), lat_val, m_renderer.BrushTextPrimary());
+    std::wstring lat_perf_str = state.pipeline_latency_ms > 0.0 ? std::format(L"{:.1f} ms", state.pipeline_latency_ms) : loc::Get(loc::S::Common_NoData);
+    m_renderer.DrawTextSimple(lat_perf_str, m_renderer.FontSubheader(), lat_val, m_renderer.BrushTextPrimary());
 
     // Secondary line: Decoder, Drops, Queue
     float m_r3_top = c1_rc.top + 118.0f;

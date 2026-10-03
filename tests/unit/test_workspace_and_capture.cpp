@@ -513,6 +513,30 @@ DUWN_TEST(SharedTexture_RecreateSlot_IsolatesRetiredResource) {
     DUWN_ASSERT(st.SharedHandle(2) != nullptr);
     DUWN_ASSERT(st.SharedHandle(3) != nullptr);
 }
+DUWN_TEST(Direct3D11_EventQuery_SyncGpu_Test) {
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    D3D_FEATURE_LEVEL fl;
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                   D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                                   D3D11_SDK_VERSION, &device, &fl, &context);
+    if (FAILED(hr)) {
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+                               D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                               D3D11_SDK_VERSION, &device, &fl, &context);
+    }
+    DUWN_ASSERT(SUCCEEDED(hr) && device && context);
+
+    SharedTexture st;
+    DUWN_ASSERT(st.Create(device.Get(), 1920, 1080));
+
+    context->End(st.Query(0));
+    context->Flush();
+
+    bool sync_res = st.SyncGpu(context.Get(), 0);
+    DUWN_ASSERT(sync_res);
+}
+
 
 // ---------------------------------------------------------------------------
 // 7f. CaptureServer: Multi-Region Payload Integrity (Tearing-Free Whole Frame)

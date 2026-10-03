@@ -939,7 +939,7 @@ bool App::Init() noexcept {
                                         airplay::SessionPhase next){
         OnPhase(prev, next);
     });
-    m_airplay->SetStateCallback([this](airplay::AirPlaySessionState /*prev*/,
+    m_airplay->SetStateCallback([this](airplay::AirPlaySessionState prev,
                                         airplay::AirPlaySessionState next){
         if (m_window) {
             m_window->UpdateSessionState(next);
@@ -959,7 +959,10 @@ bool App::Init() noexcept {
             m.video_dropped_frames.store(0, std::memory_order_relaxed);
             m.session_q_full.store(0, std::memory_order_relaxed);
 
-            if (m_video_decoder) {
+            const bool was_active = (prev == airplay::AirPlaySessionState::Streaming ||
+                                     prev == airplay::AirPlaySessionState::Connected ||
+                                     prev == airplay::AirPlaySessionState::Paused);
+            if (was_active && m_video_decoder) {
                 std::lock_guard<std::mutex> lock(m_decoder_mutex);
                 m_video_decoder->Flush();
                 m_video_decoder->ResetHevcAssembler();
@@ -1060,22 +1063,17 @@ bool App::Init() noexcept {
 
         : video::DecoderPreference::Auto);
 
-    if (m_video_decoder->Init(1920, 1080)) {
-
-        m_decoder_ready.store(true, std::memory_order_release);
-
-        DUWN_LOG_INFO("App", "Video decoder pre-initialized for 1920x1080");
-
-    } else {
-
-        m_decoder_ready.store(false, std::memory_order_release);
-
-        if (force_hardware) {
-
-            m_window->SetStatusText(L"Hardware renderer unavailable. Choose Auto or Compatibility.");
-
+    {
+        std::lock_guard<std::mutex> lock(m_decoder_mutex);
+        if (m_video_decoder->Init(1920, 1080)) {
+            m_decoder_ready.store(true, std::memory_order_release);
+            DUWN_LOG_INFO("App", "Video decoder pre-initialized for 1920x1080");
+        } else {
+            m_decoder_ready.store(false, std::memory_order_release);
+            if (force_hardware) {
+                m_window->SetStatusText(L"Hardware renderer unavailable. Choose Auto or Compatibility.");
+            }
         }
-
     }
 
 
@@ -1171,6 +1169,16 @@ bool App::Init() noexcept {
                                  m_settings.hue, m_settings.sharpness};
     for (size_t i = 0; i < 5; ++i) m_renderer->SetColorControl(i, initial_color[i]);
     m_renderer->LogSwapChainConfig("ExportRenderer");
+
+    m_active_renderer.store(m_d3d->IsHardware() ? 1 : 2, std::memory_order_relaxed);
+    m_active_filter_caps.store(m_renderer->FilterCaps(), std::memory_order_relaxed);
+    if (m_window) {
+        constexpr uint32_t filter_bits[] = {1u, 2u, 8u, 4u, 32u};
+        const uint32_t caps = m_renderer->FilterCaps();
+        for (size_t i = 0; i < 5; ++i) {
+            m_window->State().filter_supported[i] = (caps & filter_bits[i]) != 0;
+        }
+    }
 
     m_scheduler->SetDxgiWaitableProvider([this]() -> void* {
         return m_renderer ? m_renderer->GetFrameLatencyWaitableObject() : nullptr;
@@ -2045,23 +2053,17 @@ bool App::RecreateVideoPipeline() noexcept {
 
         : video::DecoderPreference::Auto);
 
-    if (!m_video_decoder->Init(1920, 1080)) {
-
-        m_window->SetStatusText(force_hardware
-
-            ? L"Hardware renderer unavailable. Choose Auto or Compatibility."
-
-            : L"Video decoder unavailable for selected renderer.");
-
-        return false;
-
+    {
+        std::lock_guard<std::mutex> lock(m_decoder_mutex);
+        if (!m_video_decoder->Init(1920, 1080)) {
+            m_window->SetStatusText(force_hardware
+                ? L"Hardware renderer unavailable. Choose Auto or Compatibility."
+                : L"Video decoder unavailable for selected renderer.");
+            return false;
+        }
     }
 
     m_decoder_ready.store(true, std::memory_order_release);
-
-    if (m_d3d->IsHardware())
-
-        m_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, m_output_window->Hwnd());
 
     const uint32_t exp_w = m_settings.output_width;
     const uint32_t exp_h = m_settings.output_height;
@@ -2081,6 +2083,9 @@ bool App::RecreateVideoPipeline() noexcept {
         m_window->SetStatusText(L"Renderer unavailable. Choose Auto or Compatibility.");
         return false;
     }
+
+    m_active_renderer.store(m_d3d->IsHardware() ? 1 : 2, std::memory_order_relaxed);
+    m_active_filter_caps.store(m_renderer->FilterCaps(), std::memory_order_relaxed);
 
     m_renderer->SetAspectRatioMode(GetEffectiveAspectRatioMode());
     m_renderer->SetPixelPerfect(static_cast<int>(m_settings.pixel_perfect));
@@ -3489,6 +3494,16 @@ void App::Shutdown() noexcept {
     m_wasapi.reset();
 
     m_audio_ring.reset();
+
+    if (m_capture_server) {
+        m_capture_server->Stop();
+        m_capture_server.reset();
+    }
+
+    if (m_shared_texture) {
+        m_shared_texture->Release();
+        m_shared_texture.reset();
+    }
 
     m_renderer.reset();
 
@@ -5319,7 +5334,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
         if (lag_ms <= 0.0) {
 
-            lag_ms = m.video_decode_time_ms.load(std::memory_order_relaxed) + 16.6;
+            lag_ms = 0.0;
 
         }
 
@@ -5540,7 +5555,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
             }
 
-            constexpr uint32_t filter_bits[] = {1u, 2u, 8u, 4u, 16u};
+            constexpr uint32_t filter_bits[] = {1u, 2u, 8u, 4u, 32u};
 
             const uint32_t filter_caps = m_active_filter_caps.load(std::memory_order_relaxed);
 

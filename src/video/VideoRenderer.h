@@ -116,7 +116,7 @@ public:
         }
     }
     bool SupportsColorControl(size_t index) const noexcept {
-        constexpr uint32_t bits[] = {1u, 2u, 8u, 4u, 16u};
+        constexpr uint32_t bits[] = {1u, 2u, 8u, 4u, 32u};
         return index < 5 && (m_filter_caps.load(std::memory_order_relaxed) & bits[index]) != 0;
     }
     uint32_t FilterCaps() const noexcept { return m_filter_caps.load(std::memory_order_relaxed); }

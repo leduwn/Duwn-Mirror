@@ -588,6 +588,8 @@ void DuwnOutputPin::RenderDefaultPattern(uint8_t* dst, uint32_t width, uint32_t 
 void DuwnOutputPin::WorkerLoop() {
     using namespace duwn::capture;
 
+    ::timeBeginPeriod(1);
+
     if (!m_d3d_device) {
         D3D_FEATURE_LEVEL fl;
         D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
@@ -634,20 +636,42 @@ void DuwnOutputPin::WorkerLoop() {
 
         if (header) {
             HANDLE wait_target = h_my_event ? h_my_event : h_event;
-            if (wait_target) {
-                DWORD wr = ::WaitForSingleObject(wait_target, 20);
-                if (wr == WAIT_OBJECT_0) {
-                    if (ReadHeaderConsistent(header, snapshot)) {
-                        if (std::memcmp(snapshot.magic, "DUWNCAP", 7) == 0 &&
-                            snapshot.protocol_version == 2 &&
-                            (snapshot.frame_index > last_frame_index || last_frame_index == 0)) {
-                            last_frame_index = snapshot.frame_index;
-                            got_clean_frame = true;
-                            last_producer_activity = std::chrono::steady_clock::now();
-                        }
+            DWORD wr = wait_target ? ::WaitForSingleObject(wait_target, 20) : WAIT_TIMEOUT;
+            (void)wr;
+
+            if (ReadHeaderConsistent(header, snapshot)) {
+                bool gen_changed = (snapshot.generation != m_cached_gen);
+                bool res_gen_changed = (snapshot.resource_generation != m_cached_res_gen);
+                bool consumer_missing = (my_consumer_slot < 0 ||
+                    (my_consumer_slot < 4 && header->consumers[my_consumer_slot].process_id != ::GetCurrentProcessId()));
+
+                if (gen_changed || res_gen_changed || consumer_missing) {
+                    m_staging_tex.Reset();
+                    m_staging_w = 0;
+                    m_staging_h = 0;
+                    for (int k = 0; k < 4; ++k) {
+                        m_cached_shared_tex[k].Reset();
+                        m_cached_handles[k] = nullptr;
                     }
+                    m_cached_gen = snapshot.generation;
+                    m_cached_res_gen = snapshot.resource_generation;
+                    last_frame_index = 0;
+
+                    wchar_t my_evt_name[64];
+                    swprintf_s(my_evt_name, L"Local\\DUWN_FRAME_EVENT_%u", ::GetCurrentProcessId());
+                    my_consumer_slot = RegisterConsumer(header, ::GetCurrentProcessId(), my_evt_name);
+                }
+
+                if (std::memcmp(snapshot.magic, "DUWNCAP", 7) == 0 &&
+                    snapshot.protocol_version == 2 &&
+                    (snapshot.frame_index > last_frame_index || last_frame_index == 0)) {
+                    last_frame_index = snapshot.frame_index;
+                    got_clean_frame = true;
+                    last_producer_activity = std::chrono::steady_clock::now();
                 }
             }
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
         }
 
         IMediaSample* pSample = nullptr;
@@ -667,18 +691,6 @@ void DuwnOutputPin::WorkerLoop() {
             if (got_clean_frame && m_d3d_device && m_d3d_context) {
                 uint32_t active_idx = snapshot.active_buffer_index;
                 HANDLE shared_h = reinterpret_cast<HANDLE>(snapshot.shared_handles[active_idx < 4 ? active_idx : 0]);
-
-                if (snapshot.generation != m_cached_gen || snapshot.resource_generation != m_cached_res_gen) {
-                    m_staging_tex.Reset();
-                    m_staging_w = 0;
-                    m_staging_h = 0;
-                    for (int k = 0; k < 4; ++k) {
-                        m_cached_shared_tex[k].Reset();
-                        m_cached_handles[k] = nullptr;
-                    }
-                    m_cached_gen = snapshot.generation;
-                    m_cached_res_gen = snapshot.resource_generation;
-                }
 
                 // Acquire ring slot lease during texture access using TryAcquireRingSlot
                 LARGE_INTEGER qpc_now{};
@@ -766,6 +778,8 @@ void DuwnOutputPin::WorkerLoop() {
             std::this_thread::yield();
         }
     }
+
+    ::timeEndPeriod(1);
 
     if (header) {
         if (my_consumer_slot >= 0) {

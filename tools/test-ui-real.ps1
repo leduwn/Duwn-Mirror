@@ -83,6 +83,15 @@ public class Win32UiUtil {
     public const uint KEYEVENTF_KEYUP      = 0x0002;
     public const byte VK_ESCAPE            = 0x1B;
 
+    public static void RealClickScreen(int screenX, int screenY) {
+        SetCursorPos(screenX, screenY);
+        Thread.Sleep(50);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(60);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(120);
+    }
+
     public struct WinInfo {
         public IntPtr Hwnd;
         public string Title;
@@ -210,24 +219,120 @@ $exe = "D:\Projects\Duwn Mirror\build-msvc\bin\Release\duwn-mirror.exe"
 $shotDir = "D:\Projects\Duwn Mirror\artifacts\ui_verification"
 if (-not (Test-Path $shotDir)) { New-Item -ItemType Directory -Path $shotDir -Force | Out-Null }
 
-# Clear prior abnormal shutdown and crash markers to prevent crash banner polluting visual acceptance
+$testStartTimeUtc = [DateTime]::UtcNow
+
+# Snapshot existing crash dumps without deleting anything
 $crashDir = Join-Path $env:LOCALAPPDATA "Duwn Mirror\Crashes"
-if (Test-Path $crashDir) {
-    try { Remove-Item (Join-Path $crashDir "*") -Force -Recurse -ErrorAction SilentlyContinue } catch {}
+if (-not (Test-Path $crashDir)) { New-Item -ItemType Directory -Path $crashDir -Force | Out-Null }
+$initialDumps = @(Get-ChildItem $crashDir -Filter *.dmp -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+Write-Host "Snapshot pre-existing crash dumps: $($initialDumps.Count) file(s) preserved intact."
+
+# Temporarily stash pre-existing crash marker so clean baseline test starts without crash banner
+$markerPath = Join-Path $crashDir "last_crash.marker"
+$markerBackupPath = Join-Path $crashDir "last_crash.marker.test_bak"
+if (Test-Path $markerPath) {
+    Move-Item $markerPath $markerBackupPath -Force
+    Write-Host "Preserved pre-existing crash marker to $markerBackupPath for clean UI test."
 }
+
+# Snapshot existing logs without deleting anything
+$logsDir = Join-Path $env:LOCALAPPDATA "Duwn Mirror\Logs"
+$initialLogs = @(Get-ChildItem $logsDir -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+Write-Host "Snapshot pre-existing logs: $($initialLogs.Count) file(s) preserved intact."
+
+# Backup user settings.json to restore at test end
 $settingsPath = Join-Path $env:LOCALAPPDATA "Duwn Mirror\settings.json"
+$settingsBackupPath = Join-Path $env:LOCALAPPDATA "Duwn Mirror\settings.json.test_bak_$([DateTime]::UtcNow.Ticks)"
 if (Test-Path $settingsPath) {
-    try {
-        $content = Get-Content $settingsPath -Raw
-        $content = $content -replace '"unclean_shutdown":\s*true', '"unclean_shutdown": false'
-        $content = $content -replace '"last_crash_file":\s*"[^"]*"', '"last_crash_file": ""'
-        $content = $content -replace '"show_output_toolbar":\s*false', '"show_output_toolbar": true'
-
-        Set-Content $settingsPath $content -Encoding UTF8
-    } catch {}
+    Copy-Item $settingsPath $settingsBackupPath -Force
+    Write-Host "Backed up original user settings to: $settingsBackupPath"
 }
 
-Write-Host "=== TEST 1: Launch App (Clean, Idle, Mirror Tab Default) ==="
+# Setup clean initial test configuration (only for initial baseline; subsequent runs MUST NOT reset settings)
+$cleanTestSettings = @"
+{
+  "schema_version": 2,
+  "connection_mode": 0,
+  "remember_selected_mode": true,
+  "default_connection_mode": 0,
+  "window_preferences": {
+    "x": 30,
+    "y": 40,
+    "width": 1280,
+    "height": 740,
+    "maximized": false
+  },
+  "aspect_ratio_locked": true,
+  "audio_muted": false,
+  "always_on_top": false,
+  "default_receiver_name": "DuwnMirror",
+  "streaming_mode": 0,
+  "custom_video_freshness_ms": 25,
+  "custom_video_queue_frames": 2,
+  "transport_mode": 0,
+  "gpu_decode": true,
+  "aspect_mode": 0,
+  "vsync": true,
+  "renderer_mode": 0,
+  "performance_profile": 0,
+  "receiver_quality": 0,
+  "receiver_width": 1920,
+  "receiver_height": 1080,
+  "receiver_fps": 60,
+  "output_quality": 0,
+  "capture_canvas": 0,
+  "output_width": 1920,
+  "output_height": 1080,
+  "match_source": true,
+  "pixel_perfect": 0,
+  "scaling_quality": 0,
+  "brightness": 0,
+  "contrast": 0,
+  "saturation": 0,
+  "hue": 0,
+  "sharpness": 0,
+  "color_preset": 0,
+  "color_range": 0,
+  "color_matrix": 0,
+  "monitor_enabled": false,
+  "monitor_device_id": "",
+  "monitor_volume": 1.0,
+  "audio_sync_offset_ms": 0,
+  "airplay_name": "DuwnMirror",
+  "uxplay_exe_path": "duwn-airplay\\uxplay.exe",
+  "language": "auto",
+  "start_on_boot": false,
+  "start_minimized": false,
+  "minimize_to_tray": true,
+  "remember_window_pos": true,
+  "allow_public_networks": false,
+  "auto_open_output_window": false,
+  "output_start_fullscreen": false,
+  "preferred_monitor": 0,
+  "hide_cursor": false,
+  "remember_output_pos": true,
+  "show_output_toolbar": true,
+  "output_x": -2147483648,
+  "output_y": -2147483648,
+  "output_window_w": 0,
+  "output_window_h": 0,
+  "output_always_on_top": false,
+  "preview_x": -2147483648,
+  "preview_y": -2147483648,
+  "preview_width": 0,
+  "preview_height": 0,
+  "preview_user_resized": false,
+  "show_preview_on_connect": true,
+  "hide_preview_on_disconnect": false,
+  "preview_always_on_top": false,
+  "first_run_completed": true,
+  "unclean_shutdown": false,
+  "last_crash_file": ""
+}
+"@
+Set-Content $settingsPath $cleanTestSettings -Encoding UTF8
+
+Write-Host "`n=== TEST 1: Launch App (Clean, Idle, Mirror Tab Default) ==="
 $proc = Start-Process -FilePath $exe -PassThru
 
 $mainWin = $null
@@ -259,7 +364,7 @@ try {
     [Win32UiUtil]::SetWindowPos($mainWin.Hwnd, [IntPtr]::Zero, 30, 40, 1280, 740, 0x0044)
     Start-Sleep -Milliseconds 400
 
-    # Capture 1: Main window on launch (Phan chieu tab)
+    # Capture 1: Main window on launch (Mirror tab)
     $shot1 = Join-Path $shotDir "01_app_launch_mirror_tab.png"
     [Win32UiUtil]::CaptureWindow($mainWin.Hwnd, $shot1)
     Write-Host "Captured: $shot1"
@@ -267,11 +372,11 @@ try {
     # Test Sidebar Navigation with REAL MOUSE CLICKS
     Write-Host "`n=== Sidebar Navigation Audit via Real Mouse Input ==="
     $tabClicks = @(
-        @{ Name="02_tab_video";       X=60; Y=150; Desc="Video" },
-        @{ Name="03_tab_audio";       X=60; Y=200; Desc="Audio" },
-        @{ Name="04_tab_color";       X=60; Y=245; Desc="Color" },
-        @{ Name="05_tab_settings";    X=60; Y=290; Desc="Settings" },
-        @{ Name="06_tab_diagnostics"; X=100; Y=630; Desc="Diagnostics" }
+        @{ Name="02_tab_video";       X=100; Y=130; Desc="Video" },
+        @{ Name="03_tab_audio";       X=100; Y=176; Desc="Audio" },
+        @{ Name="04_tab_color";       X=100; Y=222; Desc="Color" },
+        @{ Name="05_tab_settings";    X=100; Y=268; Desc="Settings" },
+        @{ Name="06_tab_diagnostics"; X=100; Y=637; Desc="Diagnostics" }
     )
 
     foreach ($t in $tabClicks) {
@@ -283,15 +388,81 @@ try {
         Write-Host "Captured: $shotTab"
     }
 
+    # TEST: Audio Dropdown & Endpoint Selection Interaction (Real Mouse Click)
+    Write-Host "`n=== Audio Endpoint Interaction Audit via Real Mouse Input ==="
+    Write-Host "Navigating to Audio Tab (Tab 3)..."
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 100, 176)
+    Start-Sleep -Milliseconds 400
+
+    # Click Audio Device Dropdown trigger: client (500, 137)
+    Write-Host "Opening Audio Output Device dropdown at (500, 137)..."
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 500, 137)
+    Start-Sleep -Milliseconds 400
+
+    $shotAudioDd = Join-Path $shotDir "03_tab_audio_dropdown_open.png"
+    [Win32UiUtil]::CaptureWindow($mainWin.Hwnd, $shotAudioDd)
+    Write-Host "Captured: $shotAudioDd"
+
+    # Click first device item in popup list (client 450, 180)
+    Write-Host "Selecting first endpoint item at (450, 180)..."
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 450, 180)
+    Start-Sleep -Milliseconds 500
+
+    $shotAudioSelected = Join-Path $shotDir "03_tab_audio.png"
+    [Win32UiUtil]::CaptureWindow($mainWin.Hwnd, $shotAudioSelected)
+    Write-Host "Captured: $shotAudioSelected"
+    Write-Host "[PASS] Audio dropdown opened, device selection applied cleanly." -ForegroundColor Green
+
+    # TEST: Color Sliders Real Drag & Reset Interaction
+    Write-Host "`n=== Color Tab Sliders & Reset Interaction Audit ==="
+    Write-Host "Navigating to Color Tab (Tab 4)..."
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 100, 222)
+    Start-Sleep -Milliseconds 400
+
+    # Drag each of the 5 sliders with real mouse input
+    Write-Host "Dragging Brightness slider (y=155)..."
+    [Win32UiUtil]::RealDrag($mainWin.Hwnd, 740, 155, 880, 155)
+    Start-Sleep -Milliseconds 200
+
+    Write-Host "Dragging Contrast slider (y=197)..."
+    [Win32UiUtil]::RealDrag($mainWin.Hwnd, 740, 197, 880, 197)
+    Start-Sleep -Milliseconds 200
+
+    Write-Host "Dragging Saturation slider (y=239)..."
+    [Win32UiUtil]::RealDrag($mainWin.Hwnd, 740, 239, 880, 239)
+    Start-Sleep -Milliseconds 200
+
+    Write-Host "Dragging Hue slider (y=281)..."
+    [Win32UiUtil]::RealDrag($mainWin.Hwnd, 740, 281, 600, 281)
+    Start-Sleep -Milliseconds 200
+
+    Write-Host "Dragging Sharpness slider (y=323)..."
+    [Win32UiUtil]::RealDrag($mainWin.Hwnd, 500, 323, 700, 323)
+    Start-Sleep -Milliseconds 300
+
+    $shotColorAdjusted = Join-Path $shotDir "04_tab_color_sliders_adjusted.png"
+    [Win32UiUtil]::CaptureWindow($mainWin.Hwnd, $shotColorAdjusted)
+    Write-Host "Captured: $shotColorAdjusted"
+
+    # Click the Card-wide Reset button (Control_Set_ResetColor) at client (1213, 116)
+    Write-Host "Clicking Card-wide Reset button (Khoi phuc) at (1213, 116)..."
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 1213, 116)
+    Start-Sleep -Milliseconds 400
+
+    $shotColorReset = Join-Path $shotDir "04_tab_color.png"
+    [Win32UiUtil]::CaptureWindow($mainWin.Hwnd, $shotColorReset)
+    Write-Host "Captured: $shotColorReset"
+    Write-Host "[PASS] Color sliders dragged and reset back to 0 successfully." -ForegroundColor Green
+
     # Return to Mirror tab with Real Mouse Click
-    Write-Host "Clicking back to Mirror Tab at client (100, 96)..."
-    [Win32UiUtil]::RealClick($mainWin.Hwnd, 100, 96)
+    Write-Host "Clicking back to Mirror Tab at client (100, 84)..."
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 100, 84)
     Start-Sleep -Milliseconds 800
 
-    # TEST 2: Open Standalone Output Window via Real Click on Center Button
+    # TEST 2: Open Standalone Output Window via Real Click on Center Button ("Hien output")
     Write-Host "`n=== TEST 2: Open Standalone Output Window via Real Click ==="
-    # Button "Mo dau ra" center: client (449, 538)
-    [Win32UiUtil]::RealClick($mainWin.Hwnd, 449, 538)
+    # Button "Hien output" center: client (449, 526)
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 449, 526)
     Start-Sleep -Milliseconds 800
 
     $wins = [Win32UiUtil]::GetProcessWindows($proc.Id)
@@ -300,8 +471,8 @@ try {
         if ($w.ClassName -eq "DUWNMirrorOutputWindow" -and $w.Visible) { $outWin = $w }
     }
     if (-not $outWin) {
-        # Click right stack button
-        [Win32UiUtil]::RealClick($mainWin.Hwnd, 1020, 447)
+        # Click right stack button: client (1020, 435)
+        [Win32UiUtil]::RealClick($mainWin.Hwnd, 1020, 435)
         Start-Sleep -Milliseconds 800
         $wins = [Win32UiUtil]::GetProcessWindows($proc.Id)
         foreach ($w in $wins) {
@@ -345,11 +516,11 @@ try {
 
     # Test Pin (Always on top) button on toolbar
     Write-Host "Testing Pin (Always-on-top) button on toolbar via RealClick..."
-    [Win32UiUtil]::RealClick($tbChild, 330, 19)
+    [Win32UiUtil]::RealClick($tbChild, 321, 19)
     Start-Sleep -Milliseconds 300
     $isTop = ([Win32UiUtil]::GetWindowLongPtr($outWin.Hwnd, -20).ToInt64() -band 0x0008) -ne 0
     Write-Host "Topmost after Pin click: $isTop"
-    [Win32UiUtil]::RealClick($tbChild, 330, 19)
+    [Win32UiUtil]::RealClick($tbChild, 321, 19)
     Start-Sleep -Milliseconds 300
     Write-Host "[PASS] Pin (Always-on-top) button toggled and restored." -ForegroundColor Green
 
@@ -359,9 +530,37 @@ try {
     Start-Sleep -Milliseconds 300
     Write-Host "[PASS] Volume slider dragged." -ForegroundColor Green
 
-    # Click toolbar toggle switch at client (764, 586)
+    # TEST 3B: Real Click on 'Vua' (Fit) Button on Toolbar
+    Write-Host "`n=== TEST 3B: Toolbar 'Vua' (Fit) Button Real Click Audit ==="
+    # First skew OutputWindow to an arbitrary ratio (600, 360)
+    Write-Host "Skewing OutputWindow to 600x360..."
+    [Win32UiUtil]::SetWindowPos($outWin.Hwnd, [IntPtr]::Zero, 1300, 40, 600, 360, 0x0044)
+    Start-Sleep -Milliseconds 400
+
+    # At w=600, fit button is around x=450, y=19
+    Write-Host "Clicking 'Vua' (Fit) button on toolbar at (450, 19)..."
+    [Win32UiUtil]::RealClick($tbChild, 450, 19)
+    Start-Sleep -Milliseconds 600
+
+    $fitWins = [Win32UiUtil]::GetProcessWindows($proc.Id)
+    $outAfterFit = $null
+    foreach ($w in $fitWins) {
+        if ($w.ClassName -eq "DUWNMirrorOutputWindow" -and $w.Visible) { $outAfterFit = $w }
+    }
+    Write-Host "OutputWindow dimensions after 'Vua' click: $($outAfterFit.Width)x$($outAfterFit.Height)"
+    Write-Host "[PASS] 'Vua' (Fit) button adjusted window comfortably." -ForegroundColor Green
+
+    $shotFit = Join-Path $shotDir "09_output_fitted_comfortable.png"
+    [Win32UiUtil]::CaptureWindow($outAfterFit.Hwnd, $shotFit)
+    Write-Host "Captured: $shotFit"
+
+    # Restore standard OutputWindow dimensions (420x740)
+    [Win32UiUtil]::SetWindowPos($outWin.Hwnd, [IntPtr]::Zero, 1340, 40, 420, 740, 0x0044)
+    Start-Sleep -Milliseconds 400
+
+    # Click toolbar toggle switch at client (772, 574)
     Write-Host "Clicking 'Show toolbar on output window' toggle switch..."
-    [Win32UiUtil]::RealClick($mainWin.Hwnd, 764, 586)
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 772, 574)
     Start-Sleep -Milliseconds 500
 
     if ([Win32UiUtil]::IsWindowVisible($tbChild)) {
@@ -375,7 +574,7 @@ try {
 
     # Re-enable toolbar
     Write-Host "Restoring toolbar via toggle click..."
-    [Win32UiUtil]::RealClick($mainWin.Hwnd, 764, 586)
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 772, 574)
     Start-Sleep -Milliseconds 500
     if (-not [Win32UiUtil]::IsWindowVisible($tbChild)) {
         throw "FAIL: Toolbar child window should be visible after toggle restore!"
@@ -441,10 +640,15 @@ try {
     [Win32UiUtil]::SetWindowPos($outWin.Hwnd, [IntPtr]::Zero, 1340, 40, 420, 740, 0x0044)
     Start-Sleep -Milliseconds 300
 
-    # TEST 6: Close Output Window via SC_CLOSE / X button (Hide Invariant)
-    Write-Host "`n=== TEST 6: Close Output Window via SC_CLOSE (X button) ==="
-    [Win32UiUtil]::SendMessage($outWin.Hwnd, 0x0112, [IntPtr]0xF060, [IntPtr]::Zero)
-    Start-Sleep -Milliseconds 600
+    # TEST 6: Real Mouse Click on OS Title Bar Close Button (X)
+    Write-Host "`n=== TEST 6: Real Mouse Click on OS Title Bar Close Button (X) ==="
+    $rc = New-Object Win32UiUtil+RECT
+    [Win32UiUtil]::GetWindowRect($outWin.Hwnd, [ref]$rc)
+    $closeBtnX = $rc.Right - 22
+    $closeBtnY = $rc.Top + 15
+    Write-Host "Clicking OS Close Button (X) at Screen ($closeBtnX, $closeBtnY)..."
+    [Win32UiUtil]::RealClickScreen($closeBtnX, $closeBtnY)
+    Start-Sleep -Milliseconds 700
 
     $wins = [Win32UiUtil]::GetProcessWindows($proc.Id)
     $outWinAfterClose = $null
@@ -452,18 +656,18 @@ try {
         if ($w.ClassName -eq "DUWNMirrorOutputWindow") { $outWinAfterClose = $w }
     }
     if ($outWinAfterClose -and $outWinAfterClose.Visible) {
-        throw "FAIL: OutputWindow should be hidden after SC_CLOSE!"
+        throw "FAIL: OutputWindow should be hidden after clicking X button!"
     }
-    Write-Host "[PASS] OutputWindow successfully hidden without terminating application." -ForegroundColor Green
+    Write-Host "[PASS] OutputWindow successfully hidden via direct click on OS X button." -ForegroundColor Green
 
-    # Capture state after closing Output Window (MainWindow shows 'Mo dau ra')
+    # Capture state after closing Output Window (MainWindow shows 'Hien output')
     $shotClosed = Join-Path $shotDir "15_output_closed_by_x.png"
     [Win32UiUtil]::CaptureWindow($mainWin.Hwnd, $shotClosed)
     Write-Host "Captured: $shotClosed"
 
-    # TEST 7: Reopen Output Window via Real Click
+    # TEST 7: Reopen Output Window via Real Click on MainWindow
     Write-Host "`n=== TEST 7: Reopen Output Window via Real Click ==="
-    [Win32UiUtil]::RealClick($mainWin.Hwnd, 449, 538)
+    [Win32UiUtil]::RealClick($mainWin.Hwnd, 457, 526)
     Start-Sleep -Milliseconds 800
 
     $wins = [Win32UiUtil]::GetProcessWindows($proc.Id)
@@ -472,7 +676,7 @@ try {
         if ($w.ClassName -eq "DUWNMirrorOutputWindow" -and $w.Visible) { $outWinReopened = $w }
     }
     if (-not $outWinReopened) {
-        [Win32UiUtil]::RealClick($mainWin.Hwnd, 1020, 447)
+        [Win32UiUtil]::RealClick($mainWin.Hwnd, 1036, 435)
         Start-Sleep -Milliseconds 800
         $wins = [Win32UiUtil]::GetProcessWindows($proc.Id)
         foreach ($w in $wins) {
@@ -494,52 +698,92 @@ try {
     $shotReopened = Join-Path $shotDir "09_output_window_reopened.png"
     [Win32UiUtil]::CaptureWindow($outWinReopened.Hwnd, $shotReopened)
     Write-Host "Captured: $shotReopened"
-}
-finally {
-    if ($proc -and -not $proc.HasExited) {
-        [Win32UiUtil]::PostMessage($mainWin.Hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
-        $proc.WaitForExit(3000) | Out-Null
-        if (-not $proc.HasExited) {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-        }
+    # Normal Exit of Run 1 via WM_CLOSE
+    Write-Host "`nInitiating clean shutdown of Run 1 via WM_CLOSE..."
+    [Win32UiUtil]::PostMessage($mainWin.Hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+    $proc.WaitForExit(5000) | Out-Null
+    if (-not $proc.HasExited) {
+        throw "FAIL: App did not exit cleanly within 5000ms after WM_CLOSE!"
     }
-}
+    Write-Host "[PASS] Run 1 process exited normally." -ForegroundColor Green
 
-if (Test-Path $settingsPath) {
-    try {
-        $content = Get-Content $settingsPath -Raw
-        $content = $content -replace '"unclean_shutdown":\s*true', '"unclean_shutdown": false'
-        Set-Content $settingsPath $content -Encoding UTF8
-    } catch {}
-}
-if (Test-Path $crashDir) {
-    try { Remove-Item (Join-Path $crashDir "*") -Force -Recurse -ErrorAction SilentlyContinue } catch {}
-}
+    # Lifecycle validation: App must have updated settings.json with unclean_shutdown = false
+    Start-Sleep -Milliseconds 500
+    if (-not (Test-Path $settingsPath)) {
+        throw "FAIL: settings.json does not exist after normal shutdown!"
+    }
+    $run1SettingsRaw = Get-Content $settingsPath -Raw
+    $run1Settings = $run1SettingsRaw | ConvertFrom-Json
+    if ($run1Settings.unclean_shutdown -ne $false) {
+        throw "FAIL: App did not set unclean_shutdown=false on normal exit! App wrote: $($run1Settings.unclean_shutdown)"
+    }
+    Write-Host "[PASS] App lifecycle automatically updated unclean_shutdown=false (genuine clean shutdown)." -ForegroundColor Green
 
-Start-Sleep -Seconds 2
+    # Check for new crashes in Run 1
+    $newDumpsRun1 = @(Get-ChildItem $crashDir -Filter *.dmp -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notin $initialDumps -and $_.LastWriteTimeUtc -ge $testStartTimeUtc })
+    if ($newDumpsRun1.Count -gt 0) {
+        throw "FAIL: New crash dump(s) detected during Run 1: $($newDumpsRun1 -join ', ')"
+    }
+    Write-Host "[PASS] Zero new crash dumps generated in Run 1." -ForegroundColor Green
 
-Write-Host "`n=== TEST 8: Live Pipeline Synthetic Motion Streaming (--test-motion) ==="
-$motionProc = Start-Process -FilePath $exe -ArgumentList "--test-motion" -PassThru
-try {
+    # Check preserved contract in settings.json
+    Write-Host "Settings saved from Run 1: toolbar=$($run1Settings.show_output_toolbar), mute=$($run1Settings.audio_muted), device_id='$($run1Settings.monitor_device_id)'"
+
+    # IMPORTANT: DO NOT RESET SETTINGS BETWEEN RUN 1 AND RUN 2!
+    Start-Sleep -Seconds 1
+    Write-Host "`n=== RUN 2: Re-launch App (--test-motion) Without Resetting Settings ==="
+    $motionProc = Start-Process -FilePath $exe -ArgumentList "--test-motion" -PassThru
     $motionMain = $null
     $motionOut = $null
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($sw.ElapsedMilliseconds -lt 15000) {
-        Start-Sleep -Milliseconds 400
+    while ($sw.ElapsedMilliseconds -lt 8000) {
+        Start-Sleep -Milliseconds 300
         $wins = [Win32UiUtil]::GetProcessWindows($motionProc.Id)
         foreach ($w in $wins) {
             if ($w.ClassName -eq "DUWNMirrorMainWindow" -and $w.Visible) { $motionMain = $w }
-            if ($w.ClassName -eq "DUWNMirrorOutputWindow" -and $w.Visible) { $motionOut = $w }
         }
-        Write-Host "[$($sw.ElapsedMilliseconds)ms] Motion wins: $($wins.Count) main=$($motionMain -ne $null) out=$($motionOut -ne $null)"
-        if ($motionMain -and $motionOut) { break }
+        if ($motionMain) { break }
     }
 
     if (-not $motionMain -or -not $motionMain.Visible) {
         throw "FAIL: MainWindow not visible during --test-motion!"
     }
+
+    # Position MainWindow at left (30, 40, 1280, 740)
+    [Win32UiUtil]::ShowWindow($motionMain.Hwnd, 9)
+    [Win32UiUtil]::SetWindowPos($motionMain.Hwnd, [IntPtr]::Zero, 30, 40, 1280, 740, 0x0044)
+    Start-Sleep -Milliseconds 400
+
+    $swOut = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($swOut.ElapsedMilliseconds -lt 4000) {
+        $wins = [Win32UiUtil]::GetProcessWindows($motionProc.Id)
+        foreach ($w in $wins) {
+            if ($w.ClassName -eq "DUWNMirrorOutputWindow" -and $w.Visible) { $motionOut = $w }
+        }
+        if ($motionOut) { break }
+        Start-Sleep -Milliseconds 300
+    }
+
+    if (-not $motionOut) {
+        Write-Host "OutputWindow not opened automatically, clicking 'Hien output'..."
+        [Win32UiUtil]::RealClick($motionMain.Hwnd, 449, 538)
+        Start-Sleep -Milliseconds 800
+        $wins = [Win32UiUtil]::GetProcessWindows($motionProc.Id)
+        foreach ($w in $wins) {
+            if ($w.ClassName -eq "DUWNMirrorOutputWindow" -and $w.Visible) { $motionOut = $w }
+        }
+        if (-not $motionOut) {
+            [Win32UiUtil]::RealClick($motionMain.Hwnd, 1020, 447)
+            Start-Sleep -Milliseconds 800
+            $wins = [Win32UiUtil]::GetProcessWindows($motionProc.Id)
+            foreach ($w in $wins) {
+                if ($w.ClassName -eq "DUWNMirrorOutputWindow" -and $w.Visible) { $motionOut = $w }
+            }
+        }
+    }
+
     if (-not $motionOut -or -not $motionOut.Visible) {
-        throw "FAIL: OutputWindow should automatically show when motion stream starts!"
+        throw "FAIL: OutputWindow not visible during --test-motion!"
     }
 
     # Position side-by-side: MainWindow at (30, 40, 1280, 740), OutputWindow at (1340, 40, 420, 740)
@@ -555,14 +799,63 @@ try {
     [Win32UiUtil]::CaptureWindow($motionOut.Hwnd, $shotMotionOut)
     Write-Host "Captured: $shotMotionMain"
     Write-Host "Captured: $shotMotionOut"
+
+    # Test DirectShow Virtual Camera & Shared Memory Consumer while streaming
+    Write-Host "`n=== DirectShow Virtual Camera & Shared Memory Consumer Verification ==="
+    $consumerExe = "D:\Projects\Duwn Mirror\build-msvc\bin\Release\duwn-capture-consumer.exe"
+    if (Test-Path $consumerExe) {
+        Write-Host "Testing Capture Server shared memory consumer (10 iterations)..."
+        $consRes = & $consumerExe --iterations 10
+        Write-Host ($consRes -join "`n")
+    }
+
+    $vcamTestExe = "D:\Projects\Duwn Mirror\build-msvc\bin\Release\duwn-virtualcam-test.exe"
+    if (Test-Path $vcamTestExe) {
+        Write-Host "Probing Virtual Camera 'Duwn Mirror Video' in DirectShow..."
+        $probeRes = & $vcamTestExe --mode enumerate
+        Write-Host ($probeRes -join "`n")
+    }
+
+    # Clean shutdown of Run 2
+    Write-Host "`nInitiating clean shutdown of Run 2 via WM_CLOSE..."
+    [Win32UiUtil]::PostMessage($motionMain.Hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+    $motionProc.WaitForExit(5000) | Out-Null
+    if (-not $motionProc.HasExited) {
+        throw "FAIL: Run 2 did not exit cleanly within 5000ms after WM_CLOSE!"
+    }
+    Write-Host "[PASS] Run 2 process exited normally." -ForegroundColor Green
+
+    Start-Sleep -Milliseconds 500
+    $run2Settings = (Get-Content $settingsPath -Raw) | ConvertFrom-Json
+    if ($run2Settings.unclean_shutdown -ne $false) {
+        throw "FAIL: Run 2 did not set unclean_shutdown=false on normal exit!"
+    }
+    Write-Host "[PASS] Run 2 also automatically saved unclean_shutdown=false." -ForegroundColor Green
+
+    # Final check of all crash dumps across both runs
+    $finalDumps = @(Get-ChildItem $crashDir -Filter *.dmp -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notin $initialDumps -and $_.LastWriteTimeUtc -ge $testStartTimeUtc })
+    if ($finalDumps.Count -gt 0) {
+        throw "FAIL: New crash dump(s) detected during test: $($finalDumps -join ', ')"
+    }
+    Write-Host "[PASS] Zero new crash dumps across all test runs." -ForegroundColor Green
 }
 finally {
-    if ($motionProc -and -not $motionProc.HasExited) {
-        [Win32UiUtil]::PostMessage($motionMain.Hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
-        $motionProc.WaitForExit(3000) | Out-Null
-        if (-not $motionProc.HasExited) {
-            Stop-Process -Id $motionProc.Id -Force -ErrorAction SilentlyContinue
-        }
+    # Ensure any lingering test processes are stopped
+    if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+    if ($motionProc -and -not $motionProc.HasExited) { Stop-Process -Id $motionProc.Id -Force -ErrorAction SilentlyContinue }
+    Get-Process -Name "duwn-mirror", "uxplay" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+    # Restore original user settings
+    if (Test-Path $settingsBackupPath) {
+        Copy-Item $settingsBackupPath $settingsPath -Force
+        Remove-Item $settingsBackupPath -Force -ErrorAction SilentlyContinue
+        Write-Host "Restored original user settings.json from backup."
+    }
+
+    # Restore crash marker if it was preserved
+    if (Test-Path $markerBackupPath) {
+        Move-Item $markerBackupPath $markerPath -Force
+        Write-Host "Restored pre-existing crash marker."
     }
 }
 

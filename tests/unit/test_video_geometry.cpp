@@ -649,6 +649,77 @@ DUWN_TEST(aspect_aware_coded_vs_visible_aperture_passthrough) {
     DUWN_ASSERT(orig.width != 672); // Must NOT be coded width!
 }
 
+DUWN_TEST(Fit_Portrait_In_Wide_Window_EntireVideoPreservedNoCropNoDistortion) {
+    // iPhone Portrait 1080x1920 inside a wide landscape window (1280x720)
+    constexpr uint32_t src_w = 1080;
+    constexpr uint32_t src_h = 1920;
+    constexpr uint32_t dst_w = 1280;
+    constexpr uint32_t dst_h = 720;
+
+    RECT dst = ComputeFitDestRect(src_w, src_h, dst_w, dst_h);
+    // Vertical span touches top & bottom (full height fitted, no vertical crop)
+    DUWN_ASSERT(dst.top == 0);
+    DUWN_ASSERT(dst.bottom == 720);
+    // Pillarbox bars on left and right
+    DUWN_ASSERT(dst.left > 0);
+    DUWN_ASSERT(dst.right < 1280);
+    // Exact destination width: 720 * 1080 / 1920 = 405
+    uint32_t fitted_w = dst.right - dst.left;
+    DUWN_ASSERT(fitted_w == 405);
+    // Centered horizontally: (1280 - 405) / 2 = 437
+    DUWN_ASSERT(dst.left == 437);
+    DUWN_ASSERT(dst.right == 437 + 405);
+    // Aspect ratio preserved: 405 / 720 == 9 / 16 (0.5625)
+    double fitted_ar = static_cast<double>(fitted_w) / static_cast<double>(dst.bottom - dst.top);
+    double source_ar = static_cast<double>(src_w) / static_cast<double>(src_h);
+    DUWN_ASSERT(std::abs(fitted_ar - source_ar) < 0.002);
+}
+
+DUWN_TEST(Fit_Landscape_In_Narrow_Window_EntireVideoPreservedNoCropNoDistortion) {
+    // iPhone Landscape 1920x1080 inside a tall portrait window (400x800)
+    constexpr uint32_t src_w = 1920;
+    constexpr uint32_t src_h = 1080;
+    constexpr uint32_t dst_w = 400;
+    constexpr uint32_t dst_h = 800;
+
+    RECT dst = ComputeFitDestRect(src_w, src_h, dst_w, dst_h);
+    // Horizontal span touches left & right (full width fitted, no horizontal crop)
+    DUWN_ASSERT(dst.left == 0);
+    DUWN_ASSERT(dst.right == 400);
+    // Letterbox bars on top and bottom
+    DUWN_ASSERT(dst.top > 0);
+    DUWN_ASSERT(dst.bottom < 800);
+    // Exact destination height: 400 * 1080 / 1920 = 225
+    uint32_t fitted_h = dst.bottom - dst.top;
+    DUWN_ASSERT(fitted_h == 225);
+    // Centered vertically: (800 - 225) / 2 = 287
+    DUWN_ASSERT(dst.top == 287);
+    DUWN_ASSERT(dst.bottom == 287 + 225);
+    // Aspect ratio preserved: 400 / 225 == 16 / 9 (1.7777...)
+    double fitted_ar = static_cast<double>(dst.right - dst.left) / static_cast<double>(fitted_h);
+    double source_ar = static_cast<double>(src_w) / static_cast<double>(src_h);
+    DUWN_ASSERT(std::abs(fitted_ar - source_ar) < 0.002);
+}
+
+DUWN_TEST(Fit_DifferentAspectRatios_SquareWindow_NoDistortion) {
+    constexpr uint32_t sq_size = 600;
+
+    // 1. Portrait source on square canvas
+    RECT p_dst = ComputeFitDestRect(1080, 1920, sq_size, sq_size);
+    DUWN_ASSERT(p_dst.top == 0 && p_dst.bottom == sq_size);
+    DUWN_ASSERT(p_dst.left > 0 && p_dst.right < sq_size);
+    double p_ar = static_cast<double>(p_dst.right - p_dst.left) / static_cast<double>(sq_size);
+    DUWN_ASSERT(std::abs(p_ar - (1080.0 / 1920.0)) < 0.005);
+
+    // 2. Landscape source on square canvas
+    RECT l_dst = ComputeFitDestRect(1920, 1080, sq_size, sq_size);
+    DUWN_ASSERT(l_dst.left == 0 && l_dst.right == sq_size);
+    DUWN_ASSERT(l_dst.top > 0 && l_dst.bottom < sq_size);
+    double l_ar = static_cast<double>(sq_size) / static_cast<double>(l_dst.bottom - l_dst.top);
+    DUWN_ASSERT(std::abs(l_ar - (1920.0 / 1080.0)) < 0.005);
+}
+
+
 DUWN_TEST(aspect_aware_ipad_landscape) {
     // iPad Pro M4 4:3 visible aperture in landscape: 2048x1536
     constexpr uint32_t src_w = 2048;

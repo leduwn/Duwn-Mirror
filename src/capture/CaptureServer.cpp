@@ -39,7 +39,12 @@ bool CaptureServer::Start(std::wstring_view session_name) noexcept {
         return false;
     }
 
-    ++m_generation;
+    uint32_t prev_gen = m_header->generation;
+    if (prev_gen > m_generation) {
+        m_generation = prev_gen + 1;
+    } else {
+        ++m_generation;
+    }
     std::memset(m_header, 0, sizeof(CaptureMemoryHeader));
     std::memcpy(m_header->magic, "DUWNCAP", 8);
     m_header->protocol_version = 2;
