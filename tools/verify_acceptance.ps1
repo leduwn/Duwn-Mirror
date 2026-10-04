@@ -18,10 +18,13 @@ Get-Process "duwn-mirror" -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 500
 
 $proc = Start-Process -FilePath "d:\Projects\Duwn Mirror\build-msvc\bin\Release\duwn-mirror.exe" -PassThru
-Start-Sleep -Seconds 2
-
-$wins = [WinUtil]::GetWins($proc.Id)
-$mainWin = $wins | Where-Object { $_.ClassName -eq "DUWNMirrorMainWindow" }
+$mainWin = $null
+for ($t = 0; $t -lt 12; $t++) {
+    Start-Sleep -Milliseconds 500
+    $wins = [WinUtil]::GetWins($proc.Id)
+    $mainWin = $wins | Where-Object { $_.ClassName -eq "DUWNMirrorMainWindow" }
+    if ($mainWin) { break }
+}
 
 if (!$mainWin) {
     Write-Error "MainWindow not found"
@@ -86,18 +89,23 @@ Write-Host "========================================================" -Foregroun
 
 # Launch with synthetic motion and dynamic rotation (--test-rotate)
 $proc = Start-Process -FilePath "d:\Projects\Duwn Mirror\build-msvc\bin\Release\duwn-mirror.exe" -ArgumentList "--test-rotate" -PassThru
-Start-Sleep -Seconds 2
+$mainWin = $null
+for ($t = 0; $t -lt 12; $t++) {
+    Start-Sleep -Milliseconds 500
+    $wins = [WinUtil]::GetWins($proc.Id)
+    $mainWin = $wins | Where-Object { $_.ClassName -eq "DUWNMirrorMainWindow" }
+    if ($mainWin) { break }
+}
 
-$wins = [WinUtil]::GetWins($proc.Id)
-$mainWin = $wins | Where-Object { $_.ClassName -eq "DUWNMirrorMainWindow" }
-
-# Open OutputWindow
-[WinUtil]::RealClick($mainWin.Hwnd, 449, 526)
-Start-Sleep -Milliseconds 800
-
-$wins = [WinUtil]::GetWins($proc.Id)
+# Open OutputWindow if not already open
 $outWin = $wins | Where-Object { $_.ClassName -eq "DUWNMirrorOutputWindow" }
-if (!$outWin) {
+if (!$outWin -and $mainWin) {
+    [WinUtil]::RealClick($mainWin.Hwnd, 449, 526)
+    Start-Sleep -Milliseconds 800
+    $wins = [WinUtil]::GetWins($proc.Id)
+    $outWin = $wins | Where-Object { $_.ClassName -eq "DUWNMirrorOutputWindow" }
+}
+if (!$outWin -and $mainWin) {
     [WinUtil]::RealClick($mainWin.Hwnd, 1020, 435)
     Start-Sleep -Milliseconds 800
     $wins = [WinUtil]::GetWins($proc.Id)
@@ -111,7 +119,7 @@ if ($outWin) {
     $hasCaption = ($style -band 0x00C00000) -ne 0
 
     Write-Host "OutputWindow Style: 0x$($style.ToString('X8'))" -ForegroundColor Cyan
-    Write-Host "  WS_THICKFRAME: $(if($hasThickFrame){'FAIL (Resize borders present)'}else{'PASS (No resize borders)'})" -ForegroundColor $(if($hasThickFrame){'Red'}else{'Green'})
+    Write-Host "  WS_THICKFRAME: $(if($hasThickFrame){'PASS (Resize borders enabled)'}else{'FAIL (No resize borders)'})" -ForegroundColor $(if($hasThickFrame){'Green'}else{'Red'})
     Write-Host "  WS_MAXIMIZEBOX: $(if($hasMaximizeBox){'FAIL (Maximize box present)'}else{'PASS (No maximize box)'})" -ForegroundColor $(if($hasMaximizeBox){'Red'}else{'Green'})
     Write-Host "  WS_CAPTION:     $(if($hasCaption){'PASS (Moveable titlebar present)'}else{'FAIL'})" -ForegroundColor $(if($hasCaption){'Green'}else{'Red'})
 
@@ -182,6 +190,51 @@ if ($outWin) {
     $shotFit = Join-Path $artDir "output_window_after_fit.png"
     [WinUtil]::Capture($outFit.Hwnd, $shotFit)
     Write-Host "Captured after fit: $shotFit" -ForegroundColor Yellow
+
+    Write-Host "`n========================================================" -ForegroundColor Magenta
+    Write-Host "STAGE 3: REAL MOUSE DRAG RESIZE & ASPECT RATIO DEMO" -ForegroundColor Magenta
+    Write-Host "========================================================" -ForegroundColor Magenta
+
+    & python "d:\Projects\Duwn Mirror\tools\record_resize_verification.py"
+    $videoDemo = Join-Path $artDir "resize_aspect_ratio_demo.mp4"
+    if (Test-Path $videoDemo) {
+        $vItem = Get-Item $videoDemo
+        Write-Host "[PASS] Video demo recorded successfully: $videoDemo ($($vItem.Length) bytes)" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] Video demo not created" -ForegroundColor Yellow
+    }
+
+    # Verify fullscreen toggle with F11 / Esc
+    Write-Host "`nVerifying Fullscreen toggle (F11 / Esc)..." -ForegroundColor Cyan
+    $wins = [WinUtil]::GetWins($proc.Id)
+    $curOut = $wins | Where-Object { $_.ClassName -eq "DUWNMirrorOutputWindow" }
+    $beforeFsW = $curOut.Width
+    $beforeFsH = $curOut.Height
+
+    [WinUtil]::RealClick($curOut.Hwnd, 15, 15)
+    [WinUtil]::SetForegroundWindow($curOut.Hwnd)
+    Start-Sleep -Milliseconds 100
+    [System.Windows.Forms.SendKeys]::SendWait("{F11}")
+    Start-Sleep -Milliseconds 1000
+
+    $wins = [WinUtil]::GetWins($proc.Id)
+    $fsOut = $wins | Where-Object { $_.ClassName -eq "DUWNMirrorOutputWindow" }
+    if ($fsOut) {
+        Write-Host "  Fullscreen window size: $($fsOut.Width)x$($fsOut.Height)" -ForegroundColor Yellow
+        [WinUtil]::SetForegroundWindow($fsOut.Hwnd)
+        Start-Sleep -Milliseconds 150
+        [System.Windows.Forms.SendKeys]::SendWait("{ESC}")
+        Start-Sleep -Milliseconds 1000
+    }
+
+    $wins = [WinUtil]::GetWins($proc.Id)
+    $restoredOut = $wins | Where-Object { $_.ClassName -eq "DUWNMirrorOutputWindow" }
+    if ($restoredOut) {
+        Write-Host "  Restored window size: $($restoredOut.Width)x$($restoredOut.Height)" -ForegroundColor Yellow
+        Write-Host "[PASS] Fullscreen enter & exit restored visible output window ($($restoredOut.Width)x$($restoredOut.Height))" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] Restored window not visible" -ForegroundColor Yellow
+    }
 } else {
     Write-Host "[WARN] OutputWindow could not be opened automatically" -ForegroundColor Yellow
 }

@@ -39,6 +39,22 @@ public class WinUtil {
         Thread.Sleep(150);
     }
 
+    public static void RealDrag(int startX, int startY, int endX, int endY, int steps = 25) {
+        SetCursorPos(startX, startY);
+        Thread.Sleep(80);
+        mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero); // Left mouse down
+        Thread.Sleep(60);
+        for (int i = 1; i <= steps; i++) {
+            int cx = startX + (endX - startX) * i / steps;
+            int cy = startY + (endY - startY) * i / steps;
+            SetCursorPos(cx, cy);
+            Thread.Sleep(20);
+        }
+        Thread.Sleep(60);
+        mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero); // Left mouse up
+        Thread.Sleep(150);
+    }
+
     public static void Capture(IntPtr hWnd, string filePath) {
         ShowWindow(hWnd, 9);
         SetForegroundWindow(hWnd);

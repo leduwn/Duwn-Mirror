@@ -2384,23 +2384,13 @@ void App::ApplySettingChange(int id, int value) noexcept {
     }
 
     if (id == ui::Control_Btn_CrashDismiss) {
-
         CrashHandler::ClearCrashFlag();
-
-        m_settings.unclean_shutdown = false;
-
-        m_settings.Save();
-
         if (m_window) {
-
             m_window->State().show_crash_banner = false;
-
+            m_window->State().crash_banner_file.clear();
             ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
-
         }
-
         return;
-
     }
 
     if (id == ui::Control_Btn_OpenSettingsFile) {

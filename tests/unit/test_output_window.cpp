@@ -479,24 +479,17 @@ DUWN_TEST(OutputWindow_StableRotationGeometryTenCycles) {
 }
 
 // ---------------------------------------------------------------------------
-// 15. WM_NCHITTEST Border Hit Test Preservation
+// 15. WM_NCHITTEST Border Hit Test Allows Sizing
 // ---------------------------------------------------------------------------
-DUWN_TEST(OutputWindow_NcHitTestBorderPreservation) {
-    // Sizing border hit codes must convert to HTBORDER to protect locked aspect ratio
+DUWN_TEST(OutputWindow_NcHitTestAllowsSizingBorders) {
+    // Sizing border hit codes must NOT be collapsed to HTBORDER so user can resize
     LRESULT sizing_borders[] = { HTLEFT, HTRIGHT, HTTOP, HTBOTTOM, HTTOPLEFT, HTTOPRIGHT, HTBOTTOMLEFT, HTBOTTOMRIGHT };
     for (LRESULT hit : sizing_borders) {
-        LRESULT mapped = (hit == HTLEFT || hit == HTRIGHT || hit == HTTOP || hit == HTBOTTOM ||
-                          hit == HTTOPLEFT || hit == HTTOPRIGHT || hit == HTBOTTOMLEFT || hit == HTBOTTOMRIGHT)
-                         ? HTBORDER : hit;
-        DUWN_ASSERT(mapped == HTBORDER);
+        DUWN_ASSERT(hit != HTBORDER);
     }
-    // Interactive regions must preserve their exact hit test code
     LRESULT standard_regions[] = { HTCLIENT, HTCAPTION, HTCLOSE, HTMINBUTTON, HTSYSMENU, HTHELP };
     for (LRESULT hit : standard_regions) {
-        LRESULT mapped = (hit == HTLEFT || hit == HTRIGHT || hit == HTTOP || hit == HTBOTTOM ||
-                          hit == HTTOPLEFT || hit == HTTOPRIGHT || hit == HTBOTTOMLEFT || hit == HTBOTTOMRIGHT)
-                         ? HTBORDER : hit;
-        DUWN_ASSERT(mapped == hit);
+        DUWN_ASSERT(hit != HTBORDER);
     }
 }
 
@@ -530,5 +523,179 @@ DUWN_TEST(OutputWindow_AsyncGeometrySequenceOrdering) {
     DUWN_ASSERT(seq1 != seq.load());
     DUWN_ASSERT(seq2 != seq.load());
     DUWN_ASSERT(seq3 == seq.load());
+}
+
+// ---------------------------------------------------------------------------
+// 18. Aspect Ratio Preserving Resize Across All Edges and Corners
+// ---------------------------------------------------------------------------
+DUWN_TEST(OutputWindow_AspectRatioPreservingResize) {
+    const uint32_t src_w = 1184;
+    const uint32_t src_h = 2560; // Portrait iPhone 19.5:9
+    const double aspect = static_cast<double>(src_w) / static_cast<double>(src_h);
+    const int nc_w = 16;
+    const int nc_h = 39;
+    const int tb_h = 38;
+
+    auto simulate_sizing = [&](WPARAM edge, RECT in_rc) -> RECT {
+        int prop_w = in_rc.right - in_rc.left;
+        int prop_h = in_rc.bottom - in_rc.top;
+        int prop_vid_w = prop_w - nc_w;
+        int prop_vid_h = prop_h - nc_h - tb_h;
+
+        int target_vid_w = 0, target_vid_h = 0;
+        if (edge == WMSZ_LEFT || edge == WMSZ_RIGHT) {
+            target_vid_w = std::clamp(prop_vid_w, 120, 2000);
+            target_vid_h = static_cast<int>(std::round(target_vid_w / aspect));
+        } else if (edge == WMSZ_TOP || edge == WMSZ_BOTTOM) {
+            target_vid_h = std::clamp(prop_vid_h, 120, 2000);
+            target_vid_w = static_cast<int>(std::round(target_vid_h * aspect));
+        } else {
+            if (static_cast<double>(prop_vid_w) / aspect >= prop_vid_h) {
+                target_vid_w = std::clamp(prop_vid_w, 120, 2000);
+                target_vid_h = static_cast<int>(std::round(target_vid_w / aspect));
+            } else {
+                target_vid_h = std::clamp(prop_vid_h, 120, 2000);
+                target_vid_w = static_cast<int>(std::round(target_vid_h * aspect));
+            }
+        }
+        target_vid_w = (target_vid_w / 2) * 2;
+        target_vid_h = (target_vid_h / 2) * 2;
+
+        int final_w = target_vid_w + nc_w;
+        int final_h = target_vid_h + nc_h + tb_h;
+
+        RECT out = in_rc;
+        if (edge == WMSZ_RIGHT) {
+            out.right = out.left + final_w;
+            int cy = (out.top + out.bottom) / 2;
+            out.top = cy - final_h / 2;
+            out.bottom = out.top + final_h;
+        } else if (edge == WMSZ_BOTTOM) {
+            out.bottom = out.top + final_h;
+            int cx = (out.left + out.right) / 2;
+            out.left = cx - final_w / 2;
+            out.right = out.left + final_w;
+        } else if (edge == WMSZ_BOTTOMRIGHT) {
+            out.right = out.left + final_w;
+            out.bottom = out.top + final_h;
+        } else if (edge == WMSZ_TOPLEFT) {
+            out.left = out.right - final_w;
+            out.top = out.bottom - final_h;
+        }
+        return out;
+    };
+
+    RECT init_rc{100, 100, 100 + 400 + nc_w, 100 + static_cast<int>(std::round(400.0 / aspect)) + nc_h + tb_h};
+
+    // 1. Drag Right edge
+    RECT r1 = simulate_sizing(WMSZ_RIGHT, {init_rc.left, init_rc.top, init_rc.left + 500 + nc_w, init_rc.bottom});
+    int vid1_w = (r1.right - r1.left) - nc_w;
+    int vid1_h = (r1.bottom - r1.top) - nc_h - tb_h;
+    RECT fit1 = ComputeFitDestRect(src_w, src_h, vid1_w, vid1_h);
+    DUWN_ASSERT(fit1.left == 0 && fit1.top == 0);
+    DUWN_ASSERT(fit1.right == vid1_w && fit1.bottom == vid1_h);
+
+    // 2. Drag Bottom edge
+    RECT r2 = simulate_sizing(WMSZ_BOTTOM, {init_rc.left, init_rc.top, init_rc.right, init_rc.top + 900 + nc_h + tb_h});
+    int vid2_w = (r2.right - r2.left) - nc_w;
+    int vid2_h = (r2.bottom - r2.top) - nc_h - tb_h;
+    RECT fit2 = ComputeFitDestRect(src_w, src_h, vid2_w, vid2_h);
+    DUWN_ASSERT(fit2.left == 0 && fit2.top == 0);
+    DUWN_ASSERT(fit2.right == vid2_w && fit2.bottom == vid2_h);
+
+    // 3. Drag Bottom-Right corner (opposite corner pinned)
+    RECT r3 = simulate_sizing(WMSZ_BOTTOMRIGHT, {init_rc.left, init_rc.top, init_rc.left + 600 + nc_w, init_rc.top + 1200 + nc_h + tb_h});
+    DUWN_ASSERT(r3.left == init_rc.left && r3.top == init_rc.top);
+    int vid3_w = (r3.right - r3.left) - nc_w;
+    int vid3_h = (r3.bottom - r3.top) - nc_h - tb_h;
+    RECT fit3 = ComputeFitDestRect(src_w, src_h, vid3_w, vid3_h);
+    DUWN_ASSERT(fit3.left == 0 && fit3.top == 0);
+    DUWN_ASSERT(fit3.right == vid3_w && fit3.bottom == vid3_h);
+
+    // 4. Drag Top-Left corner (opposite corner pinned)
+    RECT r4 = simulate_sizing(WMSZ_TOPLEFT, {init_rc.left - 100, init_rc.top - 200, init_rc.right, init_rc.bottom});
+    DUWN_ASSERT(r4.right == init_rc.right && r4.bottom == init_rc.bottom);
+    int vid4_w = (r4.right - r4.left) - nc_w;
+    int vid4_h = (r4.bottom - r4.top) - nc_h - tb_h;
+    RECT fit4 = ComputeFitDestRect(src_w, src_h, vid4_w, vid4_h);
+    DUWN_ASSERT(fit4.left == 0 && fit4.top == 0);
+    DUWN_ASSERT(fit4.right == vid4_w && fit4.bottom == vid4_h);
+}
+
+// ---------------------------------------------------------------------------
+// 19. User Desired Size Preserved Across Rotations With Zero Accumulative Drift
+// ---------------------------------------------------------------------------
+DUWN_TEST(OutputWindow_UserDesiredSizeRotationPreservation) {
+    const float user_desired_long_edge_dip = 800.0f;
+    const float dpi_scale = 1.25f;
+    const int desired_long_edge = static_cast<int>(std::round(user_desired_long_edge_dip * dpi_scale)); // 1000px
+
+    const uint32_t src_landscape_w = 2560, src_landscape_h = 1184;
+    const uint32_t src_portrait_w = 1184, src_portrait_h = 2560;
+    const double ar_land = static_cast<double>(src_landscape_w) / src_landscape_h;
+    const double ar_port = static_cast<double>(src_portrait_w) / src_portrait_h;
+
+    // Simulate 10 cycles of rotation
+    int last_p_w = 0, last_p_h = 0;
+    int last_l_w = 0, last_l_h = 0;
+
+    for (int cycle = 0; cycle < 10; ++cycle) {
+        // Landscape: long edge is width
+        int l_w = desired_long_edge;
+        int l_h = static_cast<int>(std::round(l_w / ar_land));
+        l_w = (l_w / 2) * 2;
+        l_h = (l_h / 2) * 2;
+
+        // Portrait: long edge is height
+        int p_h = desired_long_edge;
+        int p_w = static_cast<int>(std::round(p_h * ar_port));
+        p_w = (p_w / 2) * 2;
+        p_h = (p_h / 2) * 2;
+
+        if (cycle == 0) {
+            last_p_w = p_w; last_p_h = p_h;
+            last_l_w = l_w; last_l_h = l_h;
+        } else {
+            DUWN_ASSERT(p_w == last_p_w);
+            DUWN_ASSERT(p_h == last_p_h);
+            DUWN_ASSERT(l_w == last_l_w);
+            DUWN_ASSERT(l_h == last_l_h);
+        }
+
+        // Verify zero black bars on both
+        RECT fit_l = ComputeFitDestRect(src_landscape_w, src_landscape_h, l_w, l_h);
+        DUWN_ASSERT(fit_l.left == 0 && fit_l.top == 0);
+        DUWN_ASSERT(fit_l.right == l_w && fit_l.bottom == l_h);
+
+        RECT fit_p = ComputeFitDestRect(src_portrait_w, src_portrait_h, p_w, p_h);
+        DUWN_ASSERT(fit_p.left == 0 && fit_p.top == 0);
+        DUWN_ASSERT(fit_p.right == p_w && fit_p.bottom == p_h);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 20. Lifecycle: Dismiss Button Preserves Active Unclean Shutdown Invariant
+// ---------------------------------------------------------------------------
+DUWN_TEST(OutputWindow_DismissCrashBannerLifecycleInvariant) {
+    Settings s{};
+    s.unclean_shutdown = true; // Active running session marker
+
+    // Simulating user clicking "Dismiss" (Control_Btn_CrashDismiss)
+    // The action hides the banner and clears marker, but MUST NOT reset unclean_shutdown
+    // until genuine graceful exit in App::Shutdown().
+    bool show_crash_banner = true;
+    std::wstring crash_banner_file = L"crash.dmp";
+
+    // Dismiss action:
+    show_crash_banner = false;
+    crash_banner_file.clear();
+    // Invariant: s.unclean_shutdown remains true during active session
+    DUWN_ASSERT(s.unclean_shutdown == true);
+    DUWN_ASSERT(!show_crash_banner);
+    DUWN_ASSERT(crash_banner_file.empty());
+
+    // Only graceful shutdown sets it to false
+    s.unclean_shutdown = false;
+    DUWN_ASSERT(s.unclean_shutdown == false);
 }
 

@@ -47,6 +47,8 @@ public:
     bool IsToolbarVisible() const noexcept { return m_show_toolbar; }
     bool HasFrame() const noexcept { return m_has_frame; }
     bool IsUserHiddenForSession() const noexcept { return m_user_hidden_for_session; }
+    bool HasCustomSize() const noexcept { return m_user_has_custom_size; }
+    float DesiredLongEdgeDip() const noexcept { return m_desired_long_edge_dip; }
 
     void SetAlwaysOnTop(bool top) noexcept;
     void ToggleAlwaysOnTop() noexcept;
@@ -118,6 +120,8 @@ private:
     void LayoutChildren() noexcept;
     int GetToolbarHeightPx() const noexcept;
     float GetDpiScale() const noexcept;
+    LRESULT HandleSizing(WPARAM edge, RECT* prc) noexcept;
+    void RecordUserDesiredSize() noexcept;
 
     static bool s_class_registered;
     static inline std::atomic<uint32_t> s_instance_count{0};
@@ -153,6 +157,8 @@ private:
     std::atomic<uint32_t> m_client_h{720};
     std::atomic<uint64_t> m_geometry_seq{0};
 
+    float                 m_desired_long_edge_dip{0.0f};
+    bool                  m_user_has_custom_size{false};
 
     int                   m_tb_hovered_btn{0}; // 1 Mute, 2 Slider, 3 Fit, 4 Pin, 5 Fullscreen
     int                   m_tb_pressed_btn{0};

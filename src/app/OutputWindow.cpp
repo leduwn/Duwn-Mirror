@@ -115,7 +115,7 @@ bool OutputWindow::Create(uint32_t width, uint32_t height,
         s_class_registered = true;
     }
 
-    constexpr DWORD style    = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+    constexpr DWORD style    = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
     constexpr DWORD ex_style = WS_EX_APPWINDOW;
 
     int win_w = 480;
@@ -263,7 +263,9 @@ void OutputWindow::Show() noexcept {
         m_user_hidden_for_session = false;
         if (m_pending_geometry_update) {
             m_pending_geometry_update = false;
-            ApplyComfortableFit();
+            uint32_t vw = m_video_w.load(std::memory_order_relaxed);
+            uint32_t vh = m_video_h.load(std::memory_order_relaxed);
+            ApplyGeometryToMatchSource(vw, vh);
         }
         if (::IsIconic(m_hwnd)) {
             ::ShowWindow(m_hwnd, SW_RESTORE);
@@ -281,7 +283,9 @@ void OutputWindow::ShowNoActivate() noexcept {
         m_user_hidden_for_session = false;
         if (m_pending_geometry_update) {
             m_pending_geometry_update = false;
-            ApplyComfortableFit();
+            uint32_t vw = m_video_w.load(std::memory_order_relaxed);
+            uint32_t vh = m_video_h.load(std::memory_order_relaxed);
+            ApplyGeometryToMatchSource(vw, vh);
         }
         if (::IsIconic(m_hwnd)) {
             ::ShowWindow(m_hwnd, SW_RESTORE);
@@ -381,6 +385,13 @@ void OutputWindow::SetVideoGeometry(uint32_t video_w, uint32_t video_h) noexcept
 
 void OutputWindow::GetWindowRect(int& x, int& y, int& w, int& h) const noexcept {
     if (!m_hwnd) return;
+    if (m_fullscreen) {
+        x = m_restore_rect.left;
+        y = m_restore_rect.top;
+        w = m_restore_rect.right - m_restore_rect.left;
+        h = m_restore_rect.bottom - m_restore_rect.top;
+        return;
+    }
     RECT rc{};
     ::GetWindowRect(m_hwnd, &rc);
     x = rc.left; y = rc.top;
@@ -392,11 +403,23 @@ void OutputWindow::SetWindowRect(int x, int y, int w, int h) noexcept {
     ::SetWindowPos(m_hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     EnsureAccessiblePlacement();
     LayoutChildren();
+    RecordUserDesiredSize();
 }
 
-
+void OutputWindow::RecordUserDesiredSize() noexcept {
+    int vid_w = VideoSurfaceWidth();
+    int vid_h = VideoSurfaceHeight();
+    float dpi = GetDpiScale();
+    if (vid_w > 0 && vid_h > 0 && dpi > 0.0f) {
+        int long_edge = std::max(vid_w, vid_h);
+        m_desired_long_edge_dip = static_cast<float>(long_edge) / dpi;
+        m_user_has_custom_size = true;
+    }
+}
 
 void OutputWindow::ApplyComfortableFit() noexcept {
+    m_user_has_custom_size = false;
+    m_desired_long_edge_dip = 0.0f;
     uint32_t vw = m_video_w.load(std::memory_order_relaxed);
     uint32_t vh = m_video_h.load(std::memory_order_relaxed);
     if (vw == 0 || vh == 0) { vw = 1080; vh = 1920; }
@@ -425,24 +448,64 @@ void OutputWindow::ApplyGeometryToMatchSource(uint32_t src_w, uint32_t src_h) no
     int tb_h = GetToolbarHeightPx();
     double ar = static_cast<double>(src_w) / static_cast<double>(src_h);
 
+    RECT wr{}, cr{};
+    ::GetWindowRect(m_hwnd, &wr);
+    ::GetClientRect(m_hwnd, &cr);
+    int nc_w = (wr.right - wr.left) - (cr.right - cr.left);
+    int nc_h = (wr.bottom - wr.top) - (cr.bottom - cr.top);
+    if (nc_w <= 0 || nc_h <= 0) {
+        RECT test_r{0, 0, 100, 100};
+        constexpr DWORD st = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+        ::AdjustWindowRectEx(&test_r, st, FALSE, WS_EX_APPWINDOW);
+        nc_w = (test_r.right - test_r.left) - 100;
+        nc_h = (test_r.bottom - test_r.top) - 100;
+    }
+
+    float dpi = GetDpiScale();
     int target_vid_w = 0;
     int target_vid_h = 0;
 
-    if (src_w < src_h) {
-        // Portrait source: baseline 70% available work area height
-        target_vid_h = static_cast<int>(std::round(work_h * 0.70f));
-        target_vid_w = static_cast<int>(std::round(target_vid_h * ar));
-        if (target_vid_w > static_cast<int>(work_w * 0.85f)) {
-            target_vid_w = static_cast<int>(work_w * 0.85f);
+    if (m_user_has_custom_size && m_desired_long_edge_dip > 0.0f) {
+        int desired_long_edge = static_cast<int>(std::round(m_desired_long_edge_dip * dpi));
+        if (src_w < src_h) {
+            target_vid_h = desired_long_edge;
+            target_vid_w = static_cast<int>(std::round(target_vid_h * ar));
+        } else {
+            target_vid_w = desired_long_edge;
             target_vid_h = static_cast<int>(std::round(target_vid_w / ar));
         }
-    } else {
-        // Landscape source: baseline 55% available work area width
-        target_vid_w = static_cast<int>(std::round(work_w * 0.55f));
-        target_vid_h = static_cast<int>(std::round(target_vid_w / ar));
-        if (target_vid_h + tb_h > static_cast<int>(work_h * 0.85f)) {
-            target_vid_h = static_cast<int>(work_h * 0.85f - tb_h);
+
+        int max_allowed_w = static_cast<int>((work_w - nc_w) * 0.95f);
+        int max_allowed_h = static_cast<int>((work_h - nc_h - tb_h) * 0.95f);
+        if (target_vid_w > max_allowed_w) {
+            target_vid_w = max_allowed_w;
+            target_vid_h = static_cast<int>(std::round(target_vid_w / ar));
+        }
+        if (target_vid_h > max_allowed_h) {
+            target_vid_h = max_allowed_h;
             target_vid_w = static_cast<int>(std::round(target_vid_h * ar));
+        }
+    } else {
+        if (src_w < src_h) {
+            // Portrait source: baseline 70% available work area height
+            target_vid_h = static_cast<int>(std::round(work_h * 0.70f));
+            target_vid_w = static_cast<int>(std::round(target_vid_h * ar));
+            if (target_vid_w > static_cast<int>(work_w * 0.85f)) {
+                target_vid_w = static_cast<int>(work_w * 0.85f);
+                target_vid_h = static_cast<int>(std::round(target_vid_w / ar));
+            }
+        } else {
+            // Landscape source: baseline 55% available work area width
+            target_vid_w = static_cast<int>(std::round(work_w * 0.55f));
+            target_vid_h = static_cast<int>(std::round(target_vid_w / ar));
+            if (target_vid_h + tb_h > static_cast<int>(work_h * 0.85f)) {
+                target_vid_h = static_cast<int>(work_h * 0.85f - tb_h);
+                target_vid_w = static_cast<int>(std::round(target_vid_h * ar));
+            }
+        }
+        int long_edge = std::max(target_vid_w, target_vid_h);
+        if (dpi > 0.0f) {
+            m_desired_long_edge_dip = static_cast<float>(long_edge) / dpi;
         }
     }
 
@@ -450,17 +513,24 @@ void OutputWindow::ApplyGeometryToMatchSource(uint32_t src_w, uint32_t src_h) no
     target_vid_w = (std::max(100, target_vid_w) / 2) * 2;
     target_vid_h = (std::max(100, target_vid_h) / 2) * 2;
 
-    constexpr DWORD cur_style = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
-    constexpr DWORD cur_ex_style = WS_EX_APPWINDOW;
-    RECT win_rc{0, 0, target_vid_w, target_vid_h + tb_h};
-    ::AdjustWindowRectEx(&win_rc, cur_style, FALSE, cur_ex_style);
-    int total_w = win_rc.right - win_rc.left;
-    int total_h = win_rc.bottom - win_rc.top;
+    int total_w = target_vid_w + nc_w;
+    int total_h = target_vid_h + nc_h + tb_h;
 
     RECT cur_rc{};
     ::GetWindowRect(m_hwnd, &cur_rc);
-    int cx = cur_rc.left + (cur_rc.right - cur_rc.left) / 2;
-    int cy = cur_rc.top + (cur_rc.bottom - cur_rc.top) / 2;
+    int cur_w = cur_rc.right - cur_rc.left;
+    int cur_h = cur_rc.bottom - cur_rc.top;
+
+    if (std::abs(cur_w - total_w) <= 2 && std::abs(cur_h - total_h) <= 2) {
+        LayoutChildren();
+        if (m_on_resize) {
+            m_on_resize(VideoSurfaceWidth(), VideoSurfaceHeight());
+        }
+        return;
+    }
+
+    int cx = cur_rc.left + cur_w / 2;
+    int cy = cur_rc.top + cur_h / 2;
 
     int new_x = std::clamp(cx - total_w / 2, (int)mi.rcWork.left, (int)mi.rcWork.right - total_w);
     int new_y = std::clamp(cy - total_h / 2, (int)mi.rcWork.top, (int)mi.rcWork.bottom - total_h);
@@ -474,13 +544,36 @@ void OutputWindow::ApplyGeometryToMatchSource(uint32_t src_w, uint32_t src_h) no
 }
 
 void OutputWindow::OnStreamGeometryChanged(uint32_t new_src_w, uint32_t new_src_h) noexcept {
+    if (new_src_w == 0 || new_src_h == 0) return;
+
+    uint32_t prev_w = m_video_w.load(std::memory_order_relaxed);
+    uint32_t prev_h = m_video_h.load(std::memory_order_relaxed);
+
     SetVideoGeometry(new_src_w, new_src_h);
     uint64_t seq = ++m_geometry_seq;
+
     if (!m_hwnd || m_fullscreen || ::IsZoomed(m_hwnd)) return;
+
     if (!IsVisible()) {
         m_pending_geometry_update = true;
         return;
     }
+
+    bool had_prev = (prev_w > 0 && prev_h > 0);
+    bool prev_portrait = (prev_w < prev_h);
+    bool new_portrait = (new_src_w < new_src_h);
+    bool orientation_changed = had_prev && (prev_portrait != new_portrait);
+
+    double prev_ar = had_prev ? (static_cast<double>(prev_w) / prev_h) : 0.0;
+    double new_ar = static_cast<double>(new_src_w) / static_cast<double>(new_src_h);
+    bool ar_changed = std::abs(prev_ar - new_ar) > 0.01;
+
+    // If user has custom size, and neither orientation nor aspect ratio changed:
+    // DO NOT resize window! (Changing preset with same AR must not enlarge window)
+    if (m_user_has_custom_size && had_prev && !orientation_changed && !ar_changed) {
+        return;
+    }
+
     DWORD window_thread = ::GetWindowThreadProcessId(m_hwnd, nullptr);
     if (::GetCurrentThreadId() != window_thread) {
         ::PostMessageW(m_hwnd, WM_APP_UPDATE_GEOMETRY, static_cast<WPARAM>(seq), 0);
@@ -508,13 +601,13 @@ void OutputWindow::ToggleFullscreen() noexcept {
             if (m_on_resize) m_on_resize(r.right - r.left, r.bottom - r.top);
         }
     } else {
-        constexpr DWORD style = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+        constexpr DWORD style = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME | WS_VISIBLE) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
         ::SetWindowLongW(m_hwnd, GWL_STYLE, style);
         ::SetWindowPos(m_hwnd, m_always_on_top ? HWND_TOPMOST : HWND_NOTOPMOST,
                        m_restore_rect.left, m_restore_rect.top,
                        m_restore_rect.right - m_restore_rect.left,
                        m_restore_rect.bottom - m_restore_rect.top,
-                       SWP_FRAMECHANGED | SWP_NOACTIVATE);
+                       SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         m_fullscreen = false;
         m_show_toolbar = m_restore_toolbar;
         LayoutChildren();
@@ -571,6 +664,133 @@ LRESULT CALLBACK OutputWindow::PlaceholderWndProc(HWND hwnd, UINT msg, WPARAM wp
     return ::DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+LRESULT OutputWindow::HandleSizing(WPARAM edge, RECT* prc) noexcept {
+    if (!prc || !m_hwnd) return FALSE;
+
+    uint32_t src_w = m_video_w.load(std::memory_order_relaxed);
+    uint32_t src_h = m_video_h.load(std::memory_order_relaxed);
+    if (src_w == 0 || src_h == 0) { src_w = 1080; src_h = 1920; }
+    const double aspect = static_cast<double>(src_w) / static_cast<double>(src_h);
+    if (aspect <= 0.001 || aspect >= 100.0) return FALSE;
+
+    RECT wr{}, cr{};
+    ::GetWindowRect(m_hwnd, &wr);
+    ::GetClientRect(m_hwnd, &cr);
+    int nc_w = (wr.right - wr.left) - (cr.right - cr.left);
+    int nc_h = (wr.bottom - wr.top) - (cr.bottom - cr.top);
+    if (nc_w <= 0 || nc_h <= 0) {
+        RECT test_r{0, 0, 100, 100};
+        constexpr DWORD st = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+        ::AdjustWindowRectEx(&test_r, st, FALSE, WS_EX_APPWINDOW);
+        nc_w = (test_r.right - test_r.left) - 100;
+        nc_h = (test_r.bottom - test_r.top) - 100;
+    }
+    int tb_h = GetToolbarHeightPx();
+
+    HMONITOR hmon = ::MonitorFromRect(prc, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{sizeof(mi)};
+    if (!::GetMonitorInfoW(hmon, &mi)) mi.rcWork = {0, 0, 1920, 1080};
+    int work_w = mi.rcWork.right - mi.rcWork.left;
+    int work_h = mi.rcWork.bottom - mi.rcWork.top;
+
+    float s = GetDpiScale();
+    int min_vid_w = static_cast<int>(std::round(240.0f * s));
+    int min_vid_h = static_cast<int>(std::round(min_vid_w / aspect));
+    if (aspect > 1.0) {
+        min_vid_h = static_cast<int>(std::round(180.0f * s));
+        min_vid_w = static_cast<int>(std::round(min_vid_h * aspect));
+    }
+    min_vid_w = (std::max(120, min_vid_w) / 2) * 2;
+    min_vid_h = (std::max(120, min_vid_h) / 2) * 2;
+
+    int max_vid_w = std::max(min_vid_w, (work_w - nc_w) / 2 * 2);
+    int max_vid_h = std::max(min_vid_h, (work_h - nc_h - tb_h) / 2 * 2);
+    if (static_cast<double>(max_vid_w) / aspect > max_vid_h) {
+        max_vid_w = (static_cast<int>(std::round(max_vid_h * aspect)) / 2) * 2;
+    } else {
+        max_vid_h = (static_cast<int>(std::round(max_vid_w / aspect)) / 2) * 2;
+    }
+
+    int prop_w = prc->right - prc->left;
+    int prop_h = prc->bottom - prc->top;
+    int prop_vid_w = prop_w - nc_w;
+    int prop_vid_h = prop_h - nc_h - tb_h;
+    int target_vid_w = 0, target_vid_h = 0;
+
+    switch (edge) {
+    case WMSZ_LEFT:
+    case WMSZ_RIGHT:
+        target_vid_w = std::clamp(prop_vid_w, min_vid_w, max_vid_w);
+        target_vid_h = static_cast<int>(std::round(target_vid_w / aspect));
+        break;
+    case WMSZ_TOP:
+    case WMSZ_BOTTOM:
+        target_vid_h = std::clamp(prop_vid_h, min_vid_h, max_vid_h);
+        target_vid_w = static_cast<int>(std::round(target_vid_h * aspect));
+        break;
+    default: // Corners
+        if (static_cast<double>(prop_vid_w) / aspect >= prop_vid_h) {
+            target_vid_w = std::clamp(prop_vid_w, min_vid_w, max_vid_w);
+            target_vid_h = static_cast<int>(std::round(target_vid_w / aspect));
+        } else {
+            target_vid_h = std::clamp(prop_vid_h, min_vid_h, max_vid_h);
+            target_vid_w = static_cast<int>(std::round(target_vid_h * aspect));
+        }
+        if (target_vid_w > max_vid_w) {
+            target_vid_w = max_vid_w;
+            target_vid_h = static_cast<int>(std::round(target_vid_w / aspect));
+        }
+        if (target_vid_h > max_vid_h) {
+            target_vid_h = max_vid_h;
+            target_vid_w = static_cast<int>(std::round(target_vid_h * aspect));
+        }
+        break;
+    }
+
+    target_vid_w = (std::max(min_vid_w, target_vid_w) / 2) * 2;
+    target_vid_h = (std::max(min_vid_h, target_vid_h) / 2) * 2;
+    int final_w = target_vid_w + nc_w;
+    int final_h = target_vid_h + nc_h + tb_h;
+
+    if (edge == WMSZ_LEFT || edge == WMSZ_RIGHT) {
+        if (edge == WMSZ_LEFT) prc->left = prc->right - final_w;
+        else prc->right = prc->left + final_w;
+        int cy = (prc->top + prc->bottom) / 2;
+        prc->top = cy - final_h / 2;
+        prc->bottom = prc->top + final_h;
+    } else if (edge == WMSZ_TOP || edge == WMSZ_BOTTOM) {
+        if (edge == WMSZ_TOP) prc->top = prc->bottom - final_h;
+        else prc->bottom = prc->top + final_h;
+        int cx = (prc->left + prc->right) / 2;
+        prc->left = cx - final_w / 2;
+        prc->right = prc->left + final_w;
+    } else if (edge == WMSZ_TOPLEFT) {
+        prc->left = prc->right - final_w;
+        prc->top = prc->bottom - final_h;
+    } else if (edge == WMSZ_TOPRIGHT) {
+        prc->right = prc->left + final_w;
+        prc->top = prc->bottom - final_h;
+    } else if (edge == WMSZ_BOTTOMLEFT) {
+        prc->left = prc->right - final_w;
+        prc->bottom = prc->top + final_h;
+    } else if (edge == WMSZ_BOTTOMRIGHT) {
+        prc->right = prc->left + final_w;
+        prc->bottom = prc->top + final_h;
+    }
+
+    if (prc->top < mi.rcWork.top) { int d = mi.rcWork.top - prc->top; prc->top += d; prc->bottom += d; }
+    if (prc->bottom > mi.rcWork.bottom) { int d = prc->bottom - mi.rcWork.bottom; prc->top -= d; prc->bottom -= d; }
+    if (prc->left < mi.rcWork.left) { int d = mi.rcWork.left - prc->left; prc->left += d; prc->right += d; }
+    if (prc->right > mi.rcWork.right) { int d = prc->right - mi.rcWork.right; prc->left -= d; prc->right -= d; }
+
+    int long_edge = std::max(target_vid_w, target_vid_h);
+    if (s > 0.0f) {
+        m_desired_long_edge_dip = static_cast<float>(long_edge) / s;
+        m_user_has_custom_size = true;
+    }
+    return TRUE;
+}
+
 LRESULT OutputWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) noexcept {
     switch (msg) {
     case WM_APP_UPDATE_GEOMETRY: {
@@ -582,6 +802,21 @@ LRESULT OutputWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) n
         uint32_t vw = m_video_w.load(std::memory_order_relaxed);
         uint32_t vh = m_video_h.load(std::memory_order_relaxed);
         ApplyGeometryToMatchSource(vw, vh);
+        return 0;
+    }
+
+    case WM_DPICHANGED: {
+        auto* prc = reinterpret_cast<RECT*>(lp);
+        if (prc) {
+            ::SetWindowPos(hwnd, nullptr,
+                           prc->left, prc->top,
+                           prc->right - prc->left,
+                           prc->bottom - prc->top,
+                           SWP_NOZORDER | SWP_NOACTIVATE);
+            uint32_t vw = m_video_w.load(std::memory_order_relaxed);
+            uint32_t vh = m_video_h.load(std::memory_order_relaxed);
+            ApplyGeometryToMatchSource(vw, vh);
+        }
         return 0;
     }
 
@@ -601,28 +836,27 @@ LRESULT OutputWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) n
         return 0;
     }
 
-    case WM_NCHITTEST: {
-        LRESULT hit = ::DefWindowProcW(hwnd, msg, wp, lp);
-        if (hit == HTLEFT || hit == HTRIGHT || hit == HTTOP || hit == HTBOTTOM ||
-            hit == HTTOPLEFT || hit == HTTOPRIGHT || hit == HTBOTTOMLEFT || hit == HTBOTTOMRIGHT) {
-            return HTBORDER;
-        }
-        return hit;
-    }
+    case WM_NCHITTEST:
+        return ::DefWindowProcW(hwnd, msg, wp, lp);
 
     case WM_SYSCOMMAND:
-        if ((wp & 0xFFF0) == SC_MAXIMIZE || (wp & 0xFFF0) == SC_SIZE) {
+        if ((wp & 0xFFF0) == SC_MAXIMIZE) {
             return 0;
         }
         break;
 
     case WM_SIZING:
-        return TRUE;
+        return HandleSizing(wp, reinterpret_cast<RECT*>(lp));
+
+    case WM_EXITSIZEMOVE:
+        RecordUserDesiredSize();
+        return 0;
 
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
-        mmi->ptMinTrackSize.x = 320;
-        mmi->ptMinTrackSize.y = 240;
+        float s = GetDpiScale();
+        mmi->ptMinTrackSize.x = static_cast<LONG>(std::round(240.0f * s));
+        mmi->ptMinTrackSize.y = static_cast<LONG>(std::round(200.0f * s));
         return 0;
     }
 
