@@ -43,7 +43,7 @@ public:
     bool IsVisible() const noexcept;
     bool IsFullscreen() const noexcept { return m_fullscreen; }
     bool IsAlwaysOnTop() const noexcept { return m_always_on_top; }
-    bool IsAspectLocked() const noexcept { return m_aspect_locked; }
+    bool IsAspectLocked() const noexcept { return true; }
     bool IsToolbarVisible() const noexcept { return m_show_toolbar; }
     bool HasFrame() const noexcept { return m_has_frame; }
     bool IsUserHiddenForSession() const noexcept { return m_user_hidden_for_session; }
@@ -51,13 +51,14 @@ public:
     void SetAlwaysOnTop(bool top) noexcept;
     void ToggleAlwaysOnTop() noexcept;
     void ToggleFullscreen() noexcept;
-    void ToggleAspectLock() noexcept { m_aspect_locked = !m_aspect_locked; }
+    void ToggleAspectLock() noexcept {} // Aspect ratio is strictly locked to source geometry
     void SetToolbarVisible(bool visible) noexcept;
     void SetHasFrame(bool has) noexcept;
     void SetUserHiddenForSession(bool hidden) noexcept { m_user_hidden_for_session = hidden; }
 
     void SetVideoGeometry(uint32_t video_w, uint32_t video_h) noexcept;
     void ApplyComfortableFit() noexcept;
+    void ApplyGeometryToMatchSource(uint32_t src_w, uint32_t src_h) noexcept;
     void OnStreamGeometryChanged(uint32_t new_src_w, uint32_t new_src_h) noexcept;
     void EnsureAccessiblePlacement() noexcept;
 
@@ -101,6 +102,7 @@ public:
     static constexpr wchar_t kVideoSurfaceClass[] = L"DUWNMirrorPreviewChild";
     static constexpr wchar_t kPlaceholderClass[] = L"DUWNMirrorPlaceholderChild";
     static constexpr wchar_t kWindowTitle[] = L"Duwn Mirror Output";
+    static constexpr UINT WM_APP_UPDATE_GEOMETRY = WM_APP + 201;
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) noexcept;
@@ -138,6 +140,7 @@ private:
     bool                  m_restore_toolbar{true};
     bool                  m_has_frame{false};
     bool                  m_user_hidden_for_session{false};
+    bool                  m_pending_geometry_update{false};
 
     bool                  m_audio_muted{false};
     float                 m_audio_volume{1.0f};
@@ -148,6 +151,8 @@ private:
     std::atomic<uint32_t> m_video_h{1920};
     std::atomic<uint32_t> m_client_w{1280};
     std::atomic<uint32_t> m_client_h{720};
+    std::atomic<uint64_t> m_geometry_seq{0};
+
 
     int                   m_tb_hovered_btn{0}; // 1 Mute, 2 Slider, 3 Fit, 4 Pin, 5 Fullscreen
     int                   m_tb_pressed_btn{0};

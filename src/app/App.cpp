@@ -38,6 +38,17 @@
 #include <timeapi.h>
 #pragma comment(lib, "winmm.lib")
 
+namespace {
+static std::string WideToUtf8(std::wstring_view w) noexcept {
+    if (w.empty()) return {};
+    int size = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return {};
+    std::string s(static_cast<size_t>(size), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), size, nullptr, nullptr);
+    return s;
+}
+} // namespace
+
 #include <thread>
 
 #include <chrono>
@@ -262,7 +273,7 @@ App::~App() {
 
 
 
-int App::Run(bool test_motion, bool verify_capture) noexcept {
+int App::Run(bool test_motion, bool verify_capture, bool test_rotate) noexcept {
 
     sync::MasterClock::Initialize();
 
@@ -277,6 +288,7 @@ int App::Run(bool test_motion, bool verify_capture) noexcept {
     m_net_env = network::NetworkEnvironmentInfo::Probe();
 
     m_verify_capture = verify_capture;
+    m_test_rotate    = test_rotate;
 
     duwn::telemetry::ConnectionTimeline::Get().Record(
         duwn::telemetry::ConnectionMilestone::C1_NetworkDiscoveryComplete,
@@ -447,7 +459,7 @@ int App::Run(bool test_motion, bool verify_capture) noexcept {
 
                 if (m_output_window) {
                     m_output_window->SetHasFrame(true);
-                    m_output_window->SetVideoGeometry(fw, fh);
+                    m_output_window->ApplyGeometryToMatchSource(fw, fh);
                     if (!m_output_window->IsUserHiddenForSession()) {
                         m_output_window->ShowNoActivate();
                     }
@@ -664,7 +676,7 @@ bool App::Init() noexcept {
 
     m_window->SetOnToggleAspectLock([this] {
         if (m_output_window) {
-            m_output_window->ToggleAspectLock();
+            m_output_window->ApplyComfortableFit();
             m_window->SetOutputControlsState(m_output_window->IsVisible(),
                                              m_output_window->IsFullscreen(),
                                              m_output_window->IsAspectLocked(),
@@ -1181,6 +1193,10 @@ bool App::Init() noexcept {
     }
 
     m_scheduler->SetDxgiWaitableProvider([this]() -> void* {
+        if (m_output_window && m_output_window->IsVisible() && m_preview_renderer) {
+            HANDLE h = m_preview_renderer->GetFrameLatencyWaitableObject();
+            if (h) return h;
+        }
         return m_renderer ? m_renderer->GetFrameLatencyWaitableObject() : nullptr;
     });
 
@@ -2263,16 +2279,42 @@ void App::ApplySettingChange(int id, int value) noexcept {
 
     }
 
-    if (id == ui::Control_Btn_OpenLogs || id == ui::Control_Btn_CrashOpenLogs) {
-
+    if (id == ui::Control_Btn_OpenLogs) {
         std::wstring log_dir = Logger::GetLogDirectory();
-
-        ::ShellExecuteW(m_window ? m_window->Hwnd() : nullptr, L"open",
-
+        HINSTANCE hInst = ::ShellExecuteW(m_window ? m_window->Hwnd() : nullptr, L"open",
                         log_dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-
+        if (reinterpret_cast<INT_PTR>(hInst) <= 32 && m_window) {
+            m_window->SetStatusText(L"Không thể mở thư mục nhật ký");
+        }
         return;
+    }
 
+    if (id == ui::Control_Btn_CrashOpenLogs) {
+        std::wstring target_path;
+        if (m_window && !m_window->State().crash_banner_file.empty() &&
+            std::filesystem::exists(m_window->State().crash_banner_file)) {
+            target_path = m_window->State().crash_banner_file;
+        } else {
+            std::wstring crash_dir = CrashHandler::GetCrashDirectory();
+            if (std::filesystem::exists(crash_dir)) {
+                target_path = crash_dir;
+            } else {
+                target_path = Logger::GetLogDirectory();
+            }
+        }
+
+        HINSTANCE hInst = ::ShellExecuteW(m_window ? m_window->Hwnd() : nullptr, L"open",
+                                          target_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if (reinterpret_cast<INT_PTR>(hInst) <= 32) {
+            DUWN_LOG_WARNF("App", "Failed to open crash logs at {}: error={}",
+                           WideToUtf8(target_path), reinterpret_cast<INT_PTR>(hInst));
+            if (m_window) {
+                m_window->SetStatusText(L"Không thể mở nhật ký sự cố: " + target_path);
+                ::MessageBoxW(m_window->Hwnd(), (L"Không thể mở tệp hoặc thư mục nhật ký:\n" + target_path).c_str(),
+                              L"Lỗi nhật ký", MB_OK | MB_ICONWARNING);
+            }
+        }
+        return;
     }
 
     if (id == ui::Control_Btn_CopyDiagnostics) {
@@ -2457,7 +2499,7 @@ void App::ApplySettingChange(int id, int value) noexcept {
 
             m_settings.renderer_mode = RendererMode::HardwareD3D11;
 
-            m_settings.receiver_quality = ReceiverQuality::Auto;
+            m_settings.receiver_quality = ReceiverQuality::P1440_60;
 
             GetReceiverQualityDimensions(m_settings.receiver_quality, m_settings.receiver_width, m_settings.receiver_height, m_settings.receiver_fps);
 
@@ -2467,7 +2509,7 @@ void App::ApplySettingChange(int id, int value) noexcept {
 
             m_settings.output_width = 2560; m_settings.output_height = 1440;
 
-            m_settings.match_source = false;
+            m_settings.match_source = true;
 
             m_settings.aspect_mode = AspectMode::Auto;
 
@@ -4053,22 +4095,19 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
                 ::PostMessageW(main_hwnd, WM_DUWN_FIRST_FRAME,
                     static_cast<WPARAM>(frame.visible_width),
                     static_cast<LPARAM>(frame.visible_height));
-            } else if (m_output_window) {
+            }
+            if (m_output_window) {
                 m_output_window->SetHasFrame(true);
-                m_output_window->SetVideoGeometry(frame.visible_width, frame.visible_height);
+                m_output_window->OnStreamGeometryChanged(frame.visible_width, frame.visible_height);
                 if (!m_output_window->IsUserHiddenForSession()) {
                     m_output_window->ShowNoActivate();
                 }
             }
             m_last_preview_src_w = frame.visible_width;
             m_last_preview_src_h = frame.visible_height;
-        } else {
-            bool prev_is_land = (m_last_preview_src_w >= m_last_preview_src_h);
-            bool curr_is_land = (frame.visible_width >= frame.visible_height);
-            if (m_last_preview_src_w > 0 && m_last_preview_src_h > 0 && prev_is_land != curr_is_land) {
-                if (m_output_window) {
-                    m_output_window->OnStreamGeometryChanged(frame.visible_width, frame.visible_height);
-                }
+        } else if (frame.visible_width != m_last_preview_src_w || frame.visible_height != m_last_preview_src_h) {
+            if (m_output_window) {
+                m_output_window->OnStreamGeometryChanged(frame.visible_width, frame.visible_height);
             }
             m_last_preview_src_w = frame.visible_width;
             m_last_preview_src_h = frame.visible_height;
@@ -4333,33 +4372,48 @@ void App::TestMotionLoop(std::stop_token st) noexcept {
     // High resolution timer period for precise 60.0 FPS pacing
     ::timeBeginPeriod(1);
 
-    constexpr uint32_t kW = 1920;
-    constexpr uint32_t kH = 1080;
-    constexpr size_t kYSize = kW * kH;
-    constexpr size_t kUvSize = kW * (kH / 2);
-    constexpr size_t kTotalBytes = kYSize + kUvSize;
+    constexpr uint32_t kLandW = 1920;
+    constexpr uint32_t kLandH = 1080;
+    constexpr uint32_t kPortW = 1080;
+    constexpr uint32_t kPortH = 1920;
 
-    std::vector<uint8_t> nv12(kTotalBytes, 128);
-    std::fill(nv12.begin(), nv12.begin() + kYSize, static_cast<uint8_t>(28));
+    constexpr size_t kLandBytes = (kLandW * kLandH * 3) / 2;
+    constexpr size_t kPortBytes = (kPortW * kPortH * 3) / 2;
+
+    std::vector<uint8_t> nv12_land(kLandBytes, 128);
+    std::vector<uint8_t> nv12_port(kPortBytes, 128);
 
     constexpr size_t kPoolSize = 4;
-    std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, kPoolSize> textures;
+    std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, kPoolSize> textures_land;
+    std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, kPoolSize> textures_port;
 
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = kW;
-    desc.Height = kH;
-    desc.MipLevels = 1;
-    desc.ArraySize = 1;
-    desc.Format = DXGI_FORMAT_NV12;
-    desc.SampleDesc.Count = 1;
-    desc.SampleDesc.Quality = 0;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_DECODER;
+    D3D11_TEXTURE2D_DESC desc_l{};
+    desc_l.Width = kLandW;
+    desc_l.Height = kLandH;
+    desc_l.MipLevels = 1;
+    desc_l.ArraySize = 1;
+    desc_l.Format = DXGI_FORMAT_NV12;
+    desc_l.SampleDesc.Count = 1;
+    desc_l.SampleDesc.Quality = 0;
+    desc_l.Usage = D3D11_USAGE_DEFAULT;
+    desc_l.BindFlags = D3D11_BIND_DECODER;
 
     for (size_t i = 0; i < kPoolSize; ++i) {
-        HRESULT hr = m_d3d->Device()->CreateTexture2D(&desc, nullptr, textures[i].GetAddressOf());
-        if (FAILED(hr) || !textures[i]) {
-            DUWN_LOG_ERRORF("App", "TestMotionLoop failed to create NV12 texture hr={:#010x}", static_cast<unsigned>(hr));
+        HRESULT hr = m_d3d->Device()->CreateTexture2D(&desc_l, nullptr, textures_land[i].GetAddressOf());
+        if (FAILED(hr) || !textures_land[i]) {
+            DUWN_LOG_ERRORF("App", "TestMotionLoop failed to create NV12 land texture hr={:#010x}", static_cast<unsigned>(hr));
+            ::timeEndPeriod(1);
+            return;
+        }
+    }
+
+    D3D11_TEXTURE2D_DESC desc_p = desc_l;
+    desc_p.Width = kPortW;
+    desc_p.Height = kPortH;
+    for (size_t i = 0; i < kPoolSize; ++i) {
+        HRESULT hr = m_d3d->Device()->CreateTexture2D(&desc_p, nullptr, textures_port[i].GetAddressOf());
+        if (FAILED(hr) || !textures_port[i]) {
+            DUWN_LOG_ERRORF("App", "TestMotionLoop failed to create NV12 port texture hr={:#010x}", static_cast<unsigned>(hr));
             ::timeEndPeriod(1);
             return;
         }
@@ -4381,26 +4435,54 @@ void App::TestMotionLoop(std::stop_token st) noexcept {
     ::QueryPerformanceCounter(&start_qpc);
     int64_t next_frame_qpc = start_qpc.QuadPart;
 
-    DUWN_LOG_INFO("App", "TestMotionLoop started streaming 1920x1080 synthetic motion frames @ 60.0 fps");
+    DUWN_LOG_INFO("App", "TestMotionLoop started streaming synthetic motion frames @ 60.0 fps");
 
     while (!st.stop_requested() && m_running.load(std::memory_order_acquire)) {
         next_frame_qpc += interval_ticks;
         ++seq;
+
+        // In test rotate mode, alternate orientation every 90 frames (~1.5s) for 10+ consecutive rotations
+        const bool is_port = m_test_rotate && (((seq / 90) % 2) == 1);
+        const uint32_t cur_w = is_port ? kPortW : kLandW;
+        const uint32_t cur_h = is_port ? kPortH : kLandH;
+        auto& cur_nv12 = is_port ? nv12_port : nv12_land;
+        auto& cur_textures = is_port ? textures_port : textures_land;
+        const size_t cur_bytes = is_port ? kPortBytes : kLandBytes;
+        const size_t cur_ysize = cur_w * cur_h;
+
         box_x += dir_x;
         box_y += dir_y;
-        if (box_x <= 20 || box_x + kBoxW >= static_cast<int>(kW) - 20) {
+        if (box_x <= 40 || box_x + kBoxW >= static_cast<int>(cur_w) - 40) {
             dir_x = -dir_x;
-            box_x = std::clamp(box_x, 20, static_cast<int>(kW) - kBoxW - 20);
+            box_x = std::clamp(box_x, 40, static_cast<int>(cur_w) - kBoxW - 40);
         }
-        if (box_y <= 20 || box_y + kBoxH >= static_cast<int>(kH) - 20) {
+        if (box_y <= 40 || box_y + kBoxH >= static_cast<int>(cur_h) - 40) {
             dir_y = -dir_y;
-            box_y = std::clamp(box_y, 20, static_cast<int>(kH) - kBoxH - 20);
+            box_y = std::clamp(box_y, 40, static_cast<int>(cur_h) - kBoxH - 40);
         }
 
-        std::fill(nv12.begin(), nv12.begin() + kYSize, static_cast<uint8_t>(24));
+        std::fill(cur_nv12.begin(), cur_nv12.begin() + cur_ysize, static_cast<uint8_t>(24));
 
+        // 1. Draw 4 corner markers (32x32) and 2-pixel outer perimeter along 4 edges to verify zero crop/distortion
+        for (int r = 0; r < static_cast<int>(cur_h); ++r) {
+            uint8_t* row = cur_nv12.data() + (r * cur_w);
+            if (r < 2 || r >= static_cast<int>(cur_h) - 2) {
+                std::fill(row, row + cur_w, static_cast<uint8_t>(235));
+            } else {
+                row[0] = 235;
+                row[1] = 235;
+                row[cur_w - 2] = 235;
+                row[cur_w - 1] = 235;
+                if (r < 32 || r >= static_cast<int>(cur_h) - 32) {
+                    std::fill(row, row + 32, static_cast<uint8_t>(235));
+                    std::fill(row + cur_w - 32, row + cur_w, static_cast<uint8_t>(235));
+                }
+            }
+        }
+
+        // 2. Draw bouncing pattern box
         for (int r = box_y; r < box_y + kBoxH; ++r) {
-            uint8_t* row = nv12.data() + (r * kW);
+            uint8_t* row = cur_nv12.data() + (r * cur_w);
             for (int c = box_x; c < box_x + kBoxW; ++c) {
                 if (r == box_y || r == box_y + kBoxH - 1 || c == box_x || c == box_x + kBoxW - 1) {
                     row[c] = 245;
@@ -4412,52 +4494,52 @@ void App::TestMotionLoop(std::stop_token st) noexcept {
             }
         }
 
-        int scan_y = 1 + static_cast<int>((seq * 12) % (kH - 1));
-        uint8_t* scan_row = nv12.data() + (scan_y * kW);
-        std::fill(scan_row, scan_row + kW, static_cast<uint8_t>(235));
+        // 3. Draw moving scanline
+        int scan_y = 2 + static_cast<int>((seq * 12) % (cur_h - 4));
+        uint8_t* scan_row = cur_nv12.data() + (scan_y * cur_w);
+        std::fill(scan_row + 2, scan_row + cur_w - 2, static_cast<uint8_t>(235));
 
-        // Encode 64-bit frame sequence into row 0 barcode only in explicit verification mode (--verify-capture)
-        // High contrast (235=White, 16=Black) survives color matrix and scaling without bit error
+        // Encode 64-bit frame sequence into row 2 barcode only in explicit verification mode (--verify-capture)
         if (m_verify_capture) {
-            uint8_t* row0 = nv12.data();
+            uint8_t* row2 = cur_nv12.data() + (2 * cur_w);
             for (int bit = 0; bit < 64; ++bit) {
                 const bool bit_val = ((seq >> bit) & 1ULL) != 0;
                 const uint8_t lum = bit_val ? 235 : 16;
                 for (int px = 0; px < 8; ++px) {
-                    row0[bit * 8 + px] = lum;
+                    row2[bit * 8 + px + 2] = lum;
                 }
             }
         }
 
-        uint8_t* uv_base = nv12.data() + kYSize;
+        uint8_t* uv_base = cur_nv12.data() + cur_ysize;
         uint8_t u_val = static_cast<uint8_t>((seq * 3) % 256);
         uint8_t v_val = static_cast<uint8_t>(255 - u_val);
         int uv_box_y = box_y / 2;
         int uv_box_h = kBoxH / 2;
         for (int r = uv_box_y; r < uv_box_y + uv_box_h; ++r) {
-            uint8_t* uv_row = uv_base + (r * kW);
+            uint8_t* uv_row = uv_base + (r * cur_w);
             for (int c = box_x; c < box_x + kBoxW; c += 2) {
                 uv_row[c + 0] = u_val;
                 uv_row[c + 1] = v_val;
             }
         }
 
-        auto& current_tex = textures[tex_idx];
+        auto& current_tex = cur_textures[tex_idx];
         tex_idx = (tex_idx + 1) % kPoolSize;
 
         {
             std::lock_guard lock{m_d3d->ContextMutex()};
             m_d3d->Context()->UpdateSubresource(
-                current_tex.Get(), 0, nullptr, nv12.data(), kW, static_cast<UINT>(kTotalBytes));
+                current_tex.Get(), 0, nullptr, cur_nv12.data(), cur_w, static_cast<UINT>(cur_bytes));
         }
 
         video::VideoFrame vf;
         vf.texture = current_tex;
         vf.subresource = 0;
-        vf.width = kW;
-        vf.height = kH;
-        vf.visible_width = kW;
-        vf.visible_height = kH;
+        vf.width = cur_w;
+        vf.height = cur_h;
+        vf.visible_width = cur_w;
+        vf.visible_height = cur_h;
         vf.visible_x = 0;
         vf.visible_y = 0;
         vf.color_matrix = 2;

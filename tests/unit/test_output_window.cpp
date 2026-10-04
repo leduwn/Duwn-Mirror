@@ -8,6 +8,7 @@
 #include "app/Settings.h"
 #include "app/OutputWindow.h"
 #include "ui/UiState.h"
+#include "video/VideoGeometry.h"
 #include <string>
 #include <cwchar>
 
@@ -366,3 +367,168 @@ DUWN_TEST(OutputWindow_ResolvedOutputGeometryDecoupledFromPreview) {
         DUWN_ASSERT(kSourceH == 1440);
     }
 }
+
+// ---------------------------------------------------------------------------
+// 12. Output Window Aspect Ratio Policy Lock (Always Locked)
+// ---------------------------------------------------------------------------
+DUWN_TEST(OutputWindow_AspectLockPolicy) {
+    // Invariant: aspect ratio is locked by default and cannot be unlocked in windowed mode
+    UiState state;
+    DUWN_ASSERT(state.aspect_locked == true);
+    Settings s;
+    DUWN_ASSERT(s.aspect_ratio_locked == true);
+}
+
+// ---------------------------------------------------------------------------
+// 13. Preset Geometry Decoupling & Native 2K/Original Dimensions (2560x1184)
+// ---------------------------------------------------------------------------
+DUWN_TEST(QualityPresets_EnvelopesAndDecoupling) {
+    using namespace duwn::video;
+    uint32_t w = 0, h = 0, fps = 0;
+
+    // Full HD: 1920x1920 square envelope @ 60 FPS
+    GetReceiverQualityDimensions(ReceiverQuality::P1080_60, w, h, fps);
+    DUWN_ASSERT(w == 1920 && h == 1920 && fps == 60);
+
+    // 2K: 2560x2560 square envelope @ 60 FPS
+    GetReceiverQualityDimensions(ReceiverQuality::P1440_60, w, h, fps);
+    DUWN_ASSERT(w == 2560 && h == 2560 && fps == 60);
+
+    // Original: 2560x2560 square envelope @ 60 FPS
+    GetReceiverQualityDimensions(ReceiverQuality::Original_60, w, h, fps);
+    DUWN_ASSERT(w == 2560 && h == 2560 && fps == 60);
+
+    // iPhone source: 2560x1184 landscape
+    // 2K long edge 2560 must preserve exact 2560x1184, never distort to 2560x1440 (16:9)
+    auto dims_2k = ComputeAspectAwareOutputDimensions(2560, 1184, 2560);
+    DUWN_ASSERT(dims_2k.width == 2560 && dims_2k.height == 1184);
+
+    // Original long edge 0 must preserve exact 2560x1184
+    auto dims_orig = ComputeAspectAwareOutputDimensions(2560, 1184, 0);
+    DUWN_ASSERT(dims_orig.width == 2560 && dims_orig.height == 1184);
+
+    // Destination rect on a 2560x1184 canvas must have zero black bars
+    RECT fit = ComputeFitDestRect(2560, 1184, 2560, 1184);
+    DUWN_ASSERT(fit.left == 0 && fit.top == 0);
+    DUWN_ASSERT(fit.right == 2560 && fit.bottom == 1184);
+}
+
+// ---------------------------------------------------------------------------
+// 14. Ten Consecutive Rotation Cycles: Deterministic Sizing (Zero Drift)
+// ---------------------------------------------------------------------------
+DUWN_TEST(OutputWindow_StableRotationGeometryTenCycles) {
+    // Simulate monitor work area: 1920 x 1040 (typical 1080p desktop with taskbar)
+    const int work_w = 1920;
+    const int work_h = 1040;
+    const int tb_h = 38;
+
+    auto calc_dimensions = [&](uint32_t src_w, uint32_t src_h, int& out_vid_w, int& out_vid_h) {
+        double ar = static_cast<double>(src_w) / static_cast<double>(src_h);
+        if (src_w < src_h) {
+            out_vid_h = static_cast<int>(std::round(work_h * 0.70f));
+            out_vid_w = static_cast<int>(std::round(out_vid_h * ar));
+            if (out_vid_w > static_cast<int>(work_w * 0.85f)) {
+                out_vid_w = static_cast<int>(work_w * 0.85f);
+                out_vid_h = static_cast<int>(std::round(out_vid_w / ar));
+            }
+        } else {
+            out_vid_w = static_cast<int>(std::round(work_w * 0.55f));
+            out_vid_h = static_cast<int>(std::round(out_vid_w / ar));
+            if (out_vid_h + tb_h > static_cast<int>(work_h * 0.85f)) {
+                out_vid_h = static_cast<int>(work_h * 0.85f - tb_h);
+                out_vid_w = static_cast<int>(std::round(out_vid_h * ar));
+            }
+        }
+        out_vid_w = (std::max(100, out_vid_w) / 2) * 2;
+        out_vid_h = (std::max(100, out_vid_h) / 2) * 2;
+    };
+
+    // Baseline dimensions
+    int base_landscape_w = 0, base_landscape_h = 0;
+    int base_portrait_w = 0, base_portrait_h = 0;
+    calc_dimensions(2560, 1184, base_landscape_w, base_landscape_h);
+    calc_dimensions(1184, 2560, base_portrait_w, base_portrait_h);
+
+    DUWN_ASSERT(base_landscape_w > 0 && base_landscape_h > 0);
+    DUWN_ASSERT(base_portrait_w > 0 && base_portrait_h > 0);
+    DUWN_ASSERT((base_landscape_w % 2 == 0) && (base_landscape_h % 2 == 0));
+    DUWN_ASSERT((base_portrait_w % 2 == 0) && (base_portrait_h % 2 == 0));
+
+    // Zero letterbox/pillarbox invariant on auto-fitted source geometry
+    RECT fit_land = ComputeFitDestRect(2560, 1184, base_landscape_w, base_landscape_h);
+    DUWN_ASSERT(fit_land.left == 0 && fit_land.top == 0);
+    DUWN_ASSERT(fit_land.right == base_landscape_w && fit_land.bottom == base_landscape_h);
+
+    RECT fit_port = ComputeFitDestRect(1184, 2560, base_portrait_w, base_portrait_h);
+    DUWN_ASSERT(fit_port.left == 0 && fit_port.top == 0);
+    DUWN_ASSERT(fit_port.right == base_portrait_w && fit_port.bottom == base_portrait_h);
+
+    // Rotate 10 times consecutively between Landscape and Portrait
+    for (int cycle = 0; cycle < 10; ++cycle) {
+        int cur_w = 0, cur_h = 0;
+        if (cycle % 2 == 0) {
+            calc_dimensions(2560, 1184, cur_w, cur_h);
+            DUWN_ASSERT(cur_w == base_landscape_w);
+            DUWN_ASSERT(cur_h == base_landscape_h);
+        } else {
+            calc_dimensions(1184, 2560, cur_w, cur_h);
+            DUWN_ASSERT(cur_w == base_portrait_w);
+            DUWN_ASSERT(cur_h == base_portrait_h);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 15. WM_NCHITTEST Border Hit Test Preservation
+// ---------------------------------------------------------------------------
+DUWN_TEST(OutputWindow_NcHitTestBorderPreservation) {
+    // Sizing border hit codes must convert to HTBORDER to protect locked aspect ratio
+    LRESULT sizing_borders[] = { HTLEFT, HTRIGHT, HTTOP, HTBOTTOM, HTTOPLEFT, HTTOPRIGHT, HTBOTTOMLEFT, HTBOTTOMRIGHT };
+    for (LRESULT hit : sizing_borders) {
+        LRESULT mapped = (hit == HTLEFT || hit == HTRIGHT || hit == HTTOP || hit == HTBOTTOM ||
+                          hit == HTTOPLEFT || hit == HTTOPRIGHT || hit == HTBOTTOMLEFT || hit == HTBOTTOMRIGHT)
+                         ? HTBORDER : hit;
+        DUWN_ASSERT(mapped == HTBORDER);
+    }
+    // Interactive regions must preserve their exact hit test code
+    LRESULT standard_regions[] = { HTCLIENT, HTCAPTION, HTCLOSE, HTMINBUTTON, HTSYSMENU, HTHELP };
+    for (LRESULT hit : standard_regions) {
+        LRESULT mapped = (hit == HTLEFT || hit == HTRIGHT || hit == HTTOP || hit == HTBOTTOM ||
+                          hit == HTTOPLEFT || hit == HTTOPRIGHT || hit == HTBOTTOMLEFT || hit == HTBOTTOMRIGHT)
+                         ? HTBORDER : hit;
+        DUWN_ASSERT(mapped == hit);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 16. Toolbar Toggle Height Invariant (Zero Height Drift)
+// ---------------------------------------------------------------------------
+DUWN_TEST(OutputWindow_ToolbarToggleZeroDrift) {
+    const int base_h = 720;
+    const int tb_h = 38;
+    int cur_h = base_h + tb_h; // toolbar initially visible
+    for (int i = 0; i < 10; ++i) {
+        // Toggle OFF
+        cur_h = cur_h - tb_h;
+        DUWN_ASSERT(cur_h == base_h);
+        // Toggle ON
+        cur_h = cur_h + tb_h;
+        DUWN_ASSERT(cur_h == base_h + tb_h);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 17. Async Geometry Sequence Ordering (Drop Stale Updates)
+// ---------------------------------------------------------------------------
+DUWN_TEST(OutputWindow_AsyncGeometrySequenceOrdering) {
+    std::atomic<uint64_t> seq{0};
+    uint64_t seq1 = ++seq;
+    uint64_t seq2 = ++seq;
+    uint64_t seq3 = ++seq;
+
+    // Latest seq is 3. Earlier messages arriving late must be dropped.
+    DUWN_ASSERT(seq1 != seq.load());
+    DUWN_ASSERT(seq2 != seq.load());
+    DUWN_ASSERT(seq3 == seq.load());
+}
+

@@ -20,8 +20,8 @@
 namespace duwn::network {
 
 namespace {
-constexpr int kPreferredRecvBufSize = 4 * 1024 * 1024; // 4 MiB socket recv buffer
-constexpr int kFallbackRecvBufSize  = 2 * 1024 * 1024; // 2 MiB fallback
+constexpr int kPreferredRecvBufSize = 8 * 1024 * 1024; // 8 MiB socket recv buffer for high-bitrate 2K/Original
+constexpr int kFallbackRecvBufSize  = 4 * 1024 * 1024; // 4 MiB fallback
 constexpr int kMaxPacket            = 65507;           // max UDP payload
 } // namespace
 

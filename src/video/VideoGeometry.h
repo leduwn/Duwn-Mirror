@@ -60,6 +60,12 @@ inline RECT ComputeFitDestRect(uint32_t src_w, uint32_t src_h,
     }
     rw = std::min(rw, dst_w);
     rh = std::min(rh, dst_h);
+    // Snap to full canvas if within 2px rounding tolerance to eliminate letterbox/pillarbox seams
+    if (dst_w >= rw && (dst_w - rw) <= 2 && dst_h == rh) {
+        rw = dst_w;
+    } else if (dst_h >= rh && (dst_h - rh) <= 2 && dst_w == rw) {
+        rh = dst_h;
+    }
     LONG lx = static_cast<LONG>((dst_w - rw) / 2);
     LONG ly = static_cast<LONG>((dst_h - rh) / 2);
     return {lx, ly, lx + static_cast<LONG>(rw), ly + static_cast<LONG>(rh)};

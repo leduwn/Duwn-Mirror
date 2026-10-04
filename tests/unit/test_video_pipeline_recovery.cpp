@@ -294,3 +294,70 @@ DUWN_TEST(VideoPipeline_SessionState_CallbackDualSync_AndDecoderStrictness) {
     }
 }
 
+// 9. Preset Latency Verification & Low-Latency Hardware Decoder Invariant
+DUWN_TEST(VideoPipeline_PresetLatencyVerification) {
+    using namespace duwn::video;
+    D3D11Device d3d;
+    bool d3d_ok = d3d.Create(false, true);
+    DUWN_ASSERT(d3d_ok);
+
+    VideoDecoder decoder(d3d, [](VideoFrame) {});
+
+    // Preset 1: Full HD (1920x1080)
+    bool init_fhd = decoder.Init(1920, 1080, VideoCodecType::H264);
+    DUWN_ASSERT(init_fhd);
+    auto info_fhd = decoder.GetDecoderInfo();
+    DUWN_ASSERT(info_fhd.low_latency_status == L"enabled");
+    DUWN_ASSERT(info_fhd.is_hardware == true);
+    DUWN_ASSERT(info_fhd.is_zero_copy == true);
+    DUWN_ASSERT(info_fhd.is_d3d11_aware == true);
+
+    // Preset 2: 2K (2560x1184 - iPhone native 2K landscape)
+    decoder.Flush();
+    bool init_2k = decoder.Init(2560, 1184, VideoCodecType::H264);
+    DUWN_ASSERT(init_2k);
+    auto info_2k = decoder.GetDecoderInfo();
+    DUWN_ASSERT(info_2k.low_latency_status == L"enabled");
+    DUWN_ASSERT(info_2k.is_hardware == true);
+    DUWN_ASSERT(info_2k.is_zero_copy == true);
+    DUWN_ASSERT(info_2k.is_d3d11_aware == true);
+
+    // Preset 3: Original (2560x1184 unscaled passthrough)
+    decoder.Flush();
+    bool init_orig = decoder.Init(2560, 1184, VideoCodecType::H264);
+    DUWN_ASSERT(init_orig);
+    auto info_orig = decoder.GetDecoderInfo();
+    DUWN_ASSERT(info_orig.low_latency_status == L"enabled");
+    DUWN_ASSERT(info_orig.is_hardware == true);
+    DUWN_ASSERT(info_orig.is_zero_copy == true);
+    DUWN_ASSERT(info_orig.is_d3d11_aware == true);
+
+    // 4. Bounded Queue & Zero Latency Accumulation Verification
+    SchedulerConfig sched_cfg;
+    sched_cfg.mode = SchedulerMode::GameLowLatency;
+    sched_cfg.frame_duration_ns = 16'666'667LL; // 60 FPS
+    FrameScheduler sched(sched_cfg, [](VideoFrame&) {});
+
+    const int64_t base_time = duwn::clock::MonotonicClock::NowQpcTicks();
+    LARGE_INTEGER freq{};
+    ::QueryPerformanceFrequency(&freq);
+    const int64_t frame_interval_qpc = (freq.QuadPart * 16667) / 1000000;
+
+    // Simulate 60 frames pushed at 60 FPS cadence
+    for (uint64_t i = 1; i <= 60; ++i) {
+        VideoFrame f{};
+        f.width = 2560; f.height = 1184;
+        f.visible_width = 2560; f.visible_height = 1184;
+        f.sequence_number = i;
+        f.queue_push_qpc = base_time + (i * frame_interval_qpc);
+        sched.PushFrame(std::move(f));
+
+        VideoFrame out{};
+        uint64_t drops = 0;
+        bool pop_ok = sched.PopLatestValidFrame(out, drops);
+        DUWN_ASSERT(pop_ok);
+        DUWN_ASSERT(out.sequence_number == i);
+        DUWN_ASSERT(sched.DecodedQueueSize() == 0); // No backlog accumulation!
+    }
+}
+

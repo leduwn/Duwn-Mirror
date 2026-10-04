@@ -167,3 +167,38 @@ DUWN_TEST(UiState_ReceiverQualityMappingAndGenerations) {
     DUWN_ASSERT(!state.receiver_quality_pending);
 }
 
+DUWN_TEST(CrashBanner_HitTestAndButtonDispatch) {
+    using namespace duwn::ui;
+    MainWindowView view;
+
+    // Register banner buttons with scrollable = true
+    D2D1_RECT_F b1_rc = D2D1::RectF(700.0f, 100.0f, 790.0f, 124.0f);
+    D2D1_RECT_F b2_rc = D2D1::RectF(800.0f, 100.0f, 890.0f, 124.0f);
+
+    view.RegisterClickable(b1_rc, Control_Btn_CrashOpenLogs, L"", true);
+    view.RegisterClickable(b2_rc, Control_Btn_CrashDismiss, L"", true);
+
+    // HitTest at scroll_y = 0
+    DUWN_ASSERT(view.HitTest(745.0f, 112.0f, 0.0f) == Control_Btn_CrashOpenLogs);
+    DUWN_ASSERT(view.HitTest(845.0f, 112.0f, 0.0f) == Control_Btn_CrashDismiss);
+
+    // HitTest at scroll_y = 50.0 (visual mouse is at 112 - 50 = 62.0)
+    DUWN_ASSERT(view.HitTest(745.0f, 62.0f, 50.0f) == Control_Btn_CrashOpenLogs);
+    DUWN_ASSERT(view.HitTest(845.0f, 62.0f, 50.0f) == Control_Btn_CrashDismiss);
+
+    // Verify OnMouseUp dispatches
+    int dispatched_id = -1;
+    view.SetOnSettingChanged([&](int id, int) {
+        dispatched_id = id;
+    });
+
+    UiState state;
+    state.pressed_control = Control_Btn_CrashOpenLogs;
+    bool handled1 = view.OnMouseUp(745, 112, state);
+    DUWN_ASSERT(handled1 && dispatched_id == Control_Btn_CrashOpenLogs);
+
+    state.pressed_control = Control_Btn_CrashDismiss;
+    bool handled2 = view.OnMouseUp(845, 112, state);
+    DUWN_ASSERT(handled2 && dispatched_id == Control_Btn_CrashDismiss);
+}
+

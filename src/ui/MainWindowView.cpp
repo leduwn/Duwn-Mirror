@@ -41,7 +41,7 @@ int MainWindowView::HitTest(float fx, float fy, float scroll_y) const noexcept {
         float test_x = fx;
         if (test_x >= it->rect.left && test_x <= it->rect.right &&
             test_y >= it->rect.top && test_y <= it->rect.bottom) {
-            if (it->scrollable) {
+            if (it->scrollable && m_viewport_bottom > m_viewport_top) {
                 float visual_top = it->rect.top - scroll_y;
                 float visual_bottom = it->rect.bottom - scroll_y;
                 if (visual_bottom < m_viewport_top || visual_top > m_viewport_bottom) {
@@ -522,6 +522,12 @@ bool MainWindowView::OnMouseUp(int x, int y, UiState& state) noexcept {
             break;
         case Control_Btn_OpenLogs:
         case Control_Btn_OpenSettingsFile:
+        case Control_Btn_CrashOpenLogs:
+        case Control_Btn_CrashDismiss:
+        case Control_Btn_FirstRunContinue:
+        case Control_Btn_CopyDiagnostics:
+        case Control_Btn_OpenNotices:
+        case Control_Btn_OpenGitHub:
             if (m_on_setting_changed) m_on_setting_changed(hit, 0);
             break;
 
@@ -2011,9 +2017,9 @@ void MainWindowView::RenderControlsCard(const UiState& state, const D2D1_RECT_F&
         state.hovered_control == Control_Btn_AlwaysOnTop, state.pressed_control == Control_Btn_AlwaysOnTop, IconType::Pin);
 
     D2D1_RECT_F aspect_btn_rc = D2D1::RectF(card_rc.left + 14.0f + row2_btn_w + 8.0f, row2_y, card_rc.right - 14.0f, row2_y + row2_h);
-    RegisterClickable(aspect_btn_rc, Control_Btn_AspectLock, loc::Get(loc::S::Right_Btn_Aspect));
-    m_renderer.DrawButton(aspect_btn_rc, loc::Get(loc::S::Right_Btn_Aspect), state.aspect_locked,
-        state.hovered_control == Control_Btn_AspectLock, state.pressed_control == Control_Btn_AspectLock, IconType::Lock);
+    RegisterClickable(aspect_btn_rc, Control_Btn_AspectLock, loc::Get(loc::S::Output_Fit));
+    m_renderer.DrawButton(aspect_btn_rc, loc::Get(loc::S::Output_Fit), false,
+        state.hovered_control == Control_Btn_AspectLock, state.pressed_control == Control_Btn_AspectLock, IconType::Monitor);
 
     // Row 3: Quick Volume Bar (Shared state with Audio tab)
     float vol_y = row2_y + row2_h + 8.0f;
@@ -3330,13 +3336,13 @@ void MainWindowView::RenderCrashBanner(const UiState& state, const D2D1_RECT_F& 
     D2D1_RECT_F b1_rc = D2D1::RectF(b1_x, btn_y, b1_x + btn_w, btn_y + btn_h);
     bool b1_hov = (state.hovered_control == Control_Btn_CrashOpenLogs);
     m_renderer.DrawButton(b1_rc, loc::Get(loc::S::Crash_Banner_OpenLogs), false, b1_hov, false);
-    RegisterClickable(b1_rc, Control_Btn_CrashOpenLogs);
+    RegisterClickable(b1_rc, Control_Btn_CrashOpenLogs, loc::Get(loc::S::Crash_Banner_OpenLogs), true);
 
     float b2_x = area.right - 98.0f;
     D2D1_RECT_F b2_rc = D2D1::RectF(b2_x, btn_y, b2_x + btn_w, btn_y + btn_h);
     bool b2_hov = (state.hovered_control == Control_Btn_CrashDismiss);
     m_renderer.DrawButton(b2_rc, loc::Get(loc::S::Crash_Banner_Dismiss), false, b2_hov, false);
-    RegisterClickable(b2_rc, Control_Btn_CrashDismiss);
+    RegisterClickable(b2_rc, Control_Btn_CrashDismiss, loc::Get(loc::S::Crash_Banner_Dismiss), true);
 }
 
 void MainWindowView::RenderFirstRunWelcome(const UiState& state, const D2D1_RECT_F& area) noexcept {

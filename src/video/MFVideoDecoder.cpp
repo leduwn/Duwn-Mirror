@@ -128,6 +128,8 @@ bool MFVideoDecoder::InitInternal(const DecoderConfig& cfg, bool force_software)
                 ::CoTaskMemFree(name_buf);
             }
 
+            arr[i]->SetUINT32(MF_LOW_LATENCY, TRUE);
+
             ComPtr<IMFTransform> transform;
             HRESULT act_hr = arr[i]->ActivateObject(IID_PPV_ARGS(&transform));
             DUWN_LOG_INFOF("MFVideoDecoder",
@@ -138,12 +140,18 @@ bool MFVideoDecoder::InitInternal(const DecoderConfig& cfg, bool force_software)
             // Query attributes & async status
             bool d3d_aware = false;
             bool is_async_mft = false;
+            bool mf_low_latency_set = false;
             ComPtr<IMFAttributes> attrs;
             HRESULT attr_hr = transform->GetAttributes(attrs.GetAddressOf());
             DUWN_LOG_INFOF("MFVideoDecoder",
                 "  GetAttributes hr={:#010x}", static_cast<unsigned>(attr_hr));
 
             if (attrs) {
+                HRESULT ll_hr = attrs->SetUINT32(MF_LOW_LATENCY, TRUE);
+                mf_low_latency_set = SUCCEEDED(ll_hr);
+                DUWN_LOG_INFOF("MFVideoDecoder",
+                    "  Set MF_LOW_LATENCY: hr={:#010x}", static_cast<unsigned>(ll_hr));
+
                 UINT32 d3d11_val = 0;
                 HRESULT d3d11_aware_hr = attrs->GetUINT32(MF_SA_D3D11_AWARE, &d3d11_val);
                 DUWN_LOG_INFOF("MFVideoDecoder",
@@ -201,8 +209,8 @@ bool MFVideoDecoder::InitInternal(const DecoderConfig& cfg, bool force_software)
             GlobalMetrics().video_decoder_kind.store(is_hw ? 1 : 2, std::memory_order_relaxed);
             GlobalMetrics().video_decoder_zero_copy.store(m_info.is_zero_copy, std::memory_order_relaxed);
 
-            // Phase 3: Enable low latency mode via ICodecAPI if supported
-            std::wstring low_lat_status = L"unsupported";
+            // Phase 3: Enable low latency mode via MF_LOW_LATENCY and ICodecAPI
+            std::wstring low_lat_status = mf_low_latency_set ? L"enabled" : L"unsupported";
             ComPtr<ICodecAPI> codec_api;
             HRESULT hr_api = transform.As(&codec_api);
             if (SUCCEEDED(hr_api) && codec_api) {
@@ -222,13 +230,14 @@ bool MFVideoDecoder::InitInternal(const DecoderConfig& cfg, bool force_software)
                         "  CODECAPI_AVLowLatencyMode enabled successfully (hr={:#010x})",
                         static_cast<unsigned>(hr_low));
                 } else {
-                    low_lat_status = L"supported_failed";
+                    if (!mf_low_latency_set) low_lat_status = L"supported_failed";
                     DUWN_LOG_WARNF("MFVideoDecoder",
-                        "  SetValue(CODECAPI_AVLowLatencyMode) failed hr={:#010x}",
-                        static_cast<unsigned>(hr_low));
+                        "  SetValue(CODECAPI_AVLowLatencyMode) failed hr={:#010x} (MF_LOW_LATENCY={})",
+                        static_cast<unsigned>(hr_low), mf_low_latency_set ? "ok" : "fail");
                 }
             } else {
-                DUWN_LOG_INFO("MFVideoDecoder", "  ICodecAPI not supported on this transform");
+                DUWN_LOG_INFOF("MFVideoDecoder", "  ICodecAPI not supported on this transform (MF_LOW_LATENCY={})",
+                               mf_low_latency_set ? "ok" : "fail");
             }
             m_info.low_latency_status = low_lat_status;
 

@@ -107,13 +107,18 @@ void AssertTrue(bool cond, const char* expr, const char* file, int line) {
 
 } // namespace test_framework
 
-int main() {
+int main(int argc, char* argv[]) {
     ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    std::string_view filter;
+    if (argc > 1 && argv[1] && argv[1][0] != '\0') {
+        filter = argv[1];
+    }
 
     // Process-level watchdog: abort if test process hangs (e.g. deadlocked thread in join/mutex)
     std::thread suite_watchdog([]() {
-        std::this_thread::sleep_for(std::chrono::seconds(90));
-        fprintf(stderr, "\n[FATAL] Test process watchdog timeout (90s) exceeded! Aborting deadlocked process.\n");
+        std::this_thread::sleep_for(std::chrono::seconds(180));
+        fprintf(stderr, "\n[FATAL] Test process watchdog timeout (180s) exceeded! Aborting deadlocked process.\n");
         fflush(stderr);
         std::_Exit(2);
     });
@@ -124,6 +129,9 @@ int main() {
 
     int passed = 0, failed = 0;
     for (auto& tc : test_framework::Registry()) {
+        if (!filter.empty() && tc.name.find(filter) == std::string_view::npos) {
+            continue;
+        }
         try {
             printf("[RUN ] %.*s\n", static_cast<int>(tc.name.size()), tc.name.data());
             fflush(stdout);

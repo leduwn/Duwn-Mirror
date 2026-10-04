@@ -1,4 +1,6 @@
 #include "MainWindow.h"
+#include "CrashHandler.h"
+
 #include "AppIcon.h"
 #include "video/VideoGeometry.h"
 #include "wired/WiredControlClient.h"
@@ -106,6 +108,12 @@ bool MainWindow::Create(const Settings& settings) noexcept {
     m_state.audio_volume        = settings.monitor_volume;
     m_state.show_output_toolbar = settings.show_output_toolbar;
     m_state.output_window_visible = false;
+
+    std::wstring last_crash_file;
+    if (CrashHandler::HasPreviousCrash(&last_crash_file) || settings.unclean_shutdown) {
+        m_state.show_crash_banner = true;
+        m_state.crash_banner_file = last_crash_file;
+    }
 
     ApplyImmersiveDarkMode();
 

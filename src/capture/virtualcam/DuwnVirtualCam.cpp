@@ -733,6 +733,9 @@ void DuwnOutputPin::WorkerLoop() {
                             const uint8_t* src_px = static_cast<const uint8_t*>(mapped.pData);
                             uint32_t copy_lines = (snapshot.height < out_h) ? snapshot.height : out_h;
                             uint32_t copy_pitch = (snapshot.width * 4 < row_pitch) ? snapshot.width * 4 : row_pitch;
+                            if (copy_lines < out_h || copy_pitch < row_pitch) {
+                                ZeroMemory(pBuffer, out_w * out_h * 4);
+                            }
                             // DirectShow VIDEOINFOHEADER has biHeight > 0 (bottom-up DIB)
                             // Invert scanlines so top row in DirectX texture is top row visually
                             for (uint32_t y = 0; y < copy_lines; ++y) {

@@ -87,6 +87,10 @@ public:
     void SetOnTouchTap(TouchTapCallback cb) noexcept { m_on_touch_tap = std::move(cb); }
     void SetOnTouchDrag(TouchDragCallback cb) noexcept { m_on_touch_drag = std::move(cb); }
 
+    // Hit testing helpers
+    void RegisterClickable(const D2D1_RECT_F& rect, int control_id, std::wstring_view tooltip = L"", bool scrollable = false) noexcept;
+    int HitTest(float fx, float fy, float scroll_y = 0.0f) const noexcept;
+
 private:
     // Section Rendering
     void RenderHeader(const UiState& state, float width) noexcept;
@@ -123,10 +127,6 @@ private:
     void RenderPerformanceCard(const UiState& state, const D2D1_RECT_F& card_rc) noexcept;
     void RenderControlsCard(const UiState& state, const D2D1_RECT_F& card_rc) noexcept;
     void RenderCreatorTipsCard(const UiState& state, const D2D1_RECT_F& card_rc) noexcept;
-
-    // Hit testing helpers
-    void RegisterClickable(const D2D1_RECT_F& rect, int control_id, std::wstring_view tooltip = L"", bool scrollable = false) noexcept;
-    int HitTest(float fx, float fy, float scroll_y = 0.0f) const noexcept;
 
     // Scrolling helpers
     float GetCurrentScrollY(NavTab tab) const noexcept;

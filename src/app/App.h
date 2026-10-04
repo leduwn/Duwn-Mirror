@@ -59,7 +59,7 @@ public:
     App(const App&) = delete;
     App& operator=(const App&) = delete;
 
-    int Run(bool test_motion = false, bool verify_capture = false) noexcept;
+    int Run(bool test_motion = false, bool verify_capture = false, bool test_rotate = false) noexcept;
 
     bool WaitForMediaReadiness(uint32_t timeout_ms = 2500) const noexcept;
     bool IsVideoMinReady() const noexcept {
@@ -157,6 +157,8 @@ private:
     std::atomic<uint32_t>                  m_last_export_ring_idx{0};
     bool                                   m_verify_capture{false};
     std::unique_ptr<audio::AudioRingBuffer> m_audio_ring;
+    bool                                   m_test_rotate{false};
+
     std::unique_ptr<audio::AudioEngine>   m_audio_engine;
     std::unique_ptr<audio::WasapiOutput>  m_wasapi;
     audio::AudioDeviceManager             m_audio_device_mgr;

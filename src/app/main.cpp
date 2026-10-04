@@ -35,6 +35,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     int argc = 0;
     bool test_motion = false;
     bool verify_capture = false;
+    bool test_rotate = false;
     LPWSTR* argv = ::CommandLineToArgvW(::GetCommandLineW(), &argc);
     if (argv) {
         if (argc >= 3 && (_wcsicmp(argv[1], L"--firewall") == 0 || _wcsicmp(argv[1], L"-firewall") == 0)) {
@@ -82,6 +83,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             if (_wcsicmp(argv[i], L"--test-motion") == 0 || _wcsicmp(argv[i], L"-test-motion") == 0) {
                 test_motion = true;
             }
+            if (_wcsicmp(argv[i], L"--test-rotate") == 0 || _wcsicmp(argv[i], L"-test-rotate") == 0) {
+                test_motion = true;
+                test_rotate = true;
+            }
             if (_wcsicmp(argv[i], L"--verify-capture") == 0 || _wcsicmp(argv[i], L"-verify-capture") == 0) {
                 verify_capture = true;
             }
@@ -99,7 +104,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     int wsa_res = ::WSAStartup(MAKEWORD(2, 2), &wsa_data);
 
     duwn::app::App app;
-    int ret = app.Run(test_motion, verify_capture);
+    int ret = app.Run(test_motion, verify_capture, test_rotate);
 
     if (wsa_res == 0) {
         ::WSACleanup();
