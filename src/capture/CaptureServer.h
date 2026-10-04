@@ -221,6 +221,16 @@ public:
     void UpdateSharedHandle(uint32_t ring_index, HANDLE new_handle, uint32_t new_resource_gen) noexcept;
 
     bool IsRunning() const noexcept { return m_running; }
+    bool HasActiveConsumers() const noexcept {
+        if (!m_header || !m_running) return false;
+        for (uint32_t i = 0; i < 4; ++i) {
+            if (m_header->consumers[i].active == kConsumerStateActive) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::wstring SessionName() const noexcept { return m_session_name; }
     uint32_t Generation() const noexcept { return m_generation; }
     CaptureMemoryHeader* Header() const noexcept { return m_header; }

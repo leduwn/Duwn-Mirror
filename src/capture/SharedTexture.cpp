@@ -11,6 +11,7 @@ void SharedTexture::Release() noexcept {
         // Legacy DXGI shared handles are freed when all D3D references are released.
         // Never call CloseHandle on legacy shared handles.
         m_shared_handles[i] = nullptr;
+        m_query_issued[i] = false;
     }
     m_width = 0;
     m_height = 0;
@@ -76,6 +77,7 @@ bool SharedTexture::Create(ID3D11Device* device, uint32_t width, uint32_t height
             Release();
             return false;
         }
+        m_query_issued[i] = false;
     }
 
     m_width = width;
@@ -91,6 +93,7 @@ bool SharedTexture::RecreateSlot(ID3D11Device* device, uint32_t ring_index) noex
     m_textures[ring_index].Reset();
     m_queries[ring_index].Reset();
     m_shared_handles[ring_index] = nullptr;
+    m_query_issued[ring_index] = false;
 
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width            = m_width;
@@ -122,11 +125,18 @@ bool SharedTexture::RecreateSlot(ID3D11Device* device, uint32_t ring_index) noex
     return true;
 }
 
-bool SharedTexture::SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index) noexcept {
+bool SharedTexture::SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index, std::mutex* mutex) noexcept {
     if (!context || ring_index >= kSharedTextureRingSize) return false;
-    // Flush command buffer to guarantee all blit/copy commands are submitted to GPU hardware
-    context->Flush();
     if (!m_queries[ring_index]) return true;
+    if (!m_query_issued[ring_index]) return true; // Query never issued; nothing to wait for
+
+    // Flush command buffer to guarantee all blit/copy commands are submitted to GPU hardware
+    if (mutex) {
+        std::lock_guard lock{*mutex};
+        context->Flush();
+    } else {
+        context->Flush();
+    }
 
     // Verify GPU completion of the current frame copy before publishing to consumers
     LARGE_INTEGER freq{}, start{}, now{};
@@ -134,9 +144,17 @@ bool SharedTexture::SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index) n
     ::QueryPerformanceCounter(&start);
     const int64_t max_ticks = (freq.QuadPart * 12) / 1000; // 12ms timeout
 
+    auto poll_data = [&]() -> HRESULT {
+        if (mutex) {
+            std::lock_guard lock{*mutex};
+            return context->GetData(m_queries[ring_index].Get(), nullptr, 0, 0);
+        }
+        return context->GetData(m_queries[ring_index].Get(), nullptr, 0, 0);
+    };
+
     int poll_count = 0;
     HRESULT hr = S_FALSE;
-    while ((hr = context->GetData(m_queries[ring_index].Get(), nullptr, 0, 0)) == S_FALSE) {
+    while ((hr = poll_data()) == S_FALSE) {
         ++poll_count;
         ::QueryPerformanceCounter(&now);
         if (now.QuadPart - start.QuadPart > max_ticks) {
@@ -144,13 +162,18 @@ bool SharedTexture::SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index) n
                            ring_index, (void*)m_queries[ring_index].Get(), poll_count, now.QuadPart - start.QuadPart);
             return false;
         }
-        YieldProcessor();
+        if (poll_count > 64) {
+            ::Sleep(0);
+        } else {
+            YieldProcessor();
+        }
     }
     return SUCCEEDED(hr);
 }
 
-bool SharedTexture::EnsureSlotReady(ID3D11DeviceContext* context, uint32_t ring_index) noexcept {
+bool SharedTexture::EnsureSlotReady(ID3D11DeviceContext* context, uint32_t ring_index, std::mutex* mutex) noexcept {
     if (!context || ring_index >= kSharedTextureRingSize || !m_queries[ring_index]) return true;
+    if (!m_query_issued[ring_index]) return true; // Brand new slot, no prior GPU work
 
     // Check if GPU has completed operations from prior cycle on this slot.
     // On a quad-buffered ring (4 slots ~66ms), this returns S_OK immediately without CPU stall.
@@ -159,12 +182,26 @@ bool SharedTexture::EnsureSlotReady(ID3D11DeviceContext* context, uint32_t ring_
     ::QueryPerformanceCounter(&start);
     const int64_t max_ticks = (freq.QuadPart * 3) / 1000;
 
-    while (context->GetData(m_queries[ring_index].Get(), nullptr, 0, 0) == S_FALSE) {
+    auto poll_data = [&]() -> HRESULT {
+        if (mutex) {
+            std::lock_guard lock{*mutex};
+            return context->GetData(m_queries[ring_index].Get(), nullptr, 0, 0);
+        }
+        return context->GetData(m_queries[ring_index].Get(), nullptr, 0, 0);
+    };
+
+    int poll_count = 0;
+    while (poll_data() == S_FALSE) {
+        ++poll_count;
         ::QueryPerformanceCounter(&now);
         if (now.QuadPart - start.QuadPart > max_ticks) {
             return false;
         }
-        YieldProcessor();
+        if (poll_count > 32) {
+            ::Sleep(0);
+        } else {
+            YieldProcessor();
+        }
     }
     return true;
 }

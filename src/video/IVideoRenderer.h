@@ -31,6 +31,9 @@ public:
     virtual bool HandleDeviceRemoved() noexcept = 0;
     // Set destination texture for synchronous pre-present GPU backbuffer export and optional GPU fence query
     virtual void SetExportTarget(ID3D11Texture2D* /*dst*/, ID3D11Query* /*query*/ = nullptr) noexcept {}
+    // Query whether pre-present export copy to destination texture completed this frame
+    virtual bool ExportCopyCompleted() const noexcept { return false; }
+
     // Copy rendered back buffer to destination texture (e.g. for IPC SharedTexture export)
     virtual void CopyBackBufferTo(ID3D11Texture2D* /*dst*/) noexcept {}
     // Non-blocking best-effort presentation (e.g. for preview windows)

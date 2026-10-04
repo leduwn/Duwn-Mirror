@@ -970,6 +970,13 @@ bool App::Init() noexcept {
             m.video_rendered_frames.store(0, std::memory_order_relaxed);
             m.video_dropped_frames.store(0, std::memory_order_relaxed);
             m.session_q_full.store(0, std::memory_order_relaxed);
+            m.video_latency_catchup_drops.store(0, std::memory_order_relaxed);
+            m.video_queue_overflow_drops.store(0, std::memory_order_relaxed);
+            m.video_format_transition_drops.store(0, std::memory_order_relaxed);
+            m.video_stale_generation_drops.store(0, std::memory_order_relaxed);
+            m.video_presentation_late_drops.store(0, std::memory_order_relaxed);
+            m.video_scheduler_rejected_frames.store(0, std::memory_order_relaxed);
+
 
             const bool was_active = (prev == airplay::AirPlaySessionState::Streaming ||
                                      prev == airplay::AirPlaySessionState::Connected ||
@@ -1157,10 +1164,13 @@ bool App::Init() noexcept {
                                        m_settings.output_window_w, m_settings.output_window_h);
     }
 
-    // Export renderer — attached to dedicated hidden capture surface at configured resolution
+    // Export renderer — attached to dedicated offscreen capture surface at configured resolution
     m_capture_host_hwnd = ::CreateWindowExW(
-        0, L"Static", L"DuwnMirrorCaptureHost", WS_POPUP,
-        0, 0, kInitW, kInitH, nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
+        WS_EX_TOOLWINDOW, L"Static", L"DuwnMirrorCaptureHost", WS_POPUP | WS_VISIBLE,
+        -32000, -32000, kInitW, kInitH, nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
+    if (m_capture_host_hwnd) {
+        ::ShowWindow(m_capture_host_hwnd, SW_SHOWNA);
+    }
 
     if (m_d3d->IsHardware())
         m_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, m_capture_host_hwnd);
@@ -1171,6 +1181,8 @@ bool App::Init() noexcept {
         DUWN_LOG_ERROR("App", "VideoRenderer init failed");
         return false;
     }
+    m_renderer->SetNonBlocking(true);
+
 
     m_renderer->SetAspectRatioMode(GetEffectiveAspectRatioMode());
     m_renderer->SetPixelPerfect(static_cast<int>(m_settings.pixel_perfect));
@@ -2086,8 +2098,11 @@ bool App::RecreateVideoPipeline() noexcept {
 
     if (!m_capture_host_hwnd) {
         m_capture_host_hwnd = ::CreateWindowExW(
-            0, L"Static", L"DuwnMirrorCaptureHost", WS_POPUP,
-            0, 0, exp_w, exp_h, nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
+            WS_EX_TOOLWINDOW, L"Static", L"DuwnMirrorCaptureHost", WS_POPUP | WS_VISIBLE,
+            -32000, -32000, exp_w, exp_h, nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
+        if (m_capture_host_hwnd) {
+            ::ShowWindow(m_capture_host_hwnd, SW_SHOWNA);
+        }
     }
 
     if (m_d3d->IsHardware())
@@ -2098,6 +2113,8 @@ bool App::RecreateVideoPipeline() noexcept {
     if (!m_renderer->Init(exp_w, exp_h)) {
         m_window->SetStatusText(L"Renderer unavailable. Choose Auto or Compatibility.");
         return false;
+    m_renderer->SetNonBlocking(true);
+
     }
 
     m_active_renderer.store(m_d3d->IsHardware() ? 1 : 2, std::memory_order_relaxed);
@@ -4191,9 +4208,10 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
     const bool skip_wait = (m_renderer && m_renderer->GetFrameLatencyWaitableObject() != nullptr);
 
     // Prepare pre-present export target so VideoProcessorBlt writes directly to shared ring buffer before Present() flips
+    const bool has_consumers = (m_capture_server && m_capture_server->IsRunning() && m_capture_server->HasActiveConsumers());
     uint32_t active_ring_idx = 0;
     bool export_slot_valid = false;
-    if (m_shared_texture && m_capture_server && m_capture_server->IsRunning() && m_d3d && m_renderer) {
+    if (has_consumers && m_shared_texture && m_d3d && m_renderer) {
         uint32_t sw = m_renderer->SwapWidth();
         uint32_t sh = m_renderer->SwapHeight();
         if (sw > 0 && sh > 0) {
@@ -4219,7 +4237,7 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
             }
             if (cand_slot != 0xFFFFFFFF) {
                 active_ring_idx = cand_slot;
-                m_shared_texture->EnsureSlotReady(m_d3d->Context(), active_ring_idx);
+                m_shared_texture->EnsureSlotReady(m_d3d->Context(), active_ring_idx, &m_d3d->ContextMutex());
                 m_last_export_ring_idx.store(active_ring_idx, std::memory_order_relaxed);
                 m_renderer->SetExportTarget(m_shared_texture->Texture(active_ring_idx), m_shared_texture->Query(active_ring_idx));
                 export_slot_valid = true;
@@ -4227,6 +4245,8 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
                 m_renderer->SetExportTarget(nullptr);
             }
         }
+    } else if (m_renderer) {
+        m_renderer->SetExportTarget(nullptr);
     }
 
     const video::PresentResult result = m_renderer->Present(frame, skip_wait);
@@ -4246,12 +4266,15 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
             decoder_output_qpc, output_select_qpc, output_present_qpc);
 
         // Export clean frame to SharedTexture & CaptureServer
-        if (export_slot_valid && m_shared_texture && m_capture_server && m_capture_server->IsRunning() && m_d3d) {
+        if (export_slot_valid && m_shared_texture && m_capture_server && has_consumers && m_d3d) {
             uint32_t sw = m_renderer->SwapWidth();
             uint32_t sh = m_renderer->SwapHeight();
-            if (sw > 0 && sh > 0 && m_shared_texture->Texture(active_ring_idx) &&
+            const bool copy_done = m_renderer->ExportCopyCompleted();
+            m_shared_texture->MarkQueryIssued(active_ring_idx, copy_done);
+
+            if (copy_done && sw > 0 && sh > 0 && m_shared_texture->Texture(active_ring_idx) &&
                 m_shared_texture->Width() == sw && m_shared_texture->Height() == sh) {
-                if (m_shared_texture->SyncGpu(m_d3d->Context(), active_ring_idx)) {
+                if (m_shared_texture->SyncGpu(m_d3d->Context(), active_ring_idx, &m_d3d->ContextMutex())) {
                     const uint64_t new_idx = frame.sequence_number > 0 ? frame.sequence_number : (++m_export_frame_index);
                     m_export_frame_index.store(new_idx, std::memory_order_relaxed);
                     m_capture_server->PublishFrame(
@@ -4266,7 +4289,17 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
                         frame.present_end_qpc);
                 } else {
                     m_capture_server->ClearReservation();
-                    DUWN_LOG_WARNF("Capture", "SyncGpu timed out on ring slot {}: skipping publish to avoid corrupt frame", active_ring_idx);
+                    static int64_t s_last_timeout_warn_qpc = 0;
+                    static uint32_t s_suppressed_timeouts = 0;
+                    const int64_t now_qpc = clock::MonotonicClock::NowQpcTicks();
+                    if (now_qpc - s_last_timeout_warn_qpc > 50'000'000LL) {
+                        DUWN_LOG_WARNF("Capture", "SyncGpu timed out on ring slot {} (suppressed={}): skipping publish to avoid corrupt frame",
+                                       active_ring_idx, s_suppressed_timeouts);
+                        s_last_timeout_warn_qpc = now_qpc;
+                        s_suppressed_timeouts = 0;
+                    } else {
+                        ++s_suppressed_timeouts;
+                    }
                 }
             } else {
                 m_capture_server->ClearReservation();
@@ -4957,6 +4990,21 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
         static uint64_t s_metrics_cycle = 0;
         ++s_metrics_cycle;
+        const bool is_streaming = (phase_str == "Streaming" || v_rtp_rate > 0 || v_dec_fps > 0);
+        static bool s_was_streaming = false;
+        if (!is_streaming) {
+            if (s_was_streaming) {
+                s_was_streaming = false;
+                DUWN_LOG_INFOF("Diagnostics", "[STATE TRANSITION] Stream ended. State={} Lifecycle={}", phase_str, stream_health);
+            }
+            if ((s_metrics_cycle % 30) == 0) {
+                DUWN_LOG_INFOF("Diagnostics", "[HEARTBEAT] cycle={} | state={} | sidecar={} | lifecycle={}",
+                               s_metrics_cycle, phase_str, sidecar_up ? "alive" : "dead", stream_health);
+            }
+            return;
+        }
+        s_was_streaming = true;
+
         DUWN_LOG_INFOF("Diagnostics", "[METRICS CYCLE BEGIN] cycle={}", s_metrics_cycle);
 
         const SessionMetadataSnapshot meta_snap = GetMetadataSnapshot();

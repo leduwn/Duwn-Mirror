@@ -538,9 +538,16 @@ bool MFVideoDecoder::Feed(const uint8_t* data, size_t size,
                 "Decode thread {} joined MMCSS 'Playback' (task_index={})",
                 ::GetCurrentThreadId(), task_idx);
         } else {
-            DUWN_LOG_WARNF("MFVideoDecoder",
-                "Failed to join MMCSS 'Playback' on decode thread {} (error={})",
-                ::GetCurrentThreadId(), ::GetLastError());
+            DWORD err = ::GetLastError();
+            if (err == 1552 /* ERROR_THREAD_ALREADY_IN_TASK */) {
+                DUWN_LOG_DEBUGF("MFVideoDecoder",
+                    "Decode thread {} already registered in MMCSS task (error=1552)",
+                    ::GetCurrentThreadId());
+            } else {
+                DUWN_LOG_WARNF("MFVideoDecoder",
+                    "Failed to join MMCSS 'Playback' on decode thread {} (error={})",
+                    ::GetCurrentThreadId(), err);
+            }
         }
     }
 

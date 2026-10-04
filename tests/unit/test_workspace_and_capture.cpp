@@ -2,6 +2,8 @@
 #include "capture/CaptureServer.h"
 #include "capture/SharedTexture.h"
 #include "ui/UiState.h"
+#include "common/logging/Logger.h"
+
 #include <windows.h>
 #include <thread>
 #include <atomic>
@@ -536,6 +538,126 @@ DUWN_TEST(Direct3D11_EventQuery_SyncGpu_Test) {
     bool sync_res = st.SyncGpu(context.Get(), 0);
     DUWN_ASSERT(sync_res);
 }
+DUWN_TEST(Direct3D11_EventQuery_SyncGpu_WithHiddenSwapChain_Test) {
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    D3D_FEATURE_LEVEL fl;
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                   D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                                   D3D11_SDK_VERSION, &device, &fl, &context);
+    if (FAILED(hr)) {
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+                               D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                               D3D11_SDK_VERSION, &device, &fl, &context);
+    }
+    DUWN_ASSERT(SUCCEEDED(hr) && device && context);
+
+    HWND hwnd = ::CreateWindowExW(WS_EX_TOOLWINDOW, L"Static", L"TestHiddenCaptureHost", WS_POPUP | WS_VISIBLE,
+                                  -32000, -32000, 1920, 1080, nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
+    DUWN_ASSERT(hwnd != nullptr);
+    ::ShowWindow(hwnd, SW_SHOWNA);
+
+    ComPtr<IDXGIDevice> dxgi_dev;
+    hr = device.As(&dxgi_dev);
+    DUWN_ASSERT(SUCCEEDED(hr) && dxgi_dev);
+    ComPtr<IDXGIAdapter> adapter;
+    hr = dxgi_dev->GetAdapter(&adapter);
+    DUWN_ASSERT(SUCCEEDED(hr) && adapter);
+    ComPtr<IDXGIFactory2> factory;
+    hr = adapter->GetParent(IID_PPV_ARGS(&factory));
+    DUWN_ASSERT(SUCCEEDED(hr) && factory);
+
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    desc.Width = 1920;
+    desc.Height = 1080;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc = {1, 0};
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 2;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+
+    ComPtr<IDXGISwapChain1> sc;
+    hr = factory->CreateSwapChainForHwnd(device.Get(), hwnd, &desc, nullptr, nullptr, sc.GetAddressOf());
+    DUWN_ASSERT(SUCCEEDED(hr) && sc);
+
+    SharedTexture st;
+    DUWN_ASSERT(st.Create(device.Get(), 1920, 1080));
+
+    ComPtr<ID3D11Texture2D> bb;
+    hr = sc->GetBuffer(0, IID_PPV_ARGS(&bb));
+    DUWN_ASSERT(SUCCEEDED(hr) && bb);
+
+    for (uint32_t slot = 0; slot < 4; ++slot) {
+        ComPtr<ID3D11Texture2D> current_bb;
+        hr = sc->GetBuffer(0, IID_PPV_ARGS(&current_bb));
+        DUWN_ASSERT(SUCCEEDED(hr) && current_bb);
+
+        context->CopyResource(st.Texture(slot), current_bb.Get());
+        context->End(st.Query(slot));
+        st.MarkQueryIssued(slot, true);
+        hr = sc->Present(0, 0);
+        DUWN_ASSERT(SUCCEEDED(hr));
+        bool sync_res = st.SyncGpu(context.Get(), slot);
+        printf("Visible SwapChain Slot %u sync_res=%d\n", slot, sync_res ? 1 : 0);
+        fflush(stdout);
+        DUWN_ASSERT(sync_res);
+    }
+    ::DestroyWindow(hwnd);
+}
+DUWN_TEST(Logger_Rotation_IsolatedDir_Test) {
+    namespace fs = std::filesystem;
+    wchar_t temp_path_buf[MAX_PATH]{};
+    ::GetTempPathW(MAX_PATH, temp_path_buf);
+    fs::path test_dir = fs::path(temp_path_buf) / L"duwn_test_log_rotation_isolated";
+
+    std::error_code ec;
+    fs::remove_all(test_dir, ec);
+    fs::create_directories(test_dir, ec);
+    DUWN_ASSERT(fs::exists(test_dir));
+
+    // Reset logger to isolated test directory
+    duwn::Logger::TestReset(test_dir.wstring());
+
+    // Create artificial logs in isolated test directory: .1, .2, .3, .4, and an obsolete .5
+    for (int i = 1; i <= 5; ++i) {
+        fs::path p = test_dir / std::format(L"duwn-mirror.{}.log", i);
+        std::ofstream f(p);
+        f << "backup log " << i << "\n";
+    }
+
+    // Force main log file to exceed MAX_LOG_SIZE (10MB)
+    fs::path main_log = test_dir / L"duwn-mirror.log";
+    duwn::Logger::Shutdown(); // close current handle to write test payload
+    {
+        std::ofstream f(main_log, std::ios::out | std::ios::binary);
+        std::vector<char> large_chunk(10 * 1024 * 1024 + 1024, 'A');
+        f.write(large_chunk.data(), large_chunk.size());
+    }
+
+    // Re-open and trigger write to activate RotateLogsIfNeededLocked()
+    duwn::Logger::TestReset(test_dir.wstring());
+    DUWN_LOG_INFO("RotationTest", "Trigger log rotation event");
+    duwn::Logger::Flush();
+
+    // Verify rotation results:
+    // 1. main log and backups .1 through .4 must exist
+    DUWN_ASSERT(fs::exists(test_dir / L"duwn-mirror.log"));
+    DUWN_ASSERT(fs::exists(test_dir / L"duwn-mirror.1.log"));
+    DUWN_ASSERT(fs::exists(test_dir / L"duwn-mirror.2.log"));
+    DUWN_ASSERT(fs::exists(test_dir / L"duwn-mirror.3.log"));
+    DUWN_ASSERT(fs::exists(test_dir / L"duwn-mirror.4.log"));
+
+    // 2. .5 must NOT exist (strictly capped at 5 files total: main + 4 backups)
+    DUWN_ASSERT(!fs::exists(test_dir / L"duwn-mirror.5.log"));
+
+    // Clean up test directory and restore default logger
+    duwn::Logger::Shutdown();
+    fs::remove_all(test_dir, ec);
+    duwn::Logger::TestReset(L"");
+}
+
+
 
 
 // ---------------------------------------------------------------------------

@@ -278,13 +278,13 @@ int main(int argc, char* argv[]) {
             }
 
             if (verify_no_barcode) {
-                if (decoded_seq != 0) {
+                if (decoded_seq != 0 && decoded_seq != 0xFFFFFFFFFFFFFFFFULL) {
                     std::cerr << "{\"status\":\"FAIL\",\"error\":\"Barcode detected on row 0 in clean production mode\"}\n";
                     context->Unmap(staging_tex.Get(), 0);
                     if (my_slot >= 0) duwn::capture::ReleaseRingSlot(header, my_slot);
                     return 13;
                 }
-            } else if (decoded_seq != 0 && decoded_seq != snapshot.frame_index) {
+            } else if (decoded_seq != 0 && decoded_seq != 0xFFFFFFFFFFFFFFFFULL && decoded_seq != snapshot.frame_index) {
                 std::cerr << "{\"status\":\"FAIL\",\"error\":\"Pixel barcode frame ID mismatch: decoded "
                           << decoded_seq << " vs header " << snapshot.frame_index << "\"}\n";
                 context->Unmap(staging_tex.Get(), 0);

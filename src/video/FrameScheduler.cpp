@@ -543,13 +543,18 @@ void FrameScheduler::PushFrame(VideoFrame frame) noexcept {
 
 
                 static int64_t s_last_overflow_log_qpc = 0;
+                static uint32_t s_suppressed_overflows = 0;
 
-                if (clock::QpcDeltaMs(s_last_overflow_log_qpc, now_qpc) > 1000.0) {
-
+                if (clock::QpcDeltaMs(s_last_overflow_log_qpc, now_qpc) > 5000.0) {
                     s_last_overflow_log_qpc = now_qpc;
-
-                    DUWN_LOG_WARN("FrameScheduler", "DecodedFrameQueue full with fresh frames — decoder ahead of display");
-
+                    if (s_suppressed_overflows > 0) {
+                        DUWN_LOG_WARNF("FrameScheduler", "DecodedFrameQueue full with fresh frames (overflows={}): decoder ahead of display", s_suppressed_overflows + 1);
+                    } else {
+                        DUWN_LOG_WARN("FrameScheduler", "DecodedFrameQueue full with fresh frames — decoder ahead of display");
+                    }
+                    s_suppressed_overflows = 0;
+                } else {
+                    ++s_suppressed_overflows;
                 }
 
             }

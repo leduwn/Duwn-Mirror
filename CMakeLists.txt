@@ -119,6 +119,15 @@ configure_file(
     "${CMAKE_BINARY_DIR}/generated/version.rc"
     @ONLY
 )
+add_custom_target(duwn-version-update
+    COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DGIT_EXECUTABLE=${GIT_EXECUTABLE}
+        -P "${CMAKE_SOURCE_DIR}/tools/UpdateVersion.cmake"
+    BYPRODUCTS "${CMAKE_SOURCE_DIR}/src/common/Version.h"
+    COMMENT "Checking Git HEAD and updating Version.h if changed"
+)
+
 
 # ---------------------------------------------------------------------------
 # Dependencies (vcpkg / find_package)

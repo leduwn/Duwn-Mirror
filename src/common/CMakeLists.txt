@@ -22,3 +22,6 @@ if(fmt_FOUND)
     target_link_libraries(duwn-common PUBLIC fmt::fmt)
     target_compile_definitions(duwn-common PUBLIC DUWN_HAS_FMT)
 endif()
+
+add_dependencies(duwn-common duwn-version-update)
+

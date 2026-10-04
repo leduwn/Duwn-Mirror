@@ -38,6 +38,9 @@ public:
 
     static void Flush();
     static void Shutdown();
+    // Testing helper: re-initialize logger in an isolated directory
+    static void TestReset(std::wstring_view testDir);
+
 };
 
 } // namespace duwn

@@ -14,8 +14,8 @@ namespace duwn {
 
 namespace {
 
-constexpr uintmax_t MAX_LOG_SIZE = 5 * 1024 * 1024; // 5MB
-constexpr int MAX_BACKUP_FILES = 5;
+constexpr uintmax_t MAX_LOG_SIZE = 10 * 1024 * 1024; // 10 MiB per file
+constexpr int MAX_BACKUP_FILES = 4;                 // Main log + 4 backups = 5 files total (~50 MiB)
 
 struct LogState {
     std::mutex            mutex;
@@ -97,9 +97,14 @@ void RotateLogsIfNeededLocked() {
     g_log.file.flush();
     g_log.file.close();
 
-    // Rotate existing backups: .5 removed, .4 -> .5, ... .1 -> .2, main -> .1
+    // Rotate existing backups: oldest backup removed, .3 -> .4, .2 -> .3, .1 -> .2, main -> .1
     fs::path oldest = g_log.logDir / std::format(L"duwn-mirror.{}.log", MAX_BACKUP_FILES);
     fs::remove(oldest, ec);
+    // Clean up any legacy backups exceeding MAX_BACKUP_FILES from previous versions
+    for (int i = MAX_BACKUP_FILES + 1; i <= 10; ++i) {
+        fs::path stray = g_log.logDir / std::format(L"duwn-mirror.{}.log", i);
+        fs::remove(stray, ec);
+    }
 
     for (int i = MAX_BACKUP_FILES - 1; i >= 1; --i) {
         fs::path src = g_log.logDir / std::format(L"duwn-mirror.{}.log", i);
@@ -124,6 +129,20 @@ void RotateLogsIfNeededLocked() {
 }
 
 } // namespace
+
+void Logger::TestReset(std::wstring_view testDir) {
+    {
+        std::lock_guard lock{g_log.mutex};
+        if (g_log.file.is_open()) {
+            g_log.file.flush();
+            g_log.file.close();
+        }
+        g_log.initialised = false;
+        g_log.logDir.clear();
+        g_log.mainLogPath.clear();
+    }
+    Initialize(testDir);
+}
 
 void Logger::Initialize(std::wstring_view customLogDir) {
     std::lock_guard lock{g_log.mutex};

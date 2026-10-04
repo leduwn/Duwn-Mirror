@@ -665,6 +665,7 @@ PresentResult VideoRenderer::Present(VideoFrame& frame, bool skip_wait) noexcept
             m_video_processor.Get(), m_output_view.Get(), 0, 1, &stream);
 
         // Pre-Present copy: capture exact rendered backbuffer before flip swaps buffers
+        m_export_copy_completed = false;
         if (SUCCEEDED(hr) && m_export_target) {
             ComPtr<ID3D11Texture2D> bb;
             if (SUCCEEDED(m_swap_chain->GetBuffer(0, IID_PPV_ARGS(&bb))) && bb) {
@@ -675,12 +676,14 @@ PresentResult VideoRenderer::Present(VideoFrame& frame, bool skip_wait) noexcept
                     m_device.Context()->CopyResource(m_export_target, bb.Get());
                     if (m_export_query) {
                         m_device.Context()->End(m_export_query);
+                        m_device.Context()->Flush();
                     } else {
                         static int s_no_query = 0;
                         if (++s_no_query <= 3) {
                             DUWN_LOG_WARNF("VideoRenderer", "Pre-Present copy: m_export_query is null!");
                         }
                     }
+                    m_export_copy_completed = true;
                 } else {
                     static int s_mismatch = 0;
                     if (++s_mismatch <= 5) {

@@ -161,6 +161,8 @@ public:
         m_export_target = dst;
         m_export_query = query;
     }
+    bool ExportCopyCompleted() const noexcept override { return m_export_copy_completed; }
+
     void CopyBackBufferTo(ID3D11Texture2D* dst) noexcept override;
 
     void LogSwapChainConfig(const char* label) const noexcept override;
@@ -243,6 +245,8 @@ private:
     std::atomic<bool> m_non_blocking{false};
     ID3D11Texture2D*  m_export_target{nullptr};
     ID3D11Query*      m_export_query{nullptr};
+    bool              m_export_copy_completed{false};
+
 
     // Render-thread-only windowed duration samples for 1s percentiles
     std::vector<double> m_vp_samples;
