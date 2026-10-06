@@ -1,4 +1,5 @@
 #include "OutputWindow.h"
+#include "Settings.h"
 #include "AppIcon.h"
 #include "ui/Loc.h"
 #include "common/logging/Logger.h"
@@ -12,6 +13,10 @@ namespace duwn::app {
 bool OutputWindow::s_class_registered = false;
 
 OutputWindow::~OutputWindow() {
+    if (m_toolbar_hwnd) {
+        ::DestroyWindow(m_toolbar_hwnd);
+        m_toolbar_hwnd = nullptr;
+    }
     if (m_hwnd) {
         ::DestroyWindow(m_hwnd);
         m_hwnd = nullptr;
@@ -31,19 +36,11 @@ int OutputWindow::GetToolbarHeightPx() const noexcept {
 }
 
 uint32_t OutputWindow::VideoSurfaceWidth() const noexcept {
-    if (!m_video_surface_hwnd) return m_client_w.load(std::memory_order_relaxed);
-    RECT rc{};
-    ::GetClientRect(m_video_surface_hwnd, &rc);
-    int w = rc.right - rc.left;
-    return w > 0 ? static_cast<uint32_t>(w) : m_client_w.load(std::memory_order_relaxed);
+    return m_client_w.load(std::memory_order_relaxed);
 }
 
 uint32_t OutputWindow::VideoSurfaceHeight() const noexcept {
-    if (!m_video_surface_hwnd) return m_client_h.load(std::memory_order_relaxed);
-    RECT rc{};
-    ::GetClientRect(m_video_surface_hwnd, &rc);
-    int h = rc.bottom - rc.top;
-    return h > 0 ? static_cast<uint32_t>(h) : m_client_h.load(std::memory_order_relaxed);
+    return m_client_h.load(std::memory_order_relaxed);
 }
 
 bool OutputWindow::Create(uint32_t width, uint32_t height,
@@ -115,8 +112,8 @@ bool OutputWindow::Create(uint32_t width, uint32_t height,
         s_class_registered = true;
     }
 
-    constexpr DWORD style    = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
-    constexpr DWORD ex_style = WS_EX_APPWINDOW;
+    constexpr DWORD style    = CaptureWindowStyle() | WS_CLIPCHILDREN;
+    constexpr DWORD ex_style = CaptureWindowExStyle();
 
     int win_w = 480;
     int win_h = 854;
@@ -134,16 +131,13 @@ bool OutputWindow::Create(uint32_t width, uint32_t height,
         win_y = mi.rcWork.top + (work_h - win_h) / 2;
     }
 
-    RECT wr{ 0, 0, win_w, win_h + 38 };
-    ::AdjustWindowRectEx(&wr, style, FALSE, ex_style);
-
     m_hwnd = ::CreateWindowExW(
         ex_style,
         kClassName,
         kWindowTitle,
         style,
         win_x, win_y,
-        wr.right - wr.left, wr.bottom - wr.top,
+        win_w, win_h,
         nullptr, nullptr,
         hInst,
         this
@@ -156,39 +150,29 @@ bool OutputWindow::Create(uint32_t width, uint32_t height,
 
     SetAppWindowIcons(m_hwnd);
 
-    // Create toolbar child
+    // Create toolbar as an owned utility tool window (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, owner m_hwnd)
+    int tb_h = GetToolbarHeightPx();
+    if (tb_h <= 0) tb_h = static_cast<int>(std::round(38.0f * GetDpiScale()));
+
     m_toolbar_hwnd = ::CreateWindowExW(
-        0,
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         kToolbarClass,
         L"",
-        WS_CHILD | (m_show_toolbar ? WS_VISIBLE : 0) | WS_CLIPSIBLINGS,
-        0, 0, win_w, 38,
+        WS_POPUP | (m_show_toolbar ? WS_VISIBLE : 0) | WS_CLIPSIBLINGS,
+        win_x, win_y - tb_h, win_w, tb_h,
         m_hwnd,
-        reinterpret_cast<HMENU>(101),
+        nullptr,
         hInst,
         this
     );
 
-    // Create video surface child
-    m_video_surface_hwnd = ::CreateWindowExW(
-        0,
-        kVideoSurfaceClass,
-        L"",
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-        0, 38, win_w, win_h,
-        m_hwnd,
-        reinterpret_cast<HMENU>(102),
-        hInst,
-        this
-    );
-
-    // Create placeholder child
+    // Create placeholder child (waiting screen when stream inactive)
     m_placeholder_hwnd = ::CreateWindowExW(
         0,
         kPlaceholderClass,
         L"",
         WS_CHILD | (m_has_frame ? 0 : WS_VISIBLE) | WS_CLIPSIBLINGS,
-        0, 38, win_w, win_h,
+        0, 0, win_w, win_h,
         m_hwnd,
         reinterpret_cast<HMENU>(103),
         hInst,
@@ -197,10 +181,44 @@ bool OutputWindow::Create(uint32_t width, uint32_t height,
 
     LayoutChildren();
 
-    DUWN_LOG_INFOF("OutputWindow", "Created standalone output window HWND={:p} Toolbar={:p} VideoSurface={:p} Placeholder={:p}",
-        static_cast<void*>(m_hwnd), static_cast<void*>(m_toolbar_hwnd), static_cast<void*>(m_video_surface_hwnd), static_cast<void*>(m_placeholder_hwnd));
+    DUWN_LOG_INFOF("OutputWindow", "Created standalone output window HWND={:p} Toolbar={:p} Placeholder={:p}",
+        static_cast<void*>(m_hwnd), static_cast<void*>(m_toolbar_hwnd), static_cast<void*>(m_placeholder_hwnd));
 
     return true;
+}
+
+void OutputWindow::UpdateToolbarPosition() noexcept {
+    if (!m_hwnd || !m_toolbar_hwnd) return;
+    if (!m_show_toolbar || m_fullscreen || !::IsWindowVisible(m_hwnd) || ::IsIconic(m_hwnd)) {
+        ::ShowWindow(m_toolbar_hwnd, SW_HIDE);
+        return;
+    }
+
+    int tb_h = GetToolbarHeightPx();
+    if (tb_h <= 0) {
+        ::ShowWindow(m_toolbar_hwnd, SW_HIDE);
+        return;
+    }
+
+    RECT rc{};
+    ::GetWindowRect(m_hwnd, &rc);
+    int w = rc.right - rc.left;
+
+    HMONITOR hmon = ::MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{sizeof(mi)};
+    if (!::GetMonitorInfoW(hmon, &mi)) mi.rcWork = rc;
+
+    int tb_x = rc.left;
+    int tb_y = rc.top - tb_h;
+    if (tb_y < mi.rcWork.top) {
+        // Place below if not enough room above
+        tb_y = rc.bottom;
+    }
+
+    ::SetWindowPos(m_toolbar_hwnd, m_always_on_top ? HWND_TOPMOST : HWND_TOP,
+                   tb_x, tb_y, w, tb_h,
+                   SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    ::InvalidateRect(m_toolbar_hwnd, nullptr, TRUE);
 }
 
 void OutputWindow::LayoutChildren() noexcept {
@@ -214,21 +232,10 @@ void OutputWindow::LayoutChildren() noexcept {
     m_client_w.store(static_cast<uint32_t>(client_w), std::memory_order_relaxed);
     m_client_h.store(static_cast<uint32_t>(client_h), std::memory_order_relaxed);
 
-    int tb_h = GetToolbarHeightPx();
-    if (tb_h > 0 && m_toolbar_hwnd) {
-        ::SetWindowPos(m_toolbar_hwnd, HWND_TOP, 0, 0, client_w, tb_h, SWP_SHOWWINDOW);
-        ::InvalidateRect(m_toolbar_hwnd, nullptr, TRUE);
-    } else if (m_toolbar_hwnd) {
-        ::ShowWindow(m_toolbar_hwnd, SW_HIDE);
-    }
+    UpdateToolbarPosition();
 
-    int vid_y = tb_h;
-    int vid_h = std::max(1, client_h - tb_h);
-    if (m_video_surface_hwnd) {
-        ::SetWindowPos(m_video_surface_hwnd, HWND_BOTTOM, 0, vid_y, client_w, vid_h, SWP_SHOWWINDOW);
-    }
     if (m_placeholder_hwnd) {
-        ::SetWindowPos(m_placeholder_hwnd, HWND_TOP, 0, vid_y, client_w, vid_h,
+        ::SetWindowPos(m_placeholder_hwnd, HWND_TOP, 0, 0, client_w, client_h,
                        m_has_frame ? SWP_HIDEWINDOW : SWP_SHOWWINDOW);
         if (!m_has_frame) {
             ::InvalidateRect(m_placeholder_hwnd, nullptr, TRUE);
@@ -433,6 +440,43 @@ void OutputWindow::ApplyComfortableFit() noexcept {
     ApplyGeometryToMatchSource(vw, vh);
 }
 
+void OutputWindow::RestoreSavedGeometry(const Settings& s) noexcept {
+    if (!m_hwnd || s.output_window_w == 0 || s.output_window_h == 0) return;
+
+    m_user_has_custom_size = s.output_user_has_custom_size;
+    m_desired_long_edge_dip = s.output_desired_long_edge_dip;
+    if (s.output_last_aspect_w > 0 && s.output_last_aspect_h > 0) {
+        SetVideoGeometry(s.output_last_aspect_w, s.output_last_aspect_h);
+    }
+
+    int x = s.output_x;
+    int y = s.output_y;
+    int w = static_cast<int>(s.output_window_w);
+    int h = static_cast<int>(s.output_window_h);
+
+    if (w <= 0 || h <= 0) return;
+
+    RECT rc{ x, y, x + w, y + h };
+    HMONITOR hmon = ::MonitorFromRect(&rc, MONITOR_DEFAULTTONULL);
+    if (!hmon) {
+        hmon = ::MonitorFromWindow(::GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO mi{sizeof(mi)};
+        if (::GetMonitorInfoW(hmon, &mi)) {
+            int work_w = mi.rcWork.right - mi.rcWork.left;
+            int work_h = mi.rcWork.bottom - mi.rcWork.top;
+            if (w > work_w) w = work_w;
+            if (h > work_h) h = work_h;
+            x = mi.rcWork.left + (work_w - w) / 2;
+            y = mi.rcWork.top + (work_h - h) / 2;
+        }
+    }
+
+    ::SetWindowPos(m_hwnd, s.output_always_on_top ? HWND_TOPMOST : HWND_NOTOPMOST,
+                   x, y, w, h, SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    m_always_on_top = s.output_always_on_top;
+    LayoutChildren();
+}
+
 void OutputWindow::ApplyGeometryToMatchSource(uint32_t src_w, uint32_t src_h) noexcept {
     if (!m_hwnd || m_fullscreen || ::IsZoomed(m_hwnd)) return;
     if (src_w == 0 || src_h == 0) return;
@@ -445,21 +489,7 @@ void OutputWindow::ApplyGeometryToMatchSource(uint32_t src_w, uint32_t src_h) no
 
     int work_w = mi.rcWork.right - mi.rcWork.left;
     int work_h = mi.rcWork.bottom - mi.rcWork.top;
-    int tb_h = GetToolbarHeightPx();
     double ar = static_cast<double>(src_w) / static_cast<double>(src_h);
-
-    RECT wr{}, cr{};
-    ::GetWindowRect(m_hwnd, &wr);
-    ::GetClientRect(m_hwnd, &cr);
-    int nc_w = (wr.right - wr.left) - (cr.right - cr.left);
-    int nc_h = (wr.bottom - wr.top) - (cr.bottom - cr.top);
-    if (nc_w <= 0 || nc_h <= 0) {
-        RECT test_r{0, 0, 100, 100};
-        constexpr DWORD st = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
-        ::AdjustWindowRectEx(&test_r, st, FALSE, WS_EX_APPWINDOW);
-        nc_w = (test_r.right - test_r.left) - 100;
-        nc_h = (test_r.bottom - test_r.top) - 100;
-    }
 
     float dpi = GetDpiScale();
     int target_vid_w = 0;
@@ -475,8 +505,8 @@ void OutputWindow::ApplyGeometryToMatchSource(uint32_t src_w, uint32_t src_h) no
             target_vid_h = static_cast<int>(std::round(target_vid_w / ar));
         }
 
-        int max_allowed_w = static_cast<int>((work_w - nc_w) * 0.95f);
-        int max_allowed_h = static_cast<int>((work_h - nc_h - tb_h) * 0.95f);
+        int max_allowed_w = static_cast<int>(work_w * 0.95f);
+        int max_allowed_h = static_cast<int>(work_h * 0.95f);
         if (target_vid_w > max_allowed_w) {
             target_vid_w = max_allowed_w;
             target_vid_h = static_cast<int>(std::round(target_vid_w / ar));
@@ -498,8 +528,8 @@ void OutputWindow::ApplyGeometryToMatchSource(uint32_t src_w, uint32_t src_h) no
             // Landscape source: baseline 55% available work area width
             target_vid_w = static_cast<int>(std::round(work_w * 0.55f));
             target_vid_h = static_cast<int>(std::round(target_vid_w / ar));
-            if (target_vid_h + tb_h > static_cast<int>(work_h * 0.85f)) {
-                target_vid_h = static_cast<int>(work_h * 0.85f - tb_h);
+            if (target_vid_h > static_cast<int>(work_h * 0.85f)) {
+                target_vid_h = static_cast<int>(work_h * 0.85f);
                 target_vid_w = static_cast<int>(std::round(target_vid_h * ar));
             }
         }
@@ -513,8 +543,8 @@ void OutputWindow::ApplyGeometryToMatchSource(uint32_t src_w, uint32_t src_h) no
     target_vid_w = (std::max(100, target_vid_w) / 2) * 2;
     target_vid_h = (std::max(100, target_vid_h) / 2) * 2;
 
-    int total_w = target_vid_w + nc_w;
-    int total_h = target_vid_h + nc_h + tb_h;
+    int total_w = target_vid_w;
+    int total_h = target_vid_h;
 
     RECT cur_rc{};
     ::GetWindowRect(m_hwnd, &cur_rc);
@@ -601,7 +631,7 @@ void OutputWindow::ToggleFullscreen() noexcept {
             if (m_on_resize) m_on_resize(r.right - r.left, r.bottom - r.top);
         }
     } else {
-        constexpr DWORD style = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME | WS_VISIBLE) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+        constexpr DWORD style = CaptureWindowStyle() | WS_CLIPCHILDREN | WS_VISIBLE;
         ::SetWindowLongW(m_hwnd, GWL_STYLE, style);
         ::SetWindowPos(m_hwnd, m_always_on_top ? HWND_TOPMOST : HWND_NOTOPMOST,
                        m_restore_rect.left, m_restore_rect.top,
@@ -673,20 +703,7 @@ LRESULT OutputWindow::HandleSizing(WPARAM edge, RECT* prc) noexcept {
     const double aspect = static_cast<double>(src_w) / static_cast<double>(src_h);
     if (aspect <= 0.001 || aspect >= 100.0) return FALSE;
 
-    RECT wr{}, cr{};
-    ::GetWindowRect(m_hwnd, &wr);
-    ::GetClientRect(m_hwnd, &cr);
-    int nc_w = (wr.right - wr.left) - (cr.right - cr.left);
-    int nc_h = (wr.bottom - wr.top) - (cr.bottom - cr.top);
-    if (nc_w <= 0 || nc_h <= 0) {
-        RECT test_r{0, 0, 100, 100};
-        constexpr DWORD st = (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME) | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
-        ::AdjustWindowRectEx(&test_r, st, FALSE, WS_EX_APPWINDOW);
-        nc_w = (test_r.right - test_r.left) - 100;
-        nc_h = (test_r.bottom - test_r.top) - 100;
-    }
-    int tb_h = GetToolbarHeightPx();
-
+    // Standalone borderless video window has no NC chrome and external toolbar
     HMONITOR hmon = ::MonitorFromRect(prc, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi{sizeof(mi)};
     if (!::GetMonitorInfoW(hmon, &mi)) mi.rcWork = {0, 0, 1920, 1080};
@@ -703,8 +720,8 @@ LRESULT OutputWindow::HandleSizing(WPARAM edge, RECT* prc) noexcept {
     min_vid_w = (std::max(120, min_vid_w) / 2) * 2;
     min_vid_h = (std::max(120, min_vid_h) / 2) * 2;
 
-    int max_vid_w = std::max(min_vid_w, (work_w - nc_w) / 2 * 2);
-    int max_vid_h = std::max(min_vid_h, (work_h - nc_h - tb_h) / 2 * 2);
+    int max_vid_w = std::max(min_vid_w, work_w / 2 * 2);
+    int max_vid_h = std::max(min_vid_h, work_h / 2 * 2);
     if (static_cast<double>(max_vid_w) / aspect > max_vid_h) {
         max_vid_w = (static_cast<int>(std::round(max_vid_h * aspect)) / 2) * 2;
     } else {
@@ -713,8 +730,8 @@ LRESULT OutputWindow::HandleSizing(WPARAM edge, RECT* prc) noexcept {
 
     int prop_w = prc->right - prc->left;
     int prop_h = prc->bottom - prc->top;
-    int prop_vid_w = prop_w - nc_w;
-    int prop_vid_h = prop_h - nc_h - tb_h;
+    int prop_vid_w = prop_w;
+    int prop_vid_h = prop_h;
     int target_vid_w = 0, target_vid_h = 0;
 
     switch (edge) {
@@ -749,8 +766,8 @@ LRESULT OutputWindow::HandleSizing(WPARAM edge, RECT* prc) noexcept {
 
     target_vid_w = (std::max(min_vid_w, target_vid_w) / 2) * 2;
     target_vid_h = (std::max(min_vid_h, target_vid_h) / 2) * 2;
-    int final_w = target_vid_w + nc_w;
-    int final_h = target_vid_h + nc_h + tb_h;
+    int final_w = target_vid_w;
+    int final_h = target_vid_h;
 
     if (edge == WMSZ_LEFT || edge == WMSZ_RIGHT) {
         if (edge == WMSZ_LEFT) prc->left = prc->right - final_w;
@@ -836,8 +853,48 @@ LRESULT OutputWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) n
         return 0;
     }
 
-    case WM_NCHITTEST:
-        return ::DefWindowProcW(hwnd, msg, wp, lp);
+    case WM_MOVE:
+    case WM_WINDOWPOSCHANGED:
+        UpdateToolbarPosition();
+        break;
+
+    case WM_NCHITTEST: {
+        if (m_fullscreen) return HTCLIENT;
+        POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        RECT rc{};
+        ::GetWindowRect(hwnd, &rc);
+        int border = static_cast<int>(std::round(8.0f * GetDpiScale()));
+        if (border < 4) border = 4;
+
+        bool on_left   = (pt.x >= rc.left && pt.x < rc.left + border);
+        bool on_right  = (pt.x <= rc.right && pt.x > rc.right - border);
+        bool on_top    = (pt.y >= rc.top && pt.y < rc.top + border);
+        bool on_bottom = (pt.y <= rc.bottom && pt.y > rc.bottom - border);
+
+        if (on_top && on_left)     return HTTOPLEFT;
+        if (on_top && on_right)    return HTTOPRIGHT;
+        if (on_bottom && on_left)  return HTBOTTOMLEFT;
+        if (on_bottom && on_right) return HTBOTTOMRIGHT;
+        if (on_left)   return HTLEFT;
+        if (on_right)  return HTRIGHT;
+        if (on_top)    return HTTOP;
+        if (on_bottom) return HTBOTTOM;
+
+        return HTCLIENT;
+    }
+
+    case WM_LBUTTONDOWN: {
+        if (!m_fullscreen) {
+            ::ReleaseCapture();
+            ::SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+            return 0;
+        }
+        break;
+    }
+
+    case WM_LBUTTONDBLCLK:
+        ToggleFullscreen();
+        return 0;
 
     case WM_SYSCOMMAND:
         if ((wp & 0xFFF0) == SC_MAXIMIZE) {
@@ -848,9 +905,17 @@ LRESULT OutputWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) n
     case WM_SIZING:
         return HandleSizing(wp, reinterpret_cast<RECT*>(lp));
 
-    case WM_EXITSIZEMOVE:
+    case WM_EXITSIZEMOVE: {
         RecordUserDesiredSize();
+        if (m_on_geometry_changed && !m_fullscreen) {
+            RECT rc{};
+            ::GetWindowRect(hwnd, &rc);
+            int cur_w = rc.right - rc.left;
+            int cur_h = rc.bottom - rc.top;
+            m_on_geometry_changed(rc.left, rc.top, cur_w, cur_h, m_desired_long_edge_dip, m_user_has_custom_size);
+        }
         return 0;
+    }
 
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
@@ -891,6 +956,7 @@ struct ToolbarLayout {
     RECT fit_rc;
     RECT pin_rc;
     RECT fs_rc;
+    RECT close_rc;
     RECT prc;
     int sx0;
     int sx1;
@@ -904,12 +970,16 @@ static ToolbarLayout ComputeToolbarLayout(int w, float s) noexcept {
     int bh = static_cast<int>(26.0f * s), ty = static_cast<int>(6.0f * s);
     int gap = static_cast<int>(6.0f * s);
 
+    int close_w = static_cast<int>(28.0f * s);
     int fs_w = static_cast<int>(62.0f * s);
     int pin_w = static_cast<int>(46.0f * s);
     int fit_w = static_cast<int>(44.0f * s);
     int mute_w = static_cast<int>(64.0f * s);
 
     int cur_r = w - static_cast<int>(8.0f * s);
+    l.close_rc = RECT{ cur_r - close_w, ty, cur_r, ty + bh };
+    cur_r -= (close_w + gap);
+
     l.fs_rc = RECT{ cur_r - fs_w, ty, cur_r, ty + bh };
     cur_r -= (fs_w + gap);
 
@@ -1004,6 +1074,7 @@ static void DrawOutputToolbar(HWND hwnd, OutputWindow* win, float s,
     DrawBtn(layout.fit_rc, ui::loc::Get(ui::loc::S::Output_Fit), false, hov_btn == 3);
     DrawBtn(layout.pin_rc, ui::loc::Get(ui::loc::S::Output_AlwaysOnTop), pin, hov_btn == 4);
     DrawBtn(layout.fs_rc, ui::loc::Get(ui::loc::S::Output_Fullscreen), fs, hov_btn == 5);
+    DrawBtn(layout.close_rc, L"\x2715", false, hov_btn == 6);
 
     ::BitBlt(hdc, 0, 0, w, h, mdc, 0, 0, SRCCOPY);
     ::SelectObject(mdc, ofnt); ::DeleteObject(fnt);
@@ -1024,6 +1095,7 @@ LRESULT OutputWindow::HandleToolbarMessage(HWND hwnd, UINT msg, WPARAM wp, LPARA
         if (::PtInRect(&layout.fit_rc, pt)) return 3;
         if (::PtInRect(&layout.pin_rc, pt)) return 4;
         if (::PtInRect(&layout.fs_rc, pt)) return 5;
+        if (::PtInRect(&layout.close_rc, pt)) return 6;
         return 0;
     };
 
@@ -1076,6 +1148,10 @@ LRESULT OutputWindow::HandleToolbarMessage(HWND hwnd, UINT msg, WPARAM wp, LPARA
             ToggleAlwaysOnTop();
         } else if (hit == 5) {
             ToggleFullscreen();
+        } else if (hit == 6) {
+            Hide();
+            m_user_hidden_for_session = true;
+            if (m_on_visibility) m_on_visibility(false);
         }
         return 0;
     }

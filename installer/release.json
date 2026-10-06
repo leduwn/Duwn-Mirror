@@ -1,29 +1,28 @@
 {
   "product": "Duwn Mirror",
-  "version": "1.1.1",
-  "file_version": "1.1.1.0",
+  "version": "1.1.2",
+  "file_version": "1.1.2.0",
   "architecture": "x64",
   "upgrade_code": "A3D1E428-8902-4D9A-90A7-6831F901B94C",
   "bundle_upgrade_code": "B7E5C381-64D9-4FE2-9E92-351E842D5A10",
   "installer": {
-    "filename": "Duwn-Mirror-Setup-1.1.1-x64.exe",
-    "sha256": "F272DC519676887683A5866BBF1865C11E9FF51D0A9DAB0BE126D646DE3924D8",
-    "size": 83033942
+    "filename": "Duwn-Mirror-Setup-1.1.2-x64.exe",
+    "sha256": "BE66B0414D4281EBF1DD909E0E07AF904736CB513B97F665116336DB5196F9FC",
+    "size": 83033926
   },
   "msi": {
-    "filename": "Duwn-Mirror-1.1.1-x64.msi",
-    "sha256": "164CC56176767E3DF2C078C871BAA31056A1EC855AD4318BE6CE595A79882275",
-    "size": 63918080
+    "filename": "Duwn-Mirror-1.1.2-x64.msi",
+    "sha256": "C4C25A54D12507B5B5BF979FD0FF2E2A0A37DF532231FD0B324A523FE595BB33",
+    "size": 63901696
   },
   "binary": {
     "filename": "duwn-mirror.exe",
-    "sha256": "981150E4949D0439E69EC0ACE2B5485D6DCC9A078ADC774232D5D716241E9C83",
-    "size": 1650176
+    "sha256": "162ACBA4CD016866437B75AC5A24BF2D3FE5ED1038B1A2684937D4513E3EBE82",
+    "size": 1654272
   },
   "virtualcam": {
     "filename": "duwn-virtualcam.dll",
-    "sha256": "43B078C12B50A4375B12126458C5DEF58E693F4BC28C05D01838163DE5D57482",
+    "sha256": "3F381AFFF100779ED0D70A1142521B99900A984B9F6264DB64319DBB09EA1D5E",
     "size": 36352
   }
 }
-

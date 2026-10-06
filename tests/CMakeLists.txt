@@ -61,4 +61,27 @@ target_link_libraries(duwn-virtualcam-test
 )
 target_compile_features(duwn-virtualcam-test PRIVATE cxx_std_20)
 
+add_executable(duwn-capture-persistence-test
+    test_capture_and_persistence.cpp
+    ../src/app/OutputWindow.cpp
+    ../src/app/Settings.cpp
+)
+target_include_directories(duwn-capture-persistence-test
+    PRIVATE "${CMAKE_SOURCE_DIR}/src"
+)
+target_link_libraries(duwn-capture-persistence-test
+    PRIVATE duwn-common
+            duwn-video
+            duwn-audio
+            duwn-capture
+            duwn-ui
+            d3d11
+            dxgi
+            mfplat
+            mfuuid
+)
+target_compile_features(duwn-capture-persistence-test PRIVATE cxx_std_20)
+add_test(NAME duwn-capture-persistence-test COMMAND duwn-capture-persistence-test)
+
+
 

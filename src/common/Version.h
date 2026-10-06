@@ -7,15 +7,15 @@
 #define DUWN_PRODUCT_NAME_W      L"Duwn Mirror"
 #define DUWN_VERSION_MAJOR       1
 #define DUWN_VERSION_MINOR       1
-#define DUWN_VERSION_PATCH       1
-#define DUWN_VERSION_STRING      "1.1.1"
-#define DUWN_VERSION_STRING_W    L"1.1.1"
-#define DUWN_GIT_COMMIT_HASH     "23a8273fd25dc035858f0730c931792eb387ce1b"
-#define DUWN_GIT_COMMIT_SHORT    "23a8273"
-#define DUWN_GIT_BRANCH          "perf/receiver-latency-audit"
+#define DUWN_VERSION_PATCH       2
+#define DUWN_VERSION_STRING      "1.1.2"
+#define DUWN_VERSION_STRING_W    L"1.1.2"
+#define DUWN_GIT_COMMIT_HASH     "a14ef107f3d63df17d31bdef2b14be0939402bf7"
+#define DUWN_GIT_COMMIT_SHORT    "a14ef10"
+#define DUWN_GIT_BRANCH          "main"
 #define DUWN_GIT_IS_DIRTY        1
-#define DUWN_BUILD_TIMESTAMP     "2026-10-06 04:18:29 UTC"
-#define DUWN_BUILD_TIMESTAMP_W   L"2026-10-06 04:18:29 UTC"
+#define DUWN_BUILD_TIMESTAMP     "2026-10-06 09:36:09 UTC"
+#define DUWN_BUILD_TIMESTAMP_W   L"2026-10-06 09:36:09 UTC"
 #define DUWN_BUILD_PLATFORM      "x64"
 #define DUWN_BUILD_PLATFORM_W    L"x64"
 #define DUWN_COPYRIGHT_W         L"Copyright (c) 2026 Duwn Mirror Contributors"

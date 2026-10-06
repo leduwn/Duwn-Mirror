@@ -199,6 +199,11 @@ struct Settings {
     uint32_t output_window_w{0};
     uint32_t output_window_h{0};
     bool output_always_on_top{false};
+    float output_desired_long_edge_dip{0.0f};
+    bool output_user_has_custom_size{false};
+    uint32_t output_last_aspect_w{0};
+    uint32_t output_last_aspect_h{0};
+    uint32_t output_last_monitor_dpi{96};
 
     // Preview Window preferences
     static constexpr int32_t kDefaultWindowPos = static_cast<int32_t>(0x80000000); // Matches CW_USEDEFAULT

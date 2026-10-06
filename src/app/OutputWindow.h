@@ -19,10 +19,13 @@
 
 namespace duwn::app {
 
+struct Settings;
+
 using ResizeCallback = std::function<void(uint32_t width, uint32_t height)>;
 using VisibilityCallback = std::function<void(bool visible)>;
 using ActionCallback = std::function<void()>;
 using VolumeCallback = std::function<void(float)>;
+using GeometryChangedCallback = std::function<void(int x, int y, int w, int h, float desired_long_edge_dip, bool custom_size)>;
 
 class OutputWindow {
 public:
@@ -69,12 +72,15 @@ public:
     void SetOnVolumeChanged(VolumeCallback cb) noexcept { m_on_volume_changed = std::move(cb); }
     void SetOnFit(ActionCallback cb) noexcept { m_on_fit = std::move(cb); }
     void SetOnVisibilityChanged(VisibilityCallback cb) noexcept { m_on_visibility = std::move(cb); }
+    void SetOnGeometryChanged(GeometryChangedCallback cb) noexcept { m_on_geometry_changed = std::move(cb); }
+    void RestoreSavedGeometry(const Settings& s) noexcept;
+    void UpdateToolbarPosition() noexcept;
 
     void GetWindowRect(int& x, int& y, int& w, int& h) const noexcept;
     void SetWindowRect(int x, int y, int w, int h) noexcept;
 
     HWND Hwnd() const noexcept { return m_hwnd; }
-    HWND VideoSurfaceHwnd() const noexcept { return m_video_surface_hwnd ? m_video_surface_hwnd : m_hwnd; }
+    HWND VideoSurfaceHwnd() const noexcept { return m_hwnd; }
     HWND ToolbarHwnd() const noexcept { return m_toolbar_hwnd; }
 
     uint32_t ClientWidth() const noexcept { return m_client_w.load(std::memory_order_relaxed); }
@@ -136,6 +142,7 @@ private:
     ActionCallback        m_on_toggle_mute;
     VolumeCallback        m_on_volume_changed;
     ActionCallback        m_on_fit;
+    GeometryChangedCallback m_on_geometry_changed;
 
     bool                  m_fullscreen{false};
     bool                  m_aspect_locked{true};

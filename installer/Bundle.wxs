@@ -3,7 +3,7 @@
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Bundle Name="Duwn Mirror"
           Manufacturer="Duwn Mirror Contributors"
-          Version="1.1.1"
+          Version="1.1.2"
           UpgradeCode="B7E5C381-64D9-4FE2-9E92-351E842D5A10"
           IconSourceFile="assets\app_icon.ico">
 

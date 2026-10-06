@@ -260,6 +260,15 @@ Settings Settings::Load() noexcept {
     s.output_window_h         = static_cast<uint32_t>(std::max(0, ParseInt(FindJsonKeyValue(json, "output_window_h"), static_cast<int>(s.output_window_h))));
     s.output_always_on_top    = ParseBool(FindJsonKeyValue(json, "output_always_on_top"),    s.output_always_on_top);
 
+    auto out_dip_val = FindJsonKeyValue(json, "output_desired_long_edge_dip");
+    if (!out_dip_val.empty()) {
+        try { s.output_desired_long_edge_dip = std::stof(std::string(out_dip_val)); } catch (...) {}
+    }
+    s.output_user_has_custom_size = ParseBool(FindJsonKeyValue(json, "output_user_has_custom_size"), s.output_user_has_custom_size);
+    s.output_last_aspect_w        = static_cast<uint32_t>(std::max(0, ParseInt(FindJsonKeyValue(json, "output_last_aspect_w"), static_cast<int>(s.output_last_aspect_w))));
+    s.output_last_aspect_h        = static_cast<uint32_t>(std::max(0, ParseInt(FindJsonKeyValue(json, "output_last_aspect_h"), static_cast<int>(s.output_last_aspect_h))));
+    s.output_last_monitor_dpi     = static_cast<uint32_t>(std::clamp(ParseInt(FindJsonKeyValue(json, "output_last_monitor_dpi"), 96), 48, 480));
+
     uint32_t raw_schema = static_cast<uint32_t>(ParseInt(FindJsonKeyValue(json, "schema_version"), 0));
 
     int raw_renderer = ParseInt(FindJsonKeyValue(json, "renderer_mode"), 0);
@@ -419,145 +428,164 @@ void Settings::Save() const noexcept {
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);
 
-    std::ofstream file(path, std::ios::trunc);
-    if (!file.is_open()) {
-        DUWN_LOG_ERRORF("Settings", "Failed to open '{}' for writing", WideToUtf8(path.wstring()));
-        return;
+    std::filesystem::path temp_path = path;
+    temp_path += L".tmp";
+    {
+        std::ofstream file(temp_path, std::ios::trunc);
+        if (!file.is_open()) {
+            DUWN_LOG_ERRORF("Settings", "Failed to open '{}' for writing", WideToUtf8(temp_path.wstring()));
+            return;
+        }
+
+        std::string json = std::format(
+            "{{\n"
+            "  \"schema_version\": {},\n"
+            "  \"window_preferences\": {{\n"
+            "    \"x\": {},\n"
+            "    \"y\": {},\n"
+            "    \"width\": {},\n"
+            "    \"height\": {},\n"
+            "    \"maximized\": {}\n"
+            "  }},\n"
+            "  \"aspect_ratio_locked\": {},\n"
+            "  \"audio_muted\": {},\n"
+            "  \"always_on_top\": {},\n"
+            "  \"default_receiver_name\": \"{}\",\n"
+            "  \"gpu_decode\": {},\n"
+            "  \"vsync\": {},\n"
+            "  \"debug_log\": {},\n"
+            "  \"streaming_mode\": {},\n"
+            "  \"custom_video_freshness_ms\": {},\n"
+            "  \"custom_video_queue_frames\": {},\n"
+            "  \"connection_mode\": {},\n"
+            "  \"remember_selected_mode\": {},\n"
+            "  \"default_connection_mode\": {},\n"
+            "  \"renderer_mode\": {},\n"
+            "  \"performance_profile\": {},\n"
+            "  \"receiver_quality\": {},\n"
+            "  \"receiver_width\": {},\n"
+            "  \"receiver_height\": {},\n"
+            "  \"receiver_fps\": {},\n"
+            "  \"output_quality\": {},\n"
+            "  \"capture_canvas\": {},\n"
+            "  \"output_width\": {},\n"
+            "  \"output_height\": {},\n"
+            "  \"match_source\": {},\n"
+            "  \"aspect_mode\": {},\n"
+            "  \"pixel_perfect\": {},\n"
+            "  \"scaling_quality\": {},\n"
+            "  \"brightness\": {},\n"
+            "  \"contrast\": {},\n"
+            "  \"saturation\": {},\n"
+            "  \"hue\": {},\n"
+            "  \"sharpness\": {},\n"
+            "  \"color_preset\": {},\n"
+            "  \"color_range\": {},\n"
+            "  \"color_matrix\": {},\n"
+            "  \"language\": \"{}\",\n"
+            "  \"start_on_boot\": {},\n"
+            "  \"start_minimized\": {},\n"
+            "  \"minimize_to_tray\": {},\n"
+            "  \"remember_window_pos\": {},\n"
+            "  \"allow_public_networks\": {},\n"
+            "  \"auto_open_output_window\": {},\n"
+            "  \"output_start_fullscreen\": {},\n"
+            "  \"preferred_monitor\": {},\n"
+            "  \"hide_cursor\": {},\n"
+            "  \"remember_output_pos\": {},\n"
+            "  \"show_output_toolbar\": {},\n"
+            "  \"output_x\": {},\n"
+            "  \"output_y\": {},\n"
+            "  \"output_window_w\": {},\n"
+            "  \"output_window_h\": {},\n"
+            "  \"output_always_on_top\": {},\n"
+            "  \"output_desired_long_edge_dip\": {:.2f},\n"
+            "  \"output_user_has_custom_size\": {},\n"
+            "  \"output_last_aspect_w\": {},\n"
+            "  \"output_last_aspect_h\": {},\n"
+            "  \"output_last_monitor_dpi\": {},\n"
+            "  \"preview_x\": {},\n"
+            "  \"preview_y\": {},\n"
+            "  \"preview_width\": {},\n"
+            "  \"preview_height\": {},\n"
+            "  \"preview_user_resized\": {},\n"
+            "  \"show_preview_on_connect\": {},\n"
+            "  \"hide_preview_on_disconnect\": {},\n"
+            "  \"preview_always_on_top\": {},\n"
+            "  \"first_run_completed\": {},\n"
+            "  \"unclean_shutdown\": {},\n"
+            "  \"last_crash_file\": \"{}\"\n"
+            "}}\n",
+            schema_version,
+            window_preferences.x,
+            window_preferences.y,
+            window_preferences.width,
+            window_preferences.height,
+            window_preferences.maximized ? "true" : "false",
+            aspect_ratio_locked ? "true" : "false",
+            audio_muted ? "true" : "false",
+            always_on_top ? "true" : "false",
+            WideToUtf8(default_receiver_name.empty() ? airplay_name : default_receiver_name),
+            gpu_decode ? "true" : "false",
+            vsync ? "true" : "false",
+            debug_log ? "true" : "false",
+            static_cast<int>(streaming_mode), custom_video_freshness_ms, custom_video_queue_frames,
+            static_cast<int>(connection_mode),
+            remember_selected_mode ? "true" : "false",
+            static_cast<int>(default_connection_mode),
+            static_cast<int>(renderer_mode), static_cast<int>(performance_profile),
+            static_cast<int>(receiver_quality),
+            receiver_width, receiver_height, receiver_fps,
+            static_cast<int>(output_quality), static_cast<int>(capture_canvas),
+            output_width, output_height, match_source ? "true" : "false",
+            static_cast<int>(aspect_mode),
+            static_cast<int>(pixel_perfect), static_cast<int>(scaling_quality),
+            brightness, contrast, saturation, hue, sharpness,
+            static_cast<int>(color_preset),
+            static_cast<int>(color_range), static_cast<int>(color_matrix),
+            WideToUtf8(language),
+            start_on_boot           ? "true" : "false",
+            start_minimized         ? "true" : "false",
+            minimize_to_tray        ? "true" : "false",
+            remember_window_pos     ? "true" : "false",
+            allow_public_networks   ? "true" : "false",
+            auto_open_output_window ? "true" : "false",
+            output_start_fullscreen ? "true" : "false",
+            preferred_monitor,
+            hide_cursor             ? "true" : "false",
+            remember_output_pos     ? "true" : "false",
+            show_output_toolbar     ? "true" : "false",
+            output_x,
+            output_y,
+            output_window_w,
+            output_window_h,
+            output_always_on_top    ? "true" : "false",
+            output_desired_long_edge_dip,
+            output_user_has_custom_size ? "true" : "false",
+            output_last_aspect_w,
+            output_last_aspect_h,
+            output_last_monitor_dpi,
+            preview_x,
+            preview_y,
+            preview_width,
+            preview_height,
+            preview_user_resized    ? "true" : "false",
+            show_preview_on_connect ? "true" : "false",
+            hide_preview_on_disconnect ? "true" : "false",
+            preview_always_on_top   ? "true" : "false",
+            first_run_completed     ? "true" : "false",
+            unclean_shutdown        ? "true" : "false",
+            WideToUtf8(last_crash_file)
+        );
+
+        file << json;
+        file.flush();
     }
 
-    std::string json = std::format(
-        "{{\n"
-        "  \"schema_version\": {},\n"
-        "  \"window_preferences\": {{\n"
-        "    \"x\": {},\n"
-        "    \"y\": {},\n"
-        "    \"width\": {},\n"
-        "    \"height\": {},\n"
-        "    \"maximized\": {}\n"
-        "  }},\n"
-        "  \"aspect_ratio_locked\": {},\n"
-        "  \"audio_muted\": {},\n"
-        "  \"always_on_top\": {},\n"
-        "  \"default_receiver_name\": \"{}\",\n"
-        "  \"gpu_decode\": {},\n"
-        "  \"vsync\": {},\n"
-        "  \"debug_log\": {},\n"
-        "  \"streaming_mode\": {},\n"
-        "  \"custom_video_freshness_ms\": {},\n"
-        "  \"custom_video_queue_frames\": {},\n"
-        "  \"connection_mode\": {},\n"
-        "  \"remember_selected_mode\": {},\n"
-        "  \"default_connection_mode\": {},\n"
-        "  \"renderer_mode\": {},\n"
-        "  \"performance_profile\": {},\n"
-        "  \"receiver_quality\": {},\n"
-        "  \"receiver_width\": {},\n"
-        "  \"receiver_height\": {},\n"
-        "  \"receiver_fps\": {},\n"
-        "  \"output_quality\": {},\n"
-        "  \"capture_canvas\": {},\n"
-        "  \"output_width\": {},\n"
-        "  \"output_height\": {},\n"
-        "  \"match_source\": {},\n"
-        "  \"aspect_mode\": {},\n"
-        "  \"pixel_perfect\": {},\n"
-        "  \"scaling_quality\": {},\n"
-        "  \"brightness\": {},\n"
-        "  \"contrast\": {},\n"
-        "  \"saturation\": {},\n"
-        "  \"hue\": {},\n"
-        "  \"sharpness\": {},\n"
-        "  \"color_preset\": {},\n"
-        "  \"color_range\": {},\n"
-        "  \"color_matrix\": {},\n"
-        "  \"language\": \"{}\",\n"
-        "  \"start_on_boot\": {},\n"
-        "  \"start_minimized\": {},\n"
-        "  \"minimize_to_tray\": {},\n"
-        "  \"remember_window_pos\": {},\n"
-        "  \"allow_public_networks\": {},\n"
-        "  \"auto_open_output_window\": {},\n"
-        "  \"output_start_fullscreen\": {},\n"
-        "  \"preferred_monitor\": {},\n"
-        "  \"hide_cursor\": {},\n"
-        "  \"remember_output_pos\": {},\n"
-        "  \"show_output_toolbar\": {},\n"
-        "  \"output_x\": {},\n"
-        "  \"output_y\": {},\n"
-        "  \"output_window_w\": {},\n"
-        "  \"output_window_h\": {},\n"
-        "  \"output_always_on_top\": {},\n"
-        "  \"preview_x\": {},\n"
-        "  \"preview_y\": {},\n"
-        "  \"preview_width\": {},\n"
-        "  \"preview_height\": {},\n"
-        "  \"preview_user_resized\": {},\n"
-        "  \"show_preview_on_connect\": {},\n"
-        "  \"hide_preview_on_disconnect\": {},\n"
-        "  \"preview_always_on_top\": {},\n"
-        "  \"first_run_completed\": {},\n"
-        "  \"unclean_shutdown\": {},\n"
-        "  \"last_crash_file\": \"{}\"\n"
-        "}}\n",
-        schema_version,
-        window_preferences.x,
-        window_preferences.y,
-        window_preferences.width,
-        window_preferences.height,
-        window_preferences.maximized ? "true" : "false",
-        aspect_ratio_locked ? "true" : "false",
-        audio_muted ? "true" : "false",
-        always_on_top ? "true" : "false",
-        WideToUtf8(default_receiver_name.empty() ? airplay_name : default_receiver_name),
-        gpu_decode ? "true" : "false",
-        vsync ? "true" : "false",
-        debug_log ? "true" : "false",
-        static_cast<int>(streaming_mode), custom_video_freshness_ms, custom_video_queue_frames,
-        static_cast<int>(connection_mode),
-        remember_selected_mode ? "true" : "false",
-        static_cast<int>(default_connection_mode),
-        static_cast<int>(renderer_mode), static_cast<int>(performance_profile),
-        static_cast<int>(receiver_quality),
-        receiver_width, receiver_height, receiver_fps,
-        static_cast<int>(output_quality), static_cast<int>(capture_canvas),
-        output_width, output_height, match_source ? "true" : "false",
-        static_cast<int>(aspect_mode),
-        static_cast<int>(pixel_perfect), static_cast<int>(scaling_quality),
-        brightness, contrast, saturation, hue, sharpness,
-        static_cast<int>(color_preset),
-        static_cast<int>(color_range), static_cast<int>(color_matrix),
-        WideToUtf8(language),
-        start_on_boot           ? "true" : "false",
-        start_minimized         ? "true" : "false",
-        minimize_to_tray        ? "true" : "false",
-        remember_window_pos     ? "true" : "false",
-        allow_public_networks   ? "true" : "false",
-        auto_open_output_window ? "true" : "false",
-        output_start_fullscreen ? "true" : "false",
-        preferred_monitor,
-        hide_cursor             ? "true" : "false",
-        remember_output_pos     ? "true" : "false",
-        show_output_toolbar     ? "true" : "false",
-        output_x,
-        output_y,
-        output_window_w,
-        output_window_h,
-        output_always_on_top    ? "true" : "false",
-        preview_x,
-        preview_y,
-        preview_width,
-        preview_height,
-        preview_user_resized    ? "true" : "false",
-        show_preview_on_connect ? "true" : "false",
-        hide_preview_on_disconnect ? "true" : "false",
-        preview_always_on_top   ? "true" : "false",
-        first_run_completed     ? "true" : "false",
-        unclean_shutdown        ? "true" : "false",
-        WideToUtf8(last_crash_file)
-    );
-
-    file << json;
-    file.flush();
+    if (!::MoveFileExW(temp_path.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        std::error_code rename_ec;
+        std::filesystem::rename(temp_path, path, rename_ec);
+    }
     DUWN_LOG_INFOF("Settings", "Saved settings to '{}'", WideToUtf8(path.wstring()));
 
     // Sync start_on_boot to HKCU Run registry key

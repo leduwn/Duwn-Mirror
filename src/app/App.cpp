@@ -1157,7 +1157,7 @@ bool App::Init() noexcept {
 
     if (!m_output_window->Create(kInitW, kInitH,
             [this](uint32_t w, uint32_t h) {
-                if (m_preview_renderer) m_preview_renderer->SignalResize(w, h);
+                if (m_renderer) m_renderer->SignalResize(w, h);
             })) {
         DUWN_LOG_ERROR("App", "OutputWindow creation failed");
         return false;
@@ -1174,38 +1174,44 @@ bool App::Init() noexcept {
             ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
         }
     });
+    m_output_window->SetOnGeometryChanged([this](int x, int y, int w, int h, float desired_dip, bool custom_size) {
+        m_settings.output_x = x;
+        m_settings.output_y = y;
+        m_settings.output_window_w = static_cast<uint32_t>(w);
+        m_settings.output_window_h = static_cast<uint32_t>(h);
+        m_settings.output_desired_long_edge_dip = desired_dip;
+        m_settings.output_user_has_custom_size = custom_size;
+        m_settings.output_last_aspect_w = m_output_window->VideoWidth();
+        m_settings.output_last_aspect_h = m_output_window->VideoHeight();
+        m_settings.Save();
+    });
 
     if (m_window) {
         m_window->State().output_window_visible = m_output_window->IsVisible();
         m_window->State().show_output_toolbar   = m_settings.show_output_toolbar;
     }
 
-    if (m_settings.output_x != Settings::kDefaultWindowPos &&
-        m_settings.output_y != Settings::kDefaultWindowPos &&
-        m_settings.output_window_w > 0 && m_settings.output_window_h > 0) {
-        m_output_window->SetWindowRect(m_settings.output_x, m_settings.output_y,
-                                       m_settings.output_window_w, m_settings.output_window_h);
-    }
+    // Restore saved geometry before creating renderer
+    m_output_window->RestoreSavedGeometry(m_settings);
 
-    // Export renderer — attached to dedicated offscreen capture surface at configured resolution
-    m_capture_host_hwnd = ::CreateWindowExW(
-        WS_EX_TOOLWINDOW, L"Static", L"DuwnMirrorCaptureHost", WS_POPUP | WS_VISIBLE,
-        -32000, -32000, kInitW, kInitH, nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
-    if (m_capture_host_hwnd) {
-        ::ShowWindow(m_capture_host_hwnd, SW_SHOWNA);
+    // Primary renderer — attached directly to standalone OutputWindow
+    uint32_t init_w = m_output_window->VideoSurfaceWidth();
+    uint32_t init_h = m_output_window->VideoSurfaceHeight();
+    if (init_w == 0 || init_h == 0) {
+        init_w = kInitW;
+        init_h = kInitH;
     }
 
     if (m_d3d->IsHardware())
-        m_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, m_capture_host_hwnd);
+        m_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, m_output_window->Hwnd());
     else
-        m_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, m_capture_host_hwnd);
+        m_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, m_output_window->Hwnd());
 
-    if (!m_renderer->Init(kInitW, kInitH)) {
+    m_renderer->SetNonBlocking(true);
+    if (!m_renderer->Init(init_w, init_h)) {
         DUWN_LOG_ERROR("App", "VideoRenderer init failed");
         return false;
     }
-    m_renderer->SetNonBlocking(true);
-
 
     m_renderer->SetAspectRatioMode(GetEffectiveAspectRatioMode());
     m_renderer->SetPixelPerfect(static_cast<int>(m_settings.pixel_perfect));
@@ -1215,7 +1221,7 @@ bool App::Init() noexcept {
     const int initial_color[] = {m_settings.brightness, m_settings.contrast, m_settings.saturation,
                                  m_settings.hue, m_settings.sharpness};
     for (size_t i = 0; i < 5; ++i) m_renderer->SetColorControl(i, initial_color[i]);
-    m_renderer->LogSwapChainConfig("ExportRenderer");
+    m_renderer->LogSwapChainConfig("OutputWindow");
 
     m_active_renderer.store(m_d3d->IsHardware() ? 1 : 2, std::memory_order_relaxed);
     m_active_filter_caps.store(m_renderer->FilterCaps(), std::memory_order_relaxed);
@@ -1228,34 +1234,15 @@ bool App::Init() noexcept {
     }
 
     m_scheduler->SetDxgiWaitableProvider([this]() -> void* {
-        if (m_output_window && m_output_window->IsVisible() && m_preview_renderer) {
-            HANDLE h = m_preview_renderer->GetFrameLatencyWaitableObject();
-            if (h) return h;
-        }
         return m_renderer ? m_renderer->GetFrameLatencyWaitableObject() : nullptr;
     });
-
-    // Local presentation renderer — attached to child video surface of OutputWindow
-    if (m_d3d->IsHardware())
-        m_preview_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, m_output_window->VideoSurfaceHwnd());
-    else
-        m_preview_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, m_output_window->VideoSurfaceHwnd());
-
-    m_preview_renderer->SetNonBlocking(true);
-    m_preview_renderer->Init(m_output_window->VideoSurfaceWidth(), m_output_window->VideoSurfaceHeight());
-    m_preview_renderer->SetAspectRatioMode(GetEffectiveAspectRatioMode());
-    m_preview_renderer->SetPixelPerfect(static_cast<int>(m_settings.pixel_perfect));
-    m_preview_renderer->SetScalingQuality(static_cast<int>(m_settings.scaling_quality));
-    m_preview_renderer->SetColorSpace(static_cast<int>(m_settings.color_range), static_cast<int>(m_settings.color_matrix));
-    for (size_t i = 0; i < 5; ++i) m_preview_renderer->SetColorControl(i, initial_color[i]);
-    m_preview_renderer->LogSwapChainConfig("OutputWindow");
 
     // Export server & shared texture initialization
     m_capture_server = std::make_unique<capture::CaptureServer>();
     m_capture_server->Start(L"DUWN_MIRROR_CAPTURE");
     m_shared_texture = std::make_unique<capture::SharedTexture>();
     if (m_d3d->Device()) {
-        m_shared_texture->Create(m_d3d->Device(), kInitW, kInitH);
+        m_shared_texture->Create(m_d3d->Device(), init_w, init_h);
     }
 
     m_preview_renderer->LogSwapChainConfig("PreviewWindow");
@@ -2116,28 +2103,23 @@ bool App::RecreateVideoPipeline() noexcept {
 
     m_decoder_ready.store(true, std::memory_order_release);
 
-    const uint32_t exp_w = m_settings.output_width;
-    const uint32_t exp_h = m_settings.output_height;
-
-    if (!m_capture_host_hwnd) {
-        m_capture_host_hwnd = ::CreateWindowExW(
-            WS_EX_TOOLWINDOW, L"Static", L"DuwnMirrorCaptureHost", WS_POPUP | WS_VISIBLE,
-            -32000, -32000, exp_w, exp_h, nullptr, nullptr, ::GetModuleHandleW(nullptr), nullptr);
-        if (m_capture_host_hwnd) {
-            ::ShowWindow(m_capture_host_hwnd, SW_SHOWNA);
-        }
+    uint32_t out_w = m_output_window ? m_output_window->VideoSurfaceWidth() : m_settings.output_width;
+    uint32_t out_h = m_output_window ? m_output_window->VideoSurfaceHeight() : m_settings.output_height;
+    if (out_w == 0 || out_h == 0) {
+        out_w = m_settings.output_width;
+        out_h = m_settings.output_height;
     }
 
+    HWND out_hwnd = m_output_window ? m_output_window->Hwnd() : nullptr;
     if (m_d3d->IsHardware())
-        m_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, m_capture_host_hwnd);
+        m_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, out_hwnd);
     else
-        m_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, m_capture_host_hwnd);
+        m_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, out_hwnd);
 
-    if (!m_renderer->Init(exp_w, exp_h)) {
+    m_renderer->SetNonBlocking(true);
+    if (!m_renderer->Init(out_w, out_h)) {
         m_window->SetStatusText(L"Renderer unavailable. Choose Auto or Compatibility.");
         return false;
-    m_renderer->SetNonBlocking(true);
-
     }
 
     m_active_renderer.store(m_d3d->IsHardware() ? 1 : 2, std::memory_order_relaxed);
@@ -2151,28 +2133,6 @@ bool App::RecreateVideoPipeline() noexcept {
     const int values[] = {m_settings.brightness, m_settings.contrast, m_settings.saturation,
                           m_settings.hue, m_settings.sharpness};
     for (size_t i = 0; i < 5; ++i) m_renderer->SetColorControl(i, values[i]);
-
-    if (m_output_window && m_output_window->VideoSurfaceHwnd()) {
-        HWND prev_hwnd = m_output_window->VideoSurfaceHwnd();
-        const uint32_t pw = m_output_window->VideoSurfaceWidth() > 0 ? m_output_window->VideoSurfaceWidth() : 640;
-        const uint32_t ph = m_output_window->VideoSurfaceHeight() > 0 ? m_output_window->VideoSurfaceHeight() : 360;
-
-        if (m_d3d->IsHardware())
-            m_preview_renderer = std::make_unique<video::VideoRenderer>(*m_d3d, prev_hwnd);
-        else
-            m_preview_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, prev_hwnd);
-
-        m_preview_renderer->SetNonBlocking(true);
-        if (m_preview_renderer->Init(pw, ph)) {
-            m_preview_renderer->SetAspectRatioMode(GetEffectiveAspectRatioMode());
-            m_preview_renderer->SetPixelPerfect(static_cast<int>(m_settings.pixel_perfect));
-            m_preview_renderer->SetScalingQuality(static_cast<int>(m_settings.scaling_quality));
-            m_preview_renderer->SetColorSpace(static_cast<int>(m_settings.color_range), static_cast<int>(m_settings.color_matrix));
-            for (size_t i = 0; i < 5; ++i) m_preview_renderer->SetColorControl(i, values[i]);
-        } else {
-            DUWN_LOG_WARN("App", "Output VideoRenderer init failed during pipeline recreation");
-        }
-    }
 
     m_scheduler->Start();
 
@@ -3502,10 +3462,16 @@ void App::Shutdown() noexcept {
     if (m_output_window) {
         int ox = 0, oy = 0, ow = 0, oh = 0;
         m_output_window->GetWindowRect(ox, oy, ow, oh);
-        m_settings.output_x = ox;
-        m_settings.output_y = oy;
-        m_settings.output_window_w = ow;
-        m_settings.output_window_h = oh;
+        if (ox != -32000 && oy != -32000 && ow > 0 && oh > 0) {
+            m_settings.output_x = ox;
+            m_settings.output_y = oy;
+            m_settings.output_window_w = static_cast<uint32_t>(ow);
+            m_settings.output_window_h = static_cast<uint32_t>(oh);
+        }
+        m_settings.output_desired_long_edge_dip = m_output_window->DesiredLongEdgeDip();
+        m_settings.output_user_has_custom_size = m_output_window->HasCustomSize();
+        m_settings.output_last_aspect_w = m_output_window->VideoWidth();
+        m_settings.output_last_aspect_h = m_output_window->VideoHeight();
         m_settings.output_always_on_top = m_output_window->IsAlwaysOnTop();
         m_settings.show_output_toolbar = m_output_window->IsToolbarVisible();
         m_settings.aspect_ratio_locked = m_output_window->IsAspectLocked();

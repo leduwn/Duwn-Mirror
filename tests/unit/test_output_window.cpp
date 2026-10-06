@@ -699,3 +699,152 @@ DUWN_TEST(OutputWindow_DismissCrashBannerLifecycleInvariant) {
     DUWN_ASSERT(s.unclean_shutdown == false);
 }
 
+// ---------------------------------------------------------------------------
+// 21. Settings: Persistent Output Geometry Serialization Roundtrip
+// ---------------------------------------------------------------------------
+DUWN_TEST(OutputWindow_SettingsPersistenceSerializationRoundtrip) {
+    Settings original{};
+    original.output_x = -1920; // Secondary monitor left of primary
+    original.output_y = 150;
+    original.output_window_w = 640;
+    original.output_window_h = 1386;
+    original.output_desired_long_edge_dip = 1108.8f;
+    original.output_user_has_custom_size = true;
+    original.output_last_aspect_w = 1184;
+    original.output_last_aspect_h = 2560;
+    original.output_last_monitor_dpi = 120; // 125% DPI
+
+    // Save to isolated settings
+    original.Save();
+
+    // Load back
+    Settings loaded = Settings::Load();
+    DUWN_ASSERT(loaded.output_x == original.output_x);
+    DUWN_ASSERT(loaded.output_y == original.output_y);
+    DUWN_ASSERT(loaded.output_window_w == original.output_window_w);
+    DUWN_ASSERT(loaded.output_window_h == original.output_window_h);
+    DUWN_ASSERT(std::abs(loaded.output_desired_long_edge_dip - original.output_desired_long_edge_dip) < 0.01f);
+    DUWN_ASSERT(loaded.output_user_has_custom_size == original.output_user_has_custom_size);
+    DUWN_ASSERT(loaded.output_last_aspect_w == original.output_last_aspect_w);
+    DUWN_ASSERT(loaded.output_last_aspect_h == original.output_last_aspect_h);
+    DUWN_ASSERT(loaded.output_last_monitor_dpi == original.output_last_monitor_dpi);
+}
+
+// ---------------------------------------------------------------------------
+// 22. Pure 1:1 Borderless Aspect-Ratio Sizing (nc_w=0, nc_h=0, tb_h=0)
+// ---------------------------------------------------------------------------
+DUWN_TEST(OutputWindow_PureBorderlessAspectRatioSizing) {
+    const uint32_t src_w = 1184;
+    const uint32_t src_h = 2560;
+    const double aspect = static_cast<double>(src_w) / static_cast<double>(src_h);
+
+    // In borderless architecture, window rect equals video rect 1:1
+    auto simulate_borderless_sizing = [&](WPARAM edge, RECT in_rc) -> RECT {
+        int prop_w = in_rc.right - in_rc.left;
+        int prop_h = in_rc.bottom - in_rc.top;
+
+        int target_w = 0, target_h = 0;
+        if (edge == WMSZ_LEFT || edge == WMSZ_RIGHT) {
+            target_w = std::clamp(prop_w, 120, 4000);
+            target_h = static_cast<int>(std::round(target_w / aspect));
+        } else if (edge == WMSZ_TOP || edge == WMSZ_BOTTOM) {
+            target_h = std::clamp(prop_h, 120, 4000);
+            target_w = static_cast<int>(std::round(target_h * aspect));
+        } else {
+            if (static_cast<double>(prop_w) / aspect >= prop_h) {
+                target_w = std::clamp(prop_w, 120, 4000);
+                target_h = static_cast<int>(std::round(target_w / aspect));
+            } else {
+                target_h = std::clamp(prop_h, 120, 4000);
+                target_w = static_cast<int>(std::round(target_h * aspect));
+            }
+        }
+        target_w = (target_w / 2) * 2;
+        target_h = (target_h / 2) * 2;
+
+        RECT out = in_rc;
+        if (edge == WMSZ_RIGHT) {
+            out.right = out.left + target_w;
+            int cy = (out.top + out.bottom) / 2;
+            out.top = cy - target_h / 2;
+            out.bottom = out.top + target_h;
+        } else if (edge == WMSZ_BOTTOM) {
+            out.bottom = out.top + target_h;
+            int cx = (out.left + out.right) / 2;
+            out.left = cx - target_w / 2;
+            out.right = out.left + target_w;
+        } else if (edge == WMSZ_BOTTOMRIGHT) {
+            out.right = out.left + target_w;
+            out.bottom = out.top + target_h;
+        }
+        return out;
+    };
+
+    RECT init_rc{200, 200, 200 + 400, 200 + static_cast<int>(std::round(400.0 / aspect))};
+
+    // Drag Right edge: window width and height stay exactly proportional without chrome offsets
+    RECT r1 = simulate_borderless_sizing(WMSZ_RIGHT, {init_rc.left, init_rc.top, init_rc.left + 550, init_rc.bottom});
+    int w1 = r1.right - r1.left;
+    int h1 = r1.bottom - r1.top;
+    RECT fit1 = ComputeFitDestRect(src_w, src_h, w1, h1);
+    DUWN_ASSERT(fit1.left == 0 && fit1.top == 0);
+    DUWN_ASSERT(fit1.right == w1 && fit1.bottom == h1);
+
+    // Drag Bottom edge
+    RECT r2 = simulate_borderless_sizing(WMSZ_BOTTOM, {init_rc.left, init_rc.top, init_rc.right, init_rc.top + 1000});
+    int w2 = r2.right - r2.left;
+    int h2 = r2.bottom - r2.top;
+    RECT fit2 = ComputeFitDestRect(src_w, src_h, w2, h2);
+    DUWN_ASSERT(fit2.left == 0 && fit2.top == 0);
+    DUWN_ASSERT(fit2.right == w2 && fit2.bottom == h2);
+
+    // Drag Bottom-Right corner
+    RECT r3 = simulate_borderless_sizing(WMSZ_BOTTOMRIGHT, {init_rc.left, init_rc.top, init_rc.left + 650, init_rc.top + 1300});
+    int w3 = r3.right - r3.left;
+    int h3 = r3.bottom - r3.top;
+    RECT fit3 = ComputeFitDestRect(src_w, src_h, w3, h3);
+    DUWN_ASSERT(fit3.left == 0 && fit3.top == 0);
+    DUWN_ASSERT(fit3.right == w3 && fit3.bottom == h3);
+}
+
+// ---------------------------------------------------------------------------
+// 23. Borderless Hit-Test Margins and Drag Classification
+// ---------------------------------------------------------------------------
+DUWN_TEST(OutputWindow_BorderlessHitTestMargins) {
+    auto hit_test = [](RECT rc, POINT pt, int border) -> LRESULT {
+        bool on_left   = (pt.x >= rc.left && pt.x < rc.left + border);
+        bool on_right  = (pt.x <= rc.right && pt.x > rc.right - border);
+        bool on_top    = (pt.y >= rc.top && pt.y < rc.top + border);
+        bool on_bottom = (pt.y <= rc.bottom && pt.y > rc.bottom - border);
+
+        if (on_top && on_left)     return HTTOPLEFT;
+        if (on_top && on_right)    return HTTOPRIGHT;
+        if (on_bottom && on_left)  return HTBOTTOMLEFT;
+        if (on_bottom && on_right) return HTBOTTOMRIGHT;
+        if (on_left)   return HTLEFT;
+        if (on_right)  return HTRIGHT;
+        if (on_top)    return HTTOP;
+        if (on_bottom) return HTBOTTOM;
+        return HTCLIENT;
+    };
+
+    RECT rc{100, 100, 600, 900};
+    int border = 8;
+
+    // Corner hits
+    DUWN_ASSERT(hit_test(rc, {102, 102}, border) == HTTOPLEFT);
+    DUWN_ASSERT(hit_test(rc, {598, 102}, border) == HTTOPRIGHT);
+    DUWN_ASSERT(hit_test(rc, {102, 898}, border) == HTBOTTOMLEFT);
+    DUWN_ASSERT(hit_test(rc, {598, 898}, border) == HTBOTTOMRIGHT);
+
+    // Edge hits
+    DUWN_ASSERT(hit_test(rc, {102, 500}, border) == HTLEFT);
+    DUWN_ASSERT(hit_test(rc, {598, 500}, border) == HTRIGHT);
+    DUWN_ASSERT(hit_test(rc, {350, 102}, border) == HTTOP);
+    DUWN_ASSERT(hit_test(rc, {350, 898}, border) == HTBOTTOM);
+
+    // Center client hit (draggable via WM_LBUTTONDOWN)
+    DUWN_ASSERT(hit_test(rc, {350, 500}, border) == HTCLIENT);
+}
+
+

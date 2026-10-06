@@ -3,7 +3,7 @@
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package Name="Duwn Mirror"
            Manufacturer="Duwn Mirror Contributors"
-           Version="1.1.1"
+           Version="1.1.2"
            UpgradeCode="A3D1E428-8902-4D9A-90A7-6831F901B94C"
            Scope="perMachine">
 
