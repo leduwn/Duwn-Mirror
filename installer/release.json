@@ -8,12 +8,12 @@
     "legacy_msi_upgrade_code":  "A3D1E428-8902-4D9A-90A7-6831F901B94C",
     "installer":  {
                       "filename":  "Duwn-Mirror-Setup-1.1.3-x64.exe",
-                      "sha256":  "1430B8CDA19E10ECCBFAFC988C1C64BD9885A475B8A286D54CF3ABFF8D35AE26",
-                      "size":  69750533
+                      "sha256":  "EC388C018F674BEDFFB3C6A5D2E5C34E9C7B3355B7DFE2DB62A7AEB619786D55",
+                      "size":  69751159
                   },
     "binary":  {
                    "filename":  "duwn-mirror.exe",
-                   "sha256":  "34CACA20569F29C0035148E3FB68E0CFE7CD02E897F52DFBDF570D51A223F7F8",
+                   "sha256":  "634F58A7946B4172D3A767897342FA1931E7418252A650D998CD034EAB763E0A",
                    "size":  1654272
                },
     "virtualcam":  {

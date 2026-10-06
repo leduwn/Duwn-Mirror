@@ -10,12 +10,12 @@
 #define DUWN_VERSION_PATCH       3
 #define DUWN_VERSION_STRING      "1.1.3"
 #define DUWN_VERSION_STRING_W    L"1.1.3"
-#define DUWN_GIT_COMMIT_HASH     "3aa762b2be9a921aeaa57e04abffcfbcf1981386"
-#define DUWN_GIT_COMMIT_SHORT    "3aa762b"
+#define DUWN_GIT_COMMIT_HASH     "7ee9df7a98fea5262b5c5290582cc91b006de15a"
+#define DUWN_GIT_COMMIT_SHORT    "7ee9df7"
 #define DUWN_GIT_BRANCH          "main"
 #define DUWN_GIT_IS_DIRTY        1
-#define DUWN_BUILD_TIMESTAMP     "2026-10-06 12:26:27 UTC"
-#define DUWN_BUILD_TIMESTAMP_W   L"2026-10-06 12:26:27 UTC"
+#define DUWN_BUILD_TIMESTAMP     "2026-10-06 12:33:38 UTC"
+#define DUWN_BUILD_TIMESTAMP_W   L"2026-10-06 12:33:38 UTC"
 #define DUWN_BUILD_PLATFORM      "x64"
 #define DUWN_BUILD_PLATFORM_W    L"x64"
 #define DUWN_COPYRIGHT_W         L"Copyright (c) 2026 Duwn Mirror Contributors"
