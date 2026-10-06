@@ -932,7 +932,7 @@ void MainWindowView::RenderHeader(const UiState& state, float width) noexcept {
     D2D1_RECT_F status_pill = D2D1::RectF(right_margin - 250.0f, 17.0f, right_margin - 96.0f, 43.0f);
     D2D1_COLOR_F status_color = colors::StatusBlue;
     std::wstring_view status_text = loc::Get(loc::S::Status_Ready);
-    const bool has_video_evidence = (state.total_frames_presented > 0 || state.render_fps > 0.0 || state.decoded_fps > 0.0);
+    const bool has_video_evidence = (state.total_frames_presented > 0 || state.render_fps > 0.0 || state.decoded_fps > 0.0 || state.width > 0);
 
     if (state.connection_mode == 1) {
         if (state.status == ConnectionStatus::Streaming) {
@@ -1491,13 +1491,17 @@ void MainWindowView::RenderDevicePreview(const UiState& state, const D2D1_RECT_F
 
         // Top Status Badge
         bool is_paused = (state.session_state == airplay::AirPlaySessionState::Paused);
+        const bool has_video_evidence = (state.total_frames_presented > 0 || state.render_fps > 0.0 || state.decoded_fps > 0.0 || state.width > 0);
         D2D1_RECT_F badge_rc = D2D1::RectF(cx - 120.0f, top_y, cx + 120.0f, top_y + 26.0f);
         if (is_paused) {
             m_renderer.DrawBadge(badge_rc, loc::Get(loc::S::Status_PausedStaticScreen),
                                  D2D1::ColorF(0.961f, 0.624f, 0.043f, 0.15f), colors::StatusAmber, true);
-        } else {
+        } else if (has_video_evidence) {
             m_renderer.DrawBadge(badge_rc, loc::Get(loc::S::Status_AirPlayStreamActive),
                                  D2D1::ColorF(0.133f, 0.773f, 0.369f, 0.15f), colors::StatusGreen, true);
+        } else {
+            m_renderer.DrawBadge(badge_rc, loc::Get(loc::S::Status_ConnectedWaitingVideo),
+                                 D2D1::ColorF(0.961f, 0.624f, 0.043f, 0.15f), colors::StatusAmber, true);
         }
 
         // Logo Emblem
@@ -1544,17 +1548,31 @@ void MainWindowView::RenderDevicePreview(const UiState& state, const D2D1_RECT_F
 
         std::wstring res_str = (state.width > 0 && state.height > 0) ?
             std::format(L"{}×{}", state.width, state.height) : L"—";
-        std::wstring fps_str = state.render_fps > 0.0 ?
-            std::format(L"{:.1f} FPS", state.render_fps) : (is_paused ? loc::Get(loc::S::Mirror_Static) : L"—");
-        std::wstring audio_str = state.audio_muted ? loc::Get(loc::S::Audio_Mute) :
-            (state.audio_active ? L"WASAPI 48k" : loc::Get(loc::S::Status_Idle));
+        std::wstring fps_str = state.has_fps_sample ?
+            (state.render_fps > 0.0 ? std::format(L"{:.1f} FPS", state.render_fps) :
+                (is_paused ? std::wstring(loc::Get(loc::S::Mirror_Static)) : L"0.0 FPS")) :
+            std::wstring(loc::Get(loc::S::Common_NoData));
+        std::wstring audio_str;
+        if (state.audio_muted) {
+            audio_str = loc::Get(loc::S::Audio_Mute);
+        } else if (state.status == ConnectionStatus::Idle) {
+            audio_str = std::format(L"48kHz • {}", loc::Get(loc::S::Status_Idle));
+        } else if (state.audio_active) {
+            audio_str = std::format(L"48kHz • {}", loc::Get(loc::S::Perf_Active));
+        } else if (state.audio_rtp_packets > 0) {
+            audio_str = std::format(L"48kHz • {}", loc::Get(loc::S::Status_Paused));
+        } else {
+            audio_str = std::format(L"48kHz • {}", loc::Get(loc::S::Status_Idle));
+        }
 
         int64_t up = state.session_uptime_sec;
         std::wstring uptime_str = std::format(L"{:02d}:{:02d}:{:02d}", up / 3600, (up % 3600) / 60, up % 60);
 
         std::wstring drops_str = std::format(L"{}", state.dropped_frames);
-        std::wstring lat_str = state.pipeline_latency_ms > 0.0 ?
-            std::format(L"{:.1f} ms", state.pipeline_latency_ms) : loc::Get(loc::S::Common_NoData);
+        std::wstring lat_str = state.has_latency_sample ?
+            (state.pipeline_latency_ms >= 1.0 ? std::format(L"{:.1f} ms", state.pipeline_latency_ms) :
+                L"< 1.0 ms") :
+            std::wstring(loc::Get(loc::S::Common_NoData));
 
         MetricBox boxes[6] = {
             { loc::Get(loc::S::Mirror_Metric_Resolution), res_str, colors::BrandBlue },
@@ -1938,8 +1956,12 @@ void MainWindowView::RenderPerformanceCard(const UiState& state, const D2D1_RECT
         D2D1_COLOR_F color;
     };
 
-    std::wstring fps_disp = state.render_fps > 0.0 ? std::format(L"{:.1f} FPS", state.render_fps) : loc::Get(loc::S::Common_NoData);
-    std::wstring lat_disp = state.pipeline_latency_ms > 0.0 ? std::format(L"{:.1f} ms", state.pipeline_latency_ms) : loc::Get(loc::S::Common_NoData);
+    std::wstring fps_disp = state.has_fps_sample ?
+        (state.render_fps > 0.0 ? std::format(L"{:.1f} FPS", state.render_fps) : L"0.0 FPS") :
+        std::wstring(loc::Get(loc::S::Common_NoData));
+    std::wstring lat_disp = state.has_latency_sample ?
+        (state.pipeline_latency_ms >= 1.0 ? std::format(L"{:.1f} ms", state.pipeline_latency_ms) : L"< 1.0 ms") :
+        std::wstring(loc::Get(loc::S::Common_NoData));
     std::wstring q_disp   = std::format(L"{} {}", state.queue_depth, state.queue_depth == 1 ? loc::Get(loc::S::Right_FrameSingular) : loc::Get(loc::S::Right_FramesPlural));
 
     MetricTile tiles[4] = {
@@ -2091,7 +2113,7 @@ void MainWindowView::RenderStatusBar(const UiState& state, float bottom_y, float
         D2D1::Point2F(width, bottom_y),
         m_renderer.BrushCardBorder(), 1.0f
     );
-    const bool has_video_evidence = (state.total_frames_presented > 0 || state.render_fps > 0.0 || state.decoded_fps > 0.0);
+    const bool has_video_evidence = (state.total_frames_presented > 0 || state.render_fps > 0.0 || state.decoded_fps > 0.0 || state.width > 0);
     if (state.connection_mode == 1) {
         const std::wstring phase = !state.wired.usb_interface_count ? loc::Get(loc::S::Wired_NoCable)
             : !state.wired.network_up ? loc::Get(loc::S::Wired_PreparingUsbNetwork)
@@ -2118,7 +2140,7 @@ void MainWindowView::RenderStatusBar(const UiState& state, float bottom_y, float
     switch (state.session_state) {
     case airplay::AirPlaySessionState::Streaming:
     case airplay::AirPlaySessionState::Connected:
-        dot_color = colors::StatusGreen;
+        dot_color = has_video_evidence ? colors::StatusGreen : colors::StatusAmber;
         break;
     case airplay::AirPlaySessionState::Paused:
     case airplay::AirPlaySessionState::Connecting:
@@ -2148,9 +2170,24 @@ void MainWindowView::RenderStatusBar(const UiState& state, float bottom_y, float
                     state.session_state == airplay::AirPlaySessionState::Streaming ||
                     state.session_state == airplay::AirPlaySessionState::Paused);
 
+    std::wstring audio_status_str;
+    if (state.audio_muted) {
+        audio_status_str = loc::Get(loc::S::Audio_Mute);
+    } else if (state.audio_active) {
+        audio_status_str = std::format(L"48kHz ({})", loc::Get(loc::S::Perf_Active));
+    } else if (state.audio_rtp_packets > 0) {
+        audio_status_str = std::format(L"48kHz ({})", loc::Get(loc::S::Status_Paused));
+    } else {
+        audio_status_str = std::format(L"48kHz ({})", loc::Get(loc::S::Status_Idle));
+    }
+
+    std::wstring fps_footer = state.has_fps_sample ?
+        std::format(L"Render: {:.1f} FPS", state.render_fps) :
+        std::format(L"Render: {}", loc::Get(loc::S::Common_NoData));
+
     std::wstring right_status = is_conn ?
-        std::format(L"{} • Render: {:.1f} FPS • Queue: {} • Audio: {}",
-                    state.transport_type, state.render_fps, state.queue_depth, state.audio_muted ? loc::Get(loc::S::Audio_Mute) : L"48kHz") :
+        std::format(L"{} • {} • Queue: {} • Audio: {}",
+                    state.transport_type, fps_footer, state.queue_depth, audio_status_str) :
         loc::Get(loc::S::Status_EngineReadyPorts);
 
     D2D1_RECT_F rstat_rc = D2D1::RectF(width * 0.45f, bottom_y, width - 20.0f, bottom_y + h);
@@ -2285,12 +2322,17 @@ void MainWindowView::RenderPerformanceView(const UiState& state, const D2D1_RECT
     D2D1_RECT_F prs_fps_lbl = D2D1::RectF(c1_left_col, m_r2_top, c1_left_col + c1_half_w, m_r2_top + 14.0f);
     m_renderer.DrawTextSimple(loc::Get(loc::S::Right_Tile_RenderFps), m_renderer.FontSmall(), prs_fps_lbl, m_renderer.BrushTextMuted());
     D2D1_RECT_F prs_fps_val = D2D1::RectF(c1_left_col, m_r2_top + 14.0f, c1_left_col + c1_half_w, m_r2_top + 36.0f);
-    m_renderer.DrawTextSimple(std::format(L"{:.1f} FPS", state.render_fps), m_renderer.FontSubheader(), prs_fps_val, m_renderer.BrushTextPrimary());
+    std::wstring prs_fps_val_text = state.has_fps_sample ?
+        (state.render_fps > 0.0 ? std::format(L"{:.1f} FPS", state.render_fps) : L"0.0 FPS") :
+        std::wstring(loc::Get(loc::S::Common_NoData));
+    m_renderer.DrawTextSimple(prs_fps_val_text, m_renderer.FontSubheader(), prs_fps_val, m_renderer.BrushTextPrimary());
 
     D2D1_RECT_F lat_lbl = D2D1::RectF(c1_right_col, m_r2_top, c1_right_col + c1_half_w, m_r2_top + 14.0f);
     m_renderer.DrawTextSimple(loc::Get(loc::S::Right_Tile_AvLag), m_renderer.FontSmall(), lat_lbl, m_renderer.BrushTextMuted());
     D2D1_RECT_F lat_val = D2D1::RectF(c1_right_col, m_r2_top + 14.0f, c1_right_col + c1_half_w, m_r2_top + 36.0f);
-    std::wstring lat_perf_str = state.pipeline_latency_ms > 0.0 ? std::format(L"{:.1f} ms", state.pipeline_latency_ms) : loc::Get(loc::S::Common_NoData);
+    std::wstring lat_perf_str = state.has_latency_sample ?
+        (state.pipeline_latency_ms >= 1.0 ? std::format(L"{:.1f} ms", state.pipeline_latency_ms) : L"< 1.0 ms") :
+        std::wstring(loc::Get(loc::S::Common_NoData));
     m_renderer.DrawTextSimple(lat_perf_str, m_renderer.FontSubheader(), lat_val, m_renderer.BrushTextPrimary());
 
     // Secondary line: Decoder, Drops, Queue
@@ -2414,7 +2456,10 @@ void MainWindowView::RenderPerformanceView(const UiState& state, const D2D1_RECT
     D2D1_RECT_F c4_st_lbl = D2D1::RectF(c4_left_col, c3_r1_top, c4_left_col + c4_half_w, c3_r1_top + 14.0f);
     m_renderer.DrawTextSimple(loc::Get(loc::S::Perf_Lbl_AudioStatus), m_renderer.FontSmall(), c4_st_lbl, m_renderer.BrushTextMuted());
     D2D1_RECT_F c4_st_val = D2D1::RectF(c4_left_col, c3_r1_top + 14.0f, c4_left_col + c4_half_w, c3_r1_top + 36.0f);
-    m_renderer.DrawTextSimple(state.audio_active ? loc::Get(loc::S::Perf_Active) : loc::Get(loc::S::Status_Idle), m_renderer.FontSubheader(), c4_st_val, state.audio_active ? m_renderer.BrushStatusGreen() : m_renderer.BrushTextPrimary());
+    std::wstring c4_audio_status = state.audio_muted ? std::wstring(loc::Get(loc::S::Audio_Mute))
+        : (state.audio_active ? std::format(L"{} (48kHz)", loc::Get(loc::S::Perf_Active))
+                              : std::format(L"{} (48kHz)", loc::Get(loc::S::Status_Idle)));
+    m_renderer.DrawTextSimple(c4_audio_status, m_renderer.FontSubheader(), c4_st_val, state.audio_active ? m_renderer.BrushStatusGreen() : m_renderer.BrushTextPrimary());
 
     D2D1_RECT_F c4_buf_lbl = D2D1::RectF(c4_right_col, c3_r1_top, c4_right_col + c4_half_w, c3_r1_top + 14.0f);
     m_renderer.DrawTextSimple(loc::Get(loc::S::Audio_BufferMs), m_renderer.FontSmall(), c4_buf_lbl, m_renderer.BrushTextMuted());

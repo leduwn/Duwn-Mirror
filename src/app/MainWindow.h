@@ -11,6 +11,7 @@
 #include <string>
 #include <memory>
 #include <functional>
+#include <mutex>
 
 namespace duwn::app {
 
@@ -34,11 +35,13 @@ public:
     void UpdateStreamMetadata(const airplay::StreamMetadata& meta) noexcept;
     void UpdateTelemetry(double render_fps, double latency_ms,
                          uint32_t queue_depth, uint64_t drops,
-                         int64_t uptime_sec) noexcept;
+                         int64_t uptime_sec, uint64_t total_presented = 0,
+                         bool has_fps_sample = false, bool has_latency_sample = false) noexcept;
     void UpdateExtendedTelemetry(uint64_t video_rtp, uint64_t audio_rtp,
                                  uint64_t audio_underruns, bool audio_active,
                                  bool audio_muted, std::wstring_view client_ip,
                                  std::wstring_view device_name) noexcept;
+    void ResetSessionData() noexcept;
 
     void SetOutputControlsState(bool visible, bool fullscreen, bool aspect_locked, bool always_on_top) noexcept;
 
@@ -66,6 +69,7 @@ public:
     HWND Hwnd() const noexcept { return m_hwnd; }
     HWND VideoSurfaceHwnd() const noexcept { return nullptr; }
     ui::UiState& State() noexcept { return m_state; }
+    std::mutex& StateMutex() const noexcept { return m_state_mutex; }
 
     void LayoutVideoSurface() noexcept {}
     void SetOnVideoSurfaceResize(std::function<void(uint32_t, uint32_t)> /*cb*/) noexcept {}
@@ -90,6 +94,7 @@ private:
     std::wstring            m_status;
 
     ui::MainWindowView      m_view;
+    mutable std::mutex      m_state_mutex;
     ui::UiState             m_state;
     bool                    m_mouse_tracking{false};
 

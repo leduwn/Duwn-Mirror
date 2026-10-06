@@ -5,6 +5,8 @@
 #include "common/logging/Logger.h"
 
 #include <windows.h>
+#include <dxgi1_3.h>
+
 #include <thread>
 #include <atomic>
 
@@ -581,14 +583,22 @@ DUWN_TEST(Direct3D11_EventQuery_SyncGpu_WithHiddenSwapChain_Test) {
     hr = factory->CreateSwapChainForHwnd(device.Get(), hwnd, &desc, nullptr, nullptr, sc.GetAddressOf());
     DUWN_ASSERT(SUCCEEDED(hr) && sc);
 
+    ComPtr<IDXGISwapChain2> sc2;
+    hr = sc.As(&sc2);
+    DUWN_ASSERT(SUCCEEDED(hr) && sc2);
+    hr = sc2->SetMaximumFrameLatency(1);
+    DUWN_ASSERT(SUCCEEDED(hr));
+    HANDLE waitable_obj = sc2->GetFrameLatencyWaitableObject();
+    DUWN_ASSERT(waitable_obj != nullptr && waitable_obj != INVALID_HANDLE_VALUE);
+
     SharedTexture st;
     DUWN_ASSERT(st.Create(device.Get(), 1920, 1080));
 
-    ComPtr<ID3D11Texture2D> bb;
-    hr = sc->GetBuffer(0, IID_PPV_ARGS(&bb));
-    DUWN_ASSERT(SUCCEEDED(hr) && bb);
-
     for (uint32_t slot = 0; slot < 4; ++slot) {
+        // Production order: WaitForSingleObject(waitable) -> GetBuffer -> Copy -> End(query) -> Flush -> Release BB -> Present -> SyncGpu
+        DWORD wait_res = ::WaitForSingleObject(waitable_obj, 1000);
+        DUWN_ASSERT(wait_res == WAIT_OBJECT_0);
+
         ComPtr<ID3D11Texture2D> current_bb;
         hr = sc->GetBuffer(0, IID_PPV_ARGS(&current_bb));
         DUWN_ASSERT(SUCCEEDED(hr) && current_bb);
@@ -596,13 +606,19 @@ DUWN_TEST(Direct3D11_EventQuery_SyncGpu_WithHiddenSwapChain_Test) {
         context->CopyResource(st.Texture(slot), current_bb.Get());
         context->End(st.Query(slot));
         st.MarkQueryIssued(slot, true);
+        context->Flush();
+        current_bb.Reset(); // Release reference before Present (matching VideoRenderer.cpp)
+
         hr = sc->Present(0, 0);
         DUWN_ASSERT(SUCCEEDED(hr));
-        bool sync_res = st.SyncGpu(context.Get(), slot);
-        printf("Visible SwapChain Slot %u sync_res=%d\n", slot, sync_res ? 1 : 0);
-        fflush(stdout);
+
+        // Offscreen hidden window at (-32000, -32000) causes Windows DWM compositor to throttle to 30 Hz (~33.3ms),
+        // requiring a test timeout budget (50ms) to accommodate offscreen DWM queueing while production uses 12ms.
+        bool sync_res = st.SyncGpu(context.Get(), slot, nullptr, 50);
         DUWN_ASSERT(sync_res);
     }
+    sc2.Reset();
+    sc.Reset();
     ::DestroyWindow(hwnd);
 }
 DUWN_TEST(Logger_Rotation_IsolatedDir_Test) {

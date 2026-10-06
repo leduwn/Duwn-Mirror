@@ -91,6 +91,9 @@ struct UiState {
     double render_fps{0.0};
     double decode_time_ms{0.0};
     double pipeline_latency_ms{0.0};
+    bool has_fps_sample{false};
+    bool has_latency_sample{false};
+    bool has_av_sync_sample{false};
     uint32_t queue_depth{0};
     uint64_t total_frames_presented{0};
     uint64_t dropped_frames{0};

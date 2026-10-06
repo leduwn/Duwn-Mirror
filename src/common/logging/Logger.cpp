@@ -9,6 +9,10 @@
 #include <chrono>
 #include <format>
 #include <regex>
+#include <deque>
+#include <condition_variable>
+#include <thread>
+#include <vector>
 
 namespace duwn {
 
@@ -28,6 +32,21 @@ struct LogState {
 };
 
 LogState g_log;
+
+struct AsyncLogQueue {
+    std::mutex              mutex;
+    std::condition_variable cv;
+    std::condition_variable cv_flush;
+    std::deque<std::string> queue;
+    bool                    stop_requested{false};
+    std::jthread            worker;
+    static constexpr size_t kMaxQueueSize = 1024;
+    std::atomic<uint64_t>   dropped_count{0};
+    std::atomic<uint64_t>   write_delay_ms{0};
+    bool                    started{false};
+};
+
+AsyncLogQueue g_async_queue;
 
 constexpr std::string_view LevelName(LogLevel l) noexcept {
     switch (l) {
@@ -128,16 +147,69 @@ void RotateLogsIfNeededLocked() {
     }
 }
 
+void StartAsyncWorkerIfNeeded() {
+    std::lock_guard lock{g_async_queue.mutex};
+    if (g_async_queue.started) return;
+    g_async_queue.stop_requested = false;
+    g_async_queue.worker = std::jthread([](std::stop_token st) {
+        while (!st.stop_requested()) {
+            std::vector<std::string> batch;
+            {
+                std::unique_lock q_lock{g_async_queue.mutex};
+                g_async_queue.cv.wait(q_lock, [&] {
+                    return !g_async_queue.queue.empty() || st.stop_requested() || g_async_queue.stop_requested;
+                });
+                if (g_async_queue.queue.empty() && (st.stop_requested() || g_async_queue.stop_requested)) {
+                    break;
+                }
+                while (!g_async_queue.queue.empty()) {
+                    batch.push_back(std::move(g_async_queue.queue.front()));
+                    g_async_queue.queue.pop_front();
+                }
+                g_async_queue.cv_flush.notify_all();
+            }
+
+            if (!batch.empty()) {
+                uint64_t delay = g_async_queue.write_delay_ms.load(std::memory_order_relaxed);
+                if (delay > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                }
+                std::lock_guard file_lock{g_log.mutex};
+                RotateLogsIfNeededLocked();
+                for (const auto& msg : batch) {
+                    if (g_log.file.is_open()) {
+                        g_log.file << msg;
+                    }
+                }
+                if (g_log.file.is_open()) {
+                    g_log.file.flush();
+                }
+            }
+        }
+    });
+    g_async_queue.started = true;
+}
+
+void StopAsyncWorker() {
+    {
+        std::lock_guard lock{g_async_queue.mutex};
+        g_async_queue.stop_requested = true;
+    }
+    g_async_queue.cv.notify_all();
+    if (g_async_queue.worker.joinable()) {
+        g_async_queue.worker.request_stop();
+        g_async_queue.worker.join();
+    }
+    std::lock_guard lock{g_async_queue.mutex};
+    g_async_queue.started = false;
+}
+
 } // namespace
 
 void Logger::TestReset(std::wstring_view testDir) {
+    Shutdown();
     {
         std::lock_guard lock{g_log.mutex};
-        if (g_log.file.is_open()) {
-            g_log.file.flush();
-            g_log.file.close();
-        }
-        g_log.initialised = false;
         g_log.logDir.clear();
         g_log.mainLogPath.clear();
     }
@@ -183,6 +255,8 @@ void Logger::Initialize(std::wstring_view customLogDir) {
         g_log.initialised = true;
     }
 
+    StartAsyncWorkerIfNeeded();
+
     auto start_line = std::format("[{}] [INFO ] [Logger  ] Session started. Log file: {}\n",
         Timestamp(), g_log.mainLogPath.string());
     if (g_log.file.is_open()) {
@@ -212,28 +286,50 @@ void Logger::Write(LogLevel level, std::string_view component,
     auto line = std::format("[{}] [{}] [{:<8}] {}\n",
         Timestamp(), LevelName(level), component, clean_msg);
 
-    std::lock_guard lock{g_log.mutex};
-    RotateLogsIfNeededLocked();
-
-    if (g_log.file.is_open()) {
-        g_log.file << line;
-        g_log.file.flush();
-    }
     ::OutputDebugStringA(line.c_str());
+
+    StartAsyncWorkerIfNeeded();
+    {
+        std::lock_guard lock{g_async_queue.mutex};
+        if (g_async_queue.queue.size() >= AsyncLogQueue::kMaxQueueSize) {
+            g_async_queue.queue.pop_front();
+            g_async_queue.dropped_count.fetch_add(1, std::memory_order_relaxed);
+        }
+        g_async_queue.queue.push_back(std::move(line));
+    }
+    g_async_queue.cv.notify_one();
 }
 
 void Logger::Flush() {
+    {
+        std::unique_lock lock{g_async_queue.mutex};
+        if (g_async_queue.started) {
+            g_async_queue.cv_flush.wait(lock, [&] { return g_async_queue.queue.empty(); });
+        }
+    }
     std::lock_guard lock{g_log.mutex};
     if (g_log.file.is_open()) g_log.file.flush();
 }
 
 void Logger::Shutdown() {
+    Flush();
+    StopAsyncWorker();
     std::lock_guard lock{g_log.mutex};
     if (g_log.file.is_open()) {
         auto line = std::format("[{}] [INFO ] [Logger  ] Session ended\n", Timestamp());
         g_log.file << line;
+        g_log.file.flush();
         g_log.file.close();
     }
+    g_log.initialised = false;
+}
+
+void Logger::SetTestWriteDelay(std::chrono::milliseconds delay) {
+    g_async_queue.write_delay_ms.store(delay.count(), std::memory_order_relaxed);
+}
+
+uint64_t Logger::GetDroppedLogCount() {
+    return g_async_queue.dropped_count.load(std::memory_order_relaxed);
 }
 
 } // namespace duwn

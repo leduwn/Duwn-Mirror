@@ -30,8 +30,8 @@ $rootDir = (Resolve-Path "$PSScriptRoot\..").Path
 if (-not $Files -or $Files.Count -eq 0) {
     $Files = @(
         "$rootDir\build-msvc\bin\Release\duwn-mirror.exe",
-        "$rootDir\installer\Duwn-Mirror-1.0.0-x64.msi",
-        "$rootDir\installer\Duwn-Mirror-Setup-1.0.0-x64.exe"
+        "$rootDir\installer\Duwn-Mirror-1.1.1-x64.msi",
+        "$rootDir\installer\Duwn-Mirror-Setup-1.1.1-x64.exe"
     )
 }
 

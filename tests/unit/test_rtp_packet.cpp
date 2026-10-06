@@ -91,7 +91,7 @@ DUWN_TEST(rtp_receiver_raw_udp_and_stats) {
     ::closesocket(send_sock);
 
     // Wait briefly for receiver loop to process
-    for (int i = 0; i < 20 && receiver.Stats().raw_udp.load() < 2; ++i) {
+    for (int i = 0; i < 50 && (receiver.Stats().raw_udp.load() < 2 || received_valid.load() < 1); ++i) {
         ::Sleep(10);
     }
 

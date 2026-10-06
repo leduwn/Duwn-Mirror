@@ -154,7 +154,7 @@ DUWN_TEST(Localization_VietnameseNineViewsAudit) {
 
     // View 8: About View
     DUWN_ASSERT(std::wstring_view(Get(S::Nav_About)) == L"Giới thiệu");
-    DUWN_ASSERT(std::wstring_view(Get(S::About_VersionTitle)) == L"Phiên bản 1.0.0 (Xem trước kết nối hai chế độ)");
+    DUWN_ASSERT(std::wstring_view(Get(S::About_VersionTitle)) == L"Phiên bản 1.1.1 (Xem trước kết nối hai chế độ)");
 
     // View 9: Telemetry / Status Overlay
     DUWN_ASSERT(std::wstring_view(Get(S::Status_Streaming)) == L"Đang phát luồng");

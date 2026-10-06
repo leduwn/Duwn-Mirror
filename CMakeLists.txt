@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(DuwnMirror
-    VERSION 1.0.0
+    VERSION 1.1.1
     DESCRIPTION "Wireless AirPlay and USB device connection for Windows"
     LANGUAGES CXX
 )
@@ -117,6 +117,11 @@ configure_file(
 configure_file(
     "${CMAKE_SOURCE_DIR}/src/app/version.rc.in"
     "${CMAKE_BINARY_DIR}/generated/version.rc"
+    @ONLY
+)
+configure_file(
+    "${CMAKE_SOURCE_DIR}/src/capture/virtualcam/version.rc.in"
+    "${CMAKE_BINARY_DIR}/generated/virtualcam-version.rc"
     @ONLY
 )
 add_custom_target(duwn-version-update

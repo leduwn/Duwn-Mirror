@@ -153,14 +153,66 @@ void MainWindow::SetStatusText(std::wstring_view status) noexcept {
     if (m_hwnd) ::InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
+void MainWindow::ResetSessionData() noexcept {
+    std::lock_guard lock{m_state_mutex};
+    m_state.device_name = L"—";
+    m_state.model_name = L"—";
+    m_state.product_type = L"—";
+    m_state.model_db_match = L"—";
+    m_state.os_version = L"—";
+    m_state.client_ip = L"—";
+    m_state.width = 0;
+    m_state.height = 0;
+    m_state.coded_width = 0;
+    m_state.coded_height = 0;
+    m_state.capture_width = 0;
+    m_state.capture_height = 0;
+    m_state.output_width = 0;
+    m_state.output_height = 0;
+    m_state.preview_width = 0;
+    m_state.preview_height = 0;
+    m_state.render_fps = 0.0;
+    m_state.decoded_fps = 0.0;
+    m_state.source_fps = 0.0;
+    m_state.nominal_fps = 0.0;
+    m_state.pipeline_latency_ms = 0.0;
+    m_state.has_fps_sample = false;
+    m_state.has_latency_sample = false;
+    m_state.has_av_sync_sample = false;
+    m_state.queue_depth = 0;
+    m_state.total_frames_presented = 0;
+    m_state.dropped_frames = 0;
+    m_state.session_uptime_sec = 0;
+    m_state.audio_active = false;
+    m_state.audio_underruns = 0;
+    m_state.audio_underrun_count = 0;
+    m_state.video_rtp_packets = 0;
+    m_state.audio_rtp_packets = 0;
+    m_state.video_bitrate_mbps = 0.0;
+    m_state.media_bitrate_mbps = 0.0;
+    m_state.decoder_name = L"—";
+    m_state.actual_source_desc = L"—";
+    m_state.orientation_desc = L"—";
+    m_state.quality_state_desc = L"—";
+    m_state.quality_effectiveness = 0;
+    m_state.status = ui::ConnectionStatus::Ready;
+    m_state.session_state = airplay::AirPlaySessionState::Idle;
+    m_state.status_message = L"Ready to connect";
+    LayoutVideoSurface();
+    if (m_hwnd) ::InvalidateRect(m_hwnd, nullptr, FALSE);
+}
+
 void MainWindow::UpdateSessionState(airplay::AirPlaySessionState state) noexcept {
-    m_state.session_state = state;
     using S = airplay::AirPlaySessionState;
+    if (state == S::Idle) {
+        ResetSessionData();
+        return;
+    }
+    std::lock_guard lock{m_state_mutex};
+    m_state.session_state = state;
     switch (state) {
     case S::Idle:
-        m_state.status = ui::ConnectionStatus::Ready;
-        m_state.status_message = L"Ready to connect";
-        break;
+        return;
     case S::Connecting:
         m_state.status = ui::ConnectionStatus::Connecting;
         m_state.status_message = (m_state.device_name != L"—" && !m_state.device_name.empty())
@@ -193,6 +245,7 @@ void MainWindow::UpdateSessionState(airplay::AirPlaySessionState state) noexcept
 }
 
 void MainWindow::UpdateClientInfo(const airplay::AirPlayClientInfo& info) noexcept {
+    std::lock_guard lock{m_state_mutex};
     m_state.device_name  = info.device_name.empty() ? L"Apple Device" : info.device_name;
     m_state.product_type = info.model.empty() ? L"—" : info.model;
     m_state.model_name   = info.model_marketing_name.empty() ?
@@ -214,11 +267,14 @@ void MainWindow::UpdateClientInfo(const airplay::AirPlayClientInfo& info) noexce
 
 void MainWindow::UpdateSessionPhase(airplay::SessionPhase phase) noexcept {
     using P = airplay::SessionPhase;
+    if (phase == P::Advertising) {
+        ResetSessionData();
+        return;
+    }
+    std::lock_guard lock{m_state_mutex};
     switch (phase) {
     case P::Advertising:
-        m_state.status = ui::ConnectionStatus::Ready;
-        m_state.status_message = L"Ready to connect";
-        break;
+        return;
     case P::Connecting:
         m_state.status = ui::ConnectionStatus::Connecting;
         m_state.status_message = (m_state.device_name != L"—" && !m_state.device_name.empty())
@@ -246,6 +302,7 @@ void MainWindow::UpdateSessionPhase(airplay::SessionPhase phase) noexcept {
 }
 
 void MainWindow::UpdateStreamMetadata(const airplay::StreamMetadata& meta) noexcept {
+    std::lock_guard lock{m_state_mutex};
     m_state.width = meta.video_width;
     m_state.height = meta.video_height;
     if (meta.video_fps > 0.0) {
@@ -256,12 +313,19 @@ void MainWindow::UpdateStreamMetadata(const airplay::StreamMetadata& meta) noexc
 
 void MainWindow::UpdateTelemetry(double render_fps, double latency_ms,
                                   uint32_t queue_depth, uint64_t drops,
-                                  int64_t uptime_sec) noexcept {
+                                  int64_t uptime_sec, uint64_t total_presented,
+                                  bool has_fps_sample, bool has_latency_sample) noexcept {
+    std::lock_guard lock{m_state_mutex};
     m_state.render_fps = render_fps;
     m_state.pipeline_latency_ms = latency_ms;
     m_state.queue_depth = queue_depth;
     m_state.dropped_frames = drops;
     m_state.session_uptime_sec = uptime_sec;
+    if (total_presented > 0) {
+        m_state.total_frames_presented = total_presented;
+    }
+    m_state.has_fps_sample = has_fps_sample;
+    m_state.has_latency_sample = has_latency_sample;
     // Repaint triggered by timer or on demand
 }
 
@@ -269,6 +333,7 @@ void MainWindow::UpdateExtendedTelemetry(uint64_t video_rtp, uint64_t audio_rtp,
                                          uint64_t audio_underruns, bool audio_active,
                                          bool audio_muted, std::wstring_view client_ip,
                                          std::wstring_view device_name) noexcept {
+    std::lock_guard lock{m_state_mutex};
     m_state.video_rtp_packets = video_rtp;
     m_state.audio_rtp_packets = audio_rtp;
     m_state.audio_underruns   = audio_underruns;
@@ -428,7 +493,12 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) noe
     case WM_PAINT: {
         PAINTSTRUCT ps;
         ::BeginPaint(hwnd, &ps);
-        m_view.Render(m_state);
+        ui::UiState state_copy;
+        {
+            std::lock_guard lock{m_state_mutex};
+            state_copy = m_state;
+        }
+        m_view.Render(state_copy);
         ::EndPaint(hwnd, &ps);
         return 0;
     }

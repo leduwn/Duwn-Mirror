@@ -980,7 +980,7 @@ static constexpr const wchar_t* kVi[static_cast<size_t>(S::_COUNT)] = {
     /* Adv_Renderer                 */ L"Bộ kết xuất",
     /* Adv_Profile                  */ L"Cấu hình hiệu suất",
 
-    /* About_VersionTitle           */ L"Phiên bản 1.0.0 (Xem trước kết nối hai chế độ)",
+    /* About_VersionTitle           */ L"Phiên bản 1.1.1 (Xem trước kết nối hai chế độ)",
     /* About_Title                  */ L"Về Duwn Mirror",
     /* About_Desc                   */ L"Phản chiếu màn hình không dây AirPlay & USB có dây cho Windows",
     /* About_Copyright              */ L"Bản quyền © 2026 Nhóm phát triển Duwn Mirror",

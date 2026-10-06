@@ -3,7 +3,7 @@
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Bundle Name="Duwn Mirror"
           Manufacturer="Duwn Mirror Contributors"
-          Version="1.0.0"
+          Version="1.1.1"
           UpgradeCode="B7E5C381-64D9-4FE2-9E92-351E842D5A10"
           IconSourceFile="assets\app_icon.ico">
 
@@ -53,7 +53,7 @@
       <MsiPackage
         Id="DuwnMirrorMsi"
         DisplayName="Duwn Mirror"
-        SourceFile="installer\Duwn-Mirror-1.0.0-x64.msi"
+        SourceFile="installer\Duwn-Mirror-1.1.1-x64.msi"
         Vital="yes" />
     </Chain>
   </Bundle>

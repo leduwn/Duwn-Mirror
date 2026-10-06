@@ -125,7 +125,7 @@ bool SharedTexture::RecreateSlot(ID3D11Device* device, uint32_t ring_index) noex
     return true;
 }
 
-bool SharedTexture::SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index, std::mutex* mutex) noexcept {
+bool SharedTexture::SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index, std::mutex* mutex, uint32_t timeout_ms) noexcept {
     if (!context || ring_index >= kSharedTextureRingSize) return false;
     if (!m_queries[ring_index]) return true;
     if (!m_query_issued[ring_index]) return true; // Query never issued; nothing to wait for
@@ -142,7 +142,7 @@ bool SharedTexture::SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index, s
     LARGE_INTEGER freq{}, start{}, now{};
     ::QueryPerformanceFrequency(&freq);
     ::QueryPerformanceCounter(&start);
-    const int64_t max_ticks = (freq.QuadPart * 12) / 1000; // 12ms timeout
+    const int64_t max_ticks = (freq.QuadPart * timeout_ms) / 1000;
 
     auto poll_data = [&]() -> HRESULT {
         if (mutex) {

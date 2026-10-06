@@ -3,8 +3,8 @@
     Builds official Duwn Mirror Windows Installers (MSI + Burn Bootstrapper EXE).
 .DESCRIPTION
     Compiles duwn-mirror in Release mode, stages the private duwn-airplay runtime,
-    runs WiX v5 to produce Duwn-Mirror-1.0.0-x64.msi (with firewall rules)
-    and Duwn-Mirror-Setup-1.0.0-x64.exe (with VC++ Redistributable chaining).
+    runs WiX v5 to produce Duwn-Mirror-1.1.1-x64.msi (with firewall rules)
+    and Duwn-Mirror-Setup-1.1.1-x64.exe (with VC++ Redistributable chaining).
 #>
 [CmdletBinding()]
 param()
@@ -20,20 +20,24 @@ Remove-Item "$rootDir\installer\DUWN-Mirror-Setup-*.exe" -Force -ErrorAction Sil
 Remove-Item "$rootDir\installer\Duwn-Mirror-Setup-*.exe" -Force -ErrorAction SilentlyContinue
 
 Write-Host "=== 1/4: Building Duwn Mirror Release ===" -ForegroundColor Cyan
-cmake --build build-msvc --config Release --target duwn-mirror duwn-unit-tests
+cmake --build build-msvc --config Release --target duwn-mirror duwn-virtualcam duwn-unit-tests
 if ($LASTEXITCODE -ne 0) {
     Write-Error "CMake build failed."
     exit $LASTEXITCODE
 }
 
-Write-Host "=== 2/4: Building WiX MSI Installer (Duwn-Mirror-1.0.0-x64.msi) ===" -ForegroundColor Cyan
-wix build "$rootDir\installer\Package.wxs" -arch x64 -ext WixToolset.Firewall.wixext -ext WixToolset.Util.wixext -out "$rootDir\installer\Duwn-Mirror-1.0.0-x64.msi"
+Write-Host "=== 2/4: Building WiX MSI Installer (Duwn-Mirror-1.1.1-x64.msi) ===" -ForegroundColor Cyan
+$wixTemp = "$rootDir\build-msvc\wix-temp"
+if (-not (Test-Path "$wixTemp\msi")) { New-Item -ItemType Directory -Path "$wixTemp\msi" -Force | Out-Null }
+if (-not (Test-Path "$wixTemp\bundle")) { New-Item -ItemType Directory -Path "$wixTemp\bundle" -Force | Out-Null }
+
+wix build "$rootDir\installer\Package.wxs" -arch x64 -ext WixToolset.Firewall.wixext -ext WixToolset.Util.wixext -intermediateFolder "$wixTemp\msi" -out "$rootDir\installer\Duwn-Mirror-1.1.1-x64.msi"
 if ($LASTEXITCODE -ne 0) {
     Write-Error "WiX MSI build failed."
     exit $LASTEXITCODE
 }
 
-$msi = Get-Item "$rootDir\installer\Duwn-Mirror-1.0.0-x64.msi"
+$msi = Get-Item "$rootDir\installer\Duwn-Mirror-1.1.1-x64.msi"
 Write-Host "MSI generated: $($msi.FullName) ($([math]::Round($msi.Length / 1MB, 2)) MB)" -ForegroundColor Green
 
 Write-Host "=== 3/4: Verifying VC++ Redistributable Staging ===" -ForegroundColor Cyan
@@ -49,14 +53,14 @@ if (-not (Test-Path $vcRedist)) {
     }
 }
 
-Write-Host "=== 4/4: Building WiX Burn Bootstrapper (Duwn-Mirror-Setup-1.0.0-x64.exe) ===" -ForegroundColor Cyan
-wix build "$rootDir\installer\Bundle.wxs" -arch x64 -ext WixToolset.BootstrapperApplications.wixext -ext WixToolset.Util.wixext -out "$rootDir\installer\Duwn-Mirror-Setup-1.0.0-x64.exe"
+Write-Host "=== 4/4: Building WiX Burn Bootstrapper (Duwn-Mirror-Setup-1.1.1-x64.exe) ===" -ForegroundColor Cyan
+wix build "$rootDir\installer\Bundle.wxs" -arch x64 -ext WixToolset.BootstrapperApplications.wixext -ext WixToolset.Util.wixext -intermediateFolder "$wixTemp\bundle" -out "$rootDir\installer\Duwn-Mirror-Setup-1.1.1-x64.exe"
 if ($LASTEXITCODE -ne 0) {
     Write-Error "WiX Bootstrapper build failed."
     exit $LASTEXITCODE
 }
 
-$exe = Get-Item "$rootDir\installer\Duwn-Mirror-Setup-1.0.0-x64.exe"
+$exe = Get-Item "$rootDir\installer\Duwn-Mirror-Setup-1.1.1-x64.exe"
 Write-Host "Bootstrapper Setup EXE generated: $($exe.FullName) ($([math]::Round($exe.Length / 1MB, 2)) MB)" -ForegroundColor Green
 
 Write-Host "`n=== Installation Packages Summary ===" -ForegroundColor Magenta

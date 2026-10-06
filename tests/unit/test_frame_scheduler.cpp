@@ -1218,9 +1218,17 @@ DUWN_TEST(TestDecodedFrameQueue_PopLatestValidFrame_BacklogDrop) {
 
     cfg.mode = SchedulerMode::GameLowLatency;
 
+    cfg.frame_duration_ns = 16'666'667LL; // 60 FPS
+
+    cfg.streaming_policy = duwn::ResolveStreamingPolicy(duwn::StreamingMode::SmoothLive);
+
+    duwn::GlobalMetrics().source_nominal_fps.store(60.0);
+
 
 
     FrameScheduler scheduler(cfg, [](VideoFrame&) {});
+
+    scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::SmoothLive));
 
 
 
@@ -1300,11 +1308,15 @@ DUWN_TEST(depth2_both_fresh_no_drop) {
 
     cfg.frame_duration_ns = 16'666'667LL; // 60 FPS
 
+    cfg.streaming_policy = duwn::ResolveStreamingPolicy(duwn::StreamingMode::SmoothLive);
+
     duwn::GlobalMetrics().source_nominal_fps.store(60.0);
 
 
 
     FrameScheduler scheduler(cfg, [](VideoFrame&) {});
+
+    scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::SmoothLive));
 
 
 
@@ -1386,11 +1398,15 @@ DUWN_TEST(depth3_old_history_select_newest) {
 
     cfg.frame_duration_ns = 16'666'667LL; // 60 FPS
 
+    cfg.streaming_policy = duwn::ResolveStreamingPolicy(duwn::StreamingMode::SmoothLive);
+
     duwn::GlobalMetrics().source_nominal_fps.store(60.0);
 
 
 
     FrameScheduler scheduler(cfg, [](VideoFrame&) {});
+
+    scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::SmoothLive));
 
 
 
@@ -1546,11 +1562,15 @@ DUWN_TEST(thirty_fps_freshness_budget) {
 
     cfg.frame_duration_ns = 33'366'700LL;
 
+    cfg.streaming_policy = duwn::ResolveStreamingPolicy(duwn::StreamingMode::SmoothLive);
+
     duwn::GlobalMetrics().source_nominal_fps.store(29.97);
 
 
 
     FrameScheduler scheduler(cfg, [](VideoFrame&) {});
+
+    scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::SmoothLive));
 
 
 
@@ -1670,11 +1690,15 @@ DUWN_TEST(sixty_fps_freshness_budget) {
 
     cfg.frame_duration_ns = 16'666'667LL;
 
+    cfg.streaming_policy = duwn::ResolveStreamingPolicy(duwn::StreamingMode::SmoothLive);
+
     duwn::GlobalMetrics().source_nominal_fps.store(60.0);
 
 
 
     FrameScheduler scheduler(cfg, [](VideoFrame&) {});
+
+    scheduler.SetStreamingPolicy(duwn::ResolveStreamingPolicy(duwn::StreamingMode::SmoothLive));
 
 
 

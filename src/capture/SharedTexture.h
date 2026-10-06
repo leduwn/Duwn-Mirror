@@ -32,7 +32,7 @@ public:
     bool RecreateSlot(ID3D11Device* device, uint32_t ring_index) noexcept;
 
     // Flush GPU command queue and verify current frame copy completion before publishing
-    bool SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index, std::mutex* mutex = nullptr) noexcept;
+    bool SyncGpu(ID3D11DeviceContext* context, uint32_t ring_index, std::mutex* mutex = nullptr, uint32_t timeout_ms = 12) noexcept;
 
     // Verify GPU has completed prior operations on candidate slot before reusing
     bool EnsureSlotReady(ID3D11DeviceContext* context, uint32_t ring_index, std::mutex* mutex = nullptr) noexcept;

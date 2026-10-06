@@ -7,6 +7,7 @@
 #include <string_view>
 #include <source_location>
 #include <format>
+#include <chrono>
 
 namespace duwn {
 
@@ -40,6 +41,10 @@ public:
     static void Shutdown();
     // Testing helper: re-initialize logger in an isolated directory
     static void TestReset(std::wstring_view testDir);
+
+    // Test hook: artificial delay per disk write to verify bounded async decoupling
+    static void SetTestWriteDelay(std::chrono::milliseconds delay);
+    static uint64_t GetDroppedLogCount();
 
 };
 

@@ -448,14 +448,35 @@ int App::Run(bool test_motion, bool verify_capture, bool test_rotate) noexcept {
             }
 
             if (msg.message == WM_DUWN_FIRST_FRAME) {
-
-                if (m_window) {
-                    m_window->SetStatusText(ui::loc::Get(ui::loc::S::Status_Streaming));
+                const uint64_t msg_gen = static_cast<uint64_t>(msg.lParam);
+                if (msg_gen != m_session_generation.load(std::memory_order_acquire)) {
+                    // Stale message from prior session generation; discard
+                    continue;
                 }
 
-                uint32_t fw = static_cast<uint32_t>(msg.wParam);
+                const uint32_t fw = static_cast<uint32_t>(msg.wParam >> 32);
+                const uint32_t fh = static_cast<uint32_t>(msg.wParam & 0xFFFFFFFF);
 
-                uint32_t fh = static_cast<uint32_t>(msg.lParam);
+                if (m_window) {
+                    std::lock_guard lock{m_window->StateMutex()};
+                    auto& st = m_window->State();
+                    if (st.status == ui::ConnectionStatus::Idle ||
+                        st.session_state == airplay::AirPlaySessionState::Idle) {
+                        // Current session is idle; do not promote to streaming
+                        continue;
+                    }
+                    m_window->SetStatusText(ui::loc::Get(ui::loc::S::Status_Streaming));
+                    st.status = ui::ConnectionStatus::Streaming;
+                    st.status_message = ui::loc::Get(ui::loc::S::Status_Streaming);
+                    if (st.total_frames_presented == 0) {
+                        st.total_frames_presented = 1;
+                    }
+                    if (fw > 0 && fh > 0) {
+                        st.width = fw;
+                        st.height = fh;
+                    }
+                    ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+                }
 
                 if (m_output_window) {
                     m_output_window->SetHasFrame(true);
@@ -468,14 +489,16 @@ int App::Run(bool test_motion, bool verify_capture, bool test_rotate) noexcept {
                             m_output_window->IsFullscreen(),
                             m_output_window->IsAspectLocked(),
                             m_output_window->IsAlwaysOnTop());
-                        m_window->State().output_window_visible = m_output_window->IsVisible();
+                        {
+                            std::lock_guard lock{m_window->StateMutex()};
+                            m_window->State().output_window_visible = m_output_window->IsVisible();
+                        }
                         ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
                     }
                 }
                 PublishMetadataSnapshot();
 
                 continue;
-
             }
 
             if (msg.message == WM_DUWN_NETWORK_CHANGED) {
@@ -3599,12 +3622,14 @@ bool App::WaitForMediaReadiness(uint32_t timeout_ms) const noexcept {
 }
 
 void App::ResetSessionFirstEvents() noexcept {
+    m_session_generation.fetch_add(1, std::memory_order_acq_rel);
     m_session_first_frame_handled.store(false, std::memory_order_release);
     m_first_video_rtp_recorded.store(false, std::memory_order_release);
     m_first_au_recorded.store(false, std::memory_order_release);
     m_first_output_present_recorded.store(false, std::memory_order_release);
     m_first_preview_present_recorded.store(false, std::memory_order_release);
     m_probe_packet_count.store(0, std::memory_order_relaxed);
+    m_session_start_ns.store(0, std::memory_order_release);
 }
 
 void App::TryStartIpcConsumer() noexcept {
@@ -3842,6 +3867,14 @@ void App::OnPhase(airplay::SessionPhase prev,
     }
 
     using P = airplay::SessionPhase;
+    if (next == P::Connecting || next == P::Streaming) {
+        if (m_session_start_ns.load(std::memory_order_relaxed) == 0) {
+            m_session_start_ns.store(clock::MonotonicClock::Now().time_since_epoch().count(), std::memory_order_release);
+        }
+    } else if (next == P::Advertising) {
+        m_session_start_ns.store(0, std::memory_order_release);
+    }
+
     switch (next) {
     case P::Advertising:
         if (m_renderer) m_renderer->PresentBlack();
@@ -3950,7 +3983,8 @@ void App::HandleSessionPhaseOnMainThread(const SessionPhaseEvent& ev, bool quali
             }
         }
         if (m_window) {
-            bool has_frame = m_first_output_present_recorded.load(std::memory_order_relaxed);
+            bool has_frame = m_first_output_present_recorded.load(std::memory_order_relaxed) ||
+                             (m_window->State().total_frames_presented > 0);
             m_window->SetStatusText(has_frame ? ui::loc::Get(ui::loc::S::Status_Streaming) : ui::loc::Get(ui::loc::S::Status_ConnectedWaitingVideo));
         }
         DUWN_LOG_INFO("App", "AirPlay streaming session active — media pipeline configuration:");
@@ -4099,9 +4133,10 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
         if (!was_handled) {
             HWND main_hwnd = m_main_hwnd.load(std::memory_order_acquire);
             if (main_hwnd) {
-                ::PostMessageW(main_hwnd, WM_DUWN_FIRST_FRAME,
-                    static_cast<WPARAM>(frame.visible_width),
-                    static_cast<LPARAM>(frame.visible_height));
+                const uint64_t gen = m_session_generation.load(std::memory_order_acquire);
+                const WPARAM wp = (static_cast<WPARAM>(frame.visible_width) << 32) | static_cast<WPARAM>(frame.visible_height);
+                const LPARAM lp = static_cast<LPARAM>(gen);
+                ::PostMessageW(main_hwnd, WM_DUWN_FIRST_FRAME, wp, lp);
             }
             if (m_output_window) {
                 m_output_window->SetHasFrame(true);
@@ -4259,6 +4294,13 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
             DUWN_LOG_INFOF("Diagnostics",
                 "FIRST EVENT: Output frame presented successfully ({}x{})",
                 frame.visible_width, frame.visible_height);
+            HWND main_hwnd = m_main_hwnd.load(std::memory_order_acquire);
+            if (main_hwnd) {
+                const uint64_t gen = m_session_generation.load(std::memory_order_acquire);
+                const WPARAM wp = (static_cast<WPARAM>(frame.visible_width) << 32) | static_cast<WPARAM>(frame.visible_height);
+                const LPARAM lp = static_cast<LPARAM>(gen);
+                ::PostMessageW(main_hwnd, WM_DUWN_FIRST_FRAME, wp, lp);
+            }
         }
 
         const int64_t output_present_qpc = frame.present_end_qpc;
@@ -4976,6 +5018,226 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
 
 
+        const SessionMetadataSnapshot meta_snap = GetMetadataSnapshot();
+        m_drift.Update(m.av_offset_ms.load(std::memory_order_relaxed));
+
+        // Update Modern Direct2D Control Window UI Telemetry unconditionally
+        const int64_t start_ns = m_session_start_ns.load(std::memory_order_relaxed);
+        const int64_t uptime_sec = (start_ns > 0 && now_ns > start_ns)
+            ? (now_ns - start_ns) / 1'000'000'000LL : 0;
+
+        double lag_ms = m.total_pipeline_avg_ms.load(std::memory_order_relaxed);
+        if (lag_ms <= 0.0) {
+            lag_ms = m.video_decode_to_present_avg_ms.load(std::memory_order_relaxed);
+        }
+        if (lag_ms <= 0.0) {
+            lag_ms = 0.0;
+        }
+
+        const bool has_fps_sample = (start_ns > 0 && cur_v_rend > 0);
+        const bool has_latency_sample = (start_ns > 0 && cur_v_rend > 0 &&
+            (m.total_pipeline_avg_ms.load(std::memory_order_relaxed) > 0.0 ||
+             m.video_decode_to_present_avg_ms.load(std::memory_order_relaxed) > 0.0));
+        const bool has_av_sync_sample = (start_ns > 0 && cur_v_rend > 0 && cur_a_rtp > 0 &&
+            m.av_offset_ms.load(std::memory_order_relaxed) != 0.0);
+
+        uint32_t active_q = m_scheduler ? static_cast<uint32_t>(m_scheduler->DecodedQueueSize()) : 0;
+        if (m_window) {
+            const int64_t last_audio_ns = m.last_audio_rtp_arrival_ns.load(std::memory_order_relaxed);
+            const bool audio_act = (a_rtp_rate > 0 || (last_audio_ns > 0 && (now_ns - last_audio_ns < 2'000'000'000LL)));
+            const bool audio_mut = m_wasapi ? m_wasapi->IsMuted() : false;
+
+            m_window->UpdateTelemetry(
+                static_cast<double>(v_rend_fps),
+                lag_ms > 0.0 ? lag_ms : 0.0,
+                active_q,
+                cur_v_drop,
+                uptime_sec,
+                cur_v_rend,
+                has_fps_sample,
+                has_latency_sample
+            );
+
+            auto cinfo = m_airplay
+                ? m_airplay->CurrentClientInfo() : airplay::AirPlayClientInfo{};
+            m_window->UpdateExtendedTelemetry(
+                cur_v_rtp,
+                cur_a_rtp,
+                cur_real_underruns,
+                audio_act,
+                audio_mut,
+                cinfo.peer_address,
+                cinfo.device_name
+            );
+
+            uint32_t eff_vis_w = vis_w;
+            uint32_t eff_vis_h = vis_h;
+            if (eff_vis_w == 0 && eff_vis_h == 0) {
+                eff_vis_w = m_stream_width.load(std::memory_order_relaxed);
+                eff_vis_h = m_stream_height.load(std::memory_order_relaxed);
+            }
+
+            uint32_t cap_w = m_output_window ? m_output_window->CanvasWidth() : 0;
+            uint32_t cap_h = m_output_window ? m_output_window->CanvasHeight() : 0;
+            if (cap_w == 0 || cap_h == 0) {
+                auto out_dims = ComputeCurrentOutputDimensions(eff_vis_w, eff_vis_h, &meta_snap);
+                cap_w = out_dims.width;
+                cap_h = out_dims.height;
+            }
+
+            std::wstring dec_name = L"—";
+            bool is_zc = false;
+            {
+                std::lock_guard<std::mutex> lock(m_decoder_mutex);
+                if (m_video_decoder) {
+                    auto dinfo = m_video_decoder->GetDecoderInfo();
+                    if (!dinfo.name.empty()) {
+                        dec_name = dinfo.name;
+                    }
+                    is_zc = dinfo.is_zero_copy;
+                }
+            }
+            if (dec_name == L"—") {
+                const int decoder_kind = m.video_decoder_kind.load(std::memory_order_relaxed);
+                dec_name = decoder_kind == 1 ? L"Hardware Media Foundation H.264 Decoder"
+                         : decoder_kind == 2 ? L"Software Media Foundation H.264 Decoder" : L"—";
+                is_zc = m.video_decoder_zero_copy.load(std::memory_order_relaxed);
+            }
+
+            {
+                std::lock_guard lock{m_window->StateMutex()};
+                auto& state = m_window->State();
+                state.has_fps_sample = has_fps_sample;
+                state.has_latency_sample = has_latency_sample;
+                state.has_av_sync_sample = has_av_sync_sample;
+                state.width = eff_vis_w;
+                state.height = eff_vis_h;
+                state.capture_width = cap_w;
+                state.capture_height = cap_h;
+                state.preview_width = prev_w;
+                state.preview_height = prev_h;
+                state.output_width = cap_w;
+                state.output_height = cap_h;
+                state.preview_visible = m_output_window ? m_output_window->IsVisible() : false;
+                state.output_window_visible = m_output_window ? (::IsWindowVisible(m_output_window->Hwnd()) != 0) : false;
+                state.nominal_fps = m.source_nominal_fps.load(std::memory_order_relaxed);
+                state.config_generation = m_meta_coord.GetConfigGeneration();
+                state.sidecar_generation = m_meta_coord.GetSidecarGeneration();
+                state.receiver_quality_pending = meta_snap.receiver_quality_pending;
+                state.coded_width = coded_w;
+                state.coded_height = coded_h;
+                state.total_frames_presented = cur_v_rend;
+                state.dropped_frames = cur_v_drop;
+                state.session_uptime_sec = uptime_sec;
+                state.audio_active = audio_act;
+                state.video_rtp_packets = cur_v_rtp;
+                state.audio_rtp_packets = cur_a_rtp;
+                state.pipeline_latency_ms = lag_ms > 0.0 ? lag_ms : 0.0;
+                state.queue_depth = active_q;
+                state.video_bitrate_mbps = (v_kb_rate * 8.0) / 1000.0;
+                state.media_bitrate_mbps = state.video_bitrate_mbps;
+                state.sidecar_pid = m_airplay ? static_cast<uint32_t>(m_airplay->GetSidecarPid()) : 0;
+
+                video::RequestedReceiverEnvelope req_env;
+                req_env.width = meta_snap.req_receiver_width;
+                req_env.height = meta_snap.req_receiver_height;
+                req_env.fps = meta_snap.req_receiver_fps;
+                req_env.preset_name = std::string(GetReceiverQualityName(meta_snap.req_receiver_quality));
+                req_env.is_original = (meta_snap.req_receiver_quality == ReceiverQuality::Original_60);
+                m_source_quality_tracker.SetRequestedEnvelope(req_env);
+
+                auto eff = m_source_quality_tracker.GetEffectiveness();
+                state.quality_effectiveness = static_cast<int>(eff);
+                switch (eff) {
+                case video::QualityEffectiveness::DeliveredAsRequested:
+                    state.quality_effectiveness_raw = L"DELIVERED_AS_REQUESTED";
+                    state.quality_state_desc = ui::loc::Get(ui::loc::S::Video_Quality_DeliveredAsRequested);
+                    break;
+                case video::QualityEffectiveness::SourceLimited:
+                    state.quality_effectiveness_raw = L"SOURCE_LIMITED";
+                    state.quality_state_desc = ui::loc::Get(ui::loc::S::Video_Quality_SourceLimited);
+                    break;
+                case video::QualityEffectiveness::PartiallyDelivered:
+                    state.quality_effectiveness_raw = L"PARTIALLY_DELIVERED";
+                    state.quality_state_desc = ui::loc::Get(ui::loc::S::Video_Quality_PartiallyDelivered);
+                    break;
+                default:
+                    state.quality_effectiveness_raw = L"UNKNOWN";
+                    state.quality_state_desc = L"—";
+                    break;
+                }
+
+                if (eff_vis_w > 0 && eff_vis_h > 0) {
+                    state.orientation_desc = (eff_vis_w >= eff_vis_h) ? L"Landscape" : L"Portrait";
+                    state.actual_source_desc = std::format(L"{} × {} @ {:.0f} FPS", eff_vis_w, eff_vis_h,
+                        state.nominal_fps > 0.0 ? state.nominal_fps : 60.0);
+                } else {
+                    state.orientation_desc = L"—";
+                    state.actual_source_desc = L"—";
+                }
+
+                state.gpu_name = m_d3d ? m_d3d->AdapterName() : L"—";
+                state.source_fps = static_cast<double>(v_au_rate);
+                state.decoded_fps = static_cast<double>(v_dec_fps);
+                state.render_fps = static_cast<double>(v_rend_fps);
+                state.decoder_name = dec_name;
+                state.zero_copy = is_zc;
+
+                const int backend = m_active_renderer.load(std::memory_order_relaxed);
+                state.renderer_name = backend == 1 ? L"D3D11 Hardware"
+                                    : backend == 2 ? L"D3D11 WARP" : L"—";
+                state.scaler_name = !eff_vis_w ? L"—" : backend == 1 ? L"D3D11 VideoProcessor"
+                                  : backend == 2 ? L"D3D11 shader" : L"—";
+                state.color_processing_name = !eff_vis_w ? L"—" : backend == 1
+                    ? (m_active_filter_caps.load(std::memory_order_relaxed) ? L"Hardware filters" : L"VideoProcessor")
+                    : backend == 2 ? L"Shader" : L"—";
+
+                const bool wired_mode = m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WiredUsb;
+                state.connection_mode = wired_mode ? 1 : 0;
+                state.transport_name = wired_mode ? L"AirPlay over Apple USB Ethernet"
+                    : meta_snap.active_transport == "DirectIpc" ? L"Direct IPC" : L"Local RTP/UDP";
+
+                if (wired_mode) {
+                    state.wired_needs_mirroring_reconnect = m_wired_reconnect_hint.load(std::memory_order_acquire);
+                    HWND hwnd = m_main_hwnd.load(std::memory_order_acquire);
+                    if (hwnd) ::PostMessageW(hwnd, WM_DUWN_WIRED_REFRESH, 0, 0);
+
+                    state.control_state = m_wired_control.GetState();
+                    auto cm = m_wired_control.GetMetrics();
+                    state.control_events_sent = cm.events_sent;
+                    state.control_events_failed = cm.events_failed;
+                    state.control_latency_avg_ms = cm.latency_avg_ms;
+                    state.control_latency_p50_ms = cm.latency_p50_ms;
+                    state.control_latency_p95_ms = cm.latency_p95_ms;
+                    state.control_latency_p99_ms = cm.latency_p99_ms;
+
+                    auto dev = m_wired_control.GetDeviceInfo();
+                    if (!dev.device_name.empty()) state.control_device_name = dev.device_name;
+                    if (!dev.ios_version.empty()) state.control_ios_version = dev.ios_version;
+                }
+
+                constexpr uint32_t filter_bits[] = {1u, 2u, 8u, 4u, 32u};
+                const uint32_t filter_caps = m_active_filter_caps.load(std::memory_order_relaxed);
+                for (size_t i = 0; i < 5; ++i)
+                    state.filter_supported[i] = (filter_caps & filter_bits[i]) != 0;
+
+                // Audio device state
+                state.audio_buffer_ms      = m.audio_buffer_ms.load(std::memory_order_relaxed);
+                state.audio_underrun_count = cur_real_underruns;
+                state.audio_device_id      = meta_snap.monitor_device_id;
+                state.resolved_audio_device_name = m_wasapi
+                    ? m_wasapi->ResolvedDeviceName() : L"—";
+
+                const bool has_video_evidence = (cur_v_rend > 0 || v_rend_fps > 0.0 || v_dec_fps > 0.0 || eff_vis_w > 0);
+                if (state.session_state == airplay::AirPlaySessionState::Streaming ||
+                    state.session_state == airplay::AirPlaySessionState::Connected) {
+                    state.status = ui::ConnectionStatus::Streaming;
+                    state.status_message = has_video_evidence ? ui::loc::Get(ui::loc::S::Status_Streaming)
+                                                              : ui::loc::Get(ui::loc::S::Status_ConnectedWaitingVideo);
+                }
+            }
+        }
+
         uint64_t cur_trans_drop = m.video_format_transition_drops.load(std::memory_order_relaxed);
         uint64_t cur_q_full_drop = m.video_queue_full_drops.load(std::memory_order_relaxed);
         uint64_t cur_gen         = m.video_format_generation.load(std::memory_order_relaxed);
@@ -4990,7 +5252,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
         static uint64_t s_metrics_cycle = 0;
         ++s_metrics_cycle;
-        const bool is_streaming = (phase_str == "Streaming" || v_rtp_rate > 0 || v_dec_fps > 0);
+        const bool is_streaming = (phase_str == "Streaming" || v_rtp_rate > 0 || v_dec_fps > 0 || cur_v_rend > 0);
         static bool s_was_streaming = false;
         if (!is_streaming) {
             if (s_was_streaming) {
@@ -5001,13 +5263,12 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
                 DUWN_LOG_INFOF("Diagnostics", "[HEARTBEAT] cycle={} | state={} | sidecar={} | lifecycle={}",
                                s_metrics_cycle, phase_str, sidecar_up ? "alive" : "dead", stream_health);
             }
-            return;
+            continue;
         }
         s_was_streaming = true;
 
         DUWN_LOG_INFOF("Diagnostics", "[METRICS CYCLE BEGIN] cycle={}", s_metrics_cycle);
 
-        const SessionMetadataSnapshot meta_snap = GetMetadataSnapshot();
         const char* transport_str = meta_snap.active_transport.c_str();
         const char* stream_mode_str = "Balanced";
         switch (meta_snap.active_streaming_mode) {
@@ -5431,278 +5692,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
         }
 
         DUWN_LOG_INFOF("Diagnostics", "[METRICS CYCLE END] cycle={}", s_metrics_cycle);
-
-        // Drift update
-
-        m_drift.Update(m.av_offset_ms.load(std::memory_order_relaxed));
-
-
-
-        // Update Modern Direct2D Control Window UI Telemetry
-
-        static int64_t s_uptime_seconds = 0;
-
-        s_uptime_seconds++;
-
-        double lag_ms = m.total_pipeline_avg_ms.load(std::memory_order_relaxed);
-
-        if (lag_ms <= 0.0) {
-
-            lag_ms = m.video_decode_to_present_avg_ms.load(std::memory_order_relaxed);
-
-        }
-
-        if (lag_ms <= 0.0) {
-
-            lag_ms = 0.0;
-
-        }
-
-        uint32_t active_q = m_scheduler ? static_cast<uint32_t>(m_scheduler->DecodedQueueSize()) : 0;
-
-        if (m_window) {
-
-            bool audio_run = m.wasapi_running.load(std::memory_order_relaxed);
-
-            bool audio_mut = m_wasapi ? m_wasapi->IsMuted() : false;
-
-            m_window->UpdateTelemetry(
-
-                static_cast<double>(v_rend_fps),
-
-                lag_ms > 0.0 ? lag_ms : 0.0,
-
-                active_q,
-
-                cur_v_drop,
-
-                s_uptime_seconds
-
-            );
-
-            auto cinfo = m_airplay
-
-                ? m_airplay->CurrentClientInfo() : airplay::AirPlayClientInfo{};
-
-            m_window->UpdateExtendedTelemetry(
-
-                cur_v_rtp,
-
-                cur_a_rtp,
-
-                cur_real_underruns,
-
-                audio_run,
-
-                audio_mut,
-
-                cinfo.peer_address,
-
-                cinfo.device_name
-
-            );
-
-            uint32_t cap_w = m_output_window ? m_output_window->CanvasWidth() : 0;
-
-            uint32_t cap_h = m_output_window ? m_output_window->CanvasHeight() : 0;
-
-            if (cap_w == 0 || cap_h == 0) {
-
-                auto out_dims = ComputeCurrentOutputDimensions(vis_w, vis_h, &meta_snap);
-
-                cap_w = out_dims.width;
-
-                cap_h = out_dims.height;
-
-            }
-
-            auto& state = m_window->State();
-
-            state.width = vis_w;
-
-            state.height = vis_h;
-
-            state.capture_width = cap_w;
-
-            state.capture_height = cap_h;
-
-            state.preview_width = prev_w;
-
-            state.preview_height = prev_h;
-
-            state.output_width = cap_w;
-
-            state.output_height = cap_h;
-
-            state.preview_visible = m_output_window ? m_output_window->IsVisible() : false;
-
-            state.output_window_visible = m_output_window ? (::IsWindowVisible(m_output_window->Hwnd()) != 0) : false;
-
-            state.nominal_fps = m.source_nominal_fps.load(std::memory_order_relaxed);
-
-            state.config_generation = m_meta_coord.GetConfigGeneration();
-
-            state.sidecar_generation = m_meta_coord.GetSidecarGeneration();
-
-            state.receiver_quality_pending = meta_snap.receiver_quality_pending;
-
-            state.coded_width = coded_w;
-
-            state.coded_height = coded_h;
-
-            state.video_bitrate_mbps = (v_kb_rate * 8.0) / 1000.0;
-            state.media_bitrate_mbps = state.video_bitrate_mbps;
-            state.sidecar_pid = m_airplay ? static_cast<uint32_t>(m_airplay->GetSidecarPid()) : 0;
-
-            video::RequestedReceiverEnvelope req_env;
-            req_env.width = meta_snap.req_receiver_width;
-            req_env.height = meta_snap.req_receiver_height;
-            req_env.fps = meta_snap.req_receiver_fps;
-            req_env.preset_name = std::string(GetReceiverQualityName(meta_snap.req_receiver_quality));
-            req_env.is_original = (meta_snap.req_receiver_quality == ReceiverQuality::Original_60);
-            m_source_quality_tracker.SetRequestedEnvelope(req_env);
-
-            auto eff = m_source_quality_tracker.GetEffectiveness();
-            state.quality_effectiveness = static_cast<int>(eff);
-            switch (eff) {
-            case video::QualityEffectiveness::DeliveredAsRequested:
-                state.quality_effectiveness_raw = L"DELIVERED_AS_REQUESTED";
-                state.quality_state_desc = ui::loc::Get(ui::loc::S::Video_Quality_DeliveredAsRequested);
-                break;
-            case video::QualityEffectiveness::SourceLimited:
-                state.quality_effectiveness_raw = L"SOURCE_LIMITED";
-                state.quality_state_desc = ui::loc::Get(ui::loc::S::Video_Quality_SourceLimited);
-                break;
-            case video::QualityEffectiveness::PartiallyDelivered:
-                state.quality_effectiveness_raw = L"PARTIALLY_DELIVERED";
-                state.quality_state_desc = ui::loc::Get(ui::loc::S::Video_Quality_PartiallyDelivered);
-                break;
-            default:
-                state.quality_effectiveness_raw = L"UNKNOWN";
-                state.quality_state_desc = L"—";
-                break;
-            }
-
-            if (vis_w > 0 && vis_h > 0) {
-
-                state.orientation_desc = (vis_w >= vis_h) ? L"Landscape" : L"Portrait";
-
-                state.actual_source_desc = std::format(L"{} × {} @ {:.0f} FPS", vis_w, vis_h,
-
-                    state.nominal_fps > 0.0 ? state.nominal_fps : 60.0);
-
-            } else {
-
-                state.orientation_desc = L"—";
-
-                state.actual_source_desc = L"—";
-
-            }
-
-            state.gpu_name = m_d3d ? m_d3d->AdapterName() : L"—";
-
-            state.source_fps = static_cast<double>(v_au_rate);
-
-            state.decoded_fps = static_cast<double>(v_dec_fps);
-
-            state.render_fps = static_cast<double>(v_rend_fps);
-
-            const int decoder_kind = m.video_decoder_kind.load(std::memory_order_relaxed);
-
-            state.decoder_name = decoder_kind == 1 ? L"Hardware Media Foundation H.264 Decoder"
-
-                               : decoder_kind == 2 ? L"Software Media Foundation H.264 Decoder" : L"—";
-
-            state.zero_copy = m.video_decoder_zero_copy.load(std::memory_order_relaxed);
-
-            const int backend = m_active_renderer.load(std::memory_order_relaxed);
-
-            state.renderer_name = backend == 1 ? L"D3D11 Hardware"
-
-                                : backend == 2 ? L"D3D11 WARP" : L"—";
-
-            state.scaler_name = !vis_w ? L"—" : backend == 1 ? L"D3D11 VideoProcessor"
-
-                              : backend == 2 ? L"D3D11 shader" : L"—";
-
-            state.color_processing_name = !vis_w ? L"—" : backend == 1
-
-                ? (m_active_filter_caps.load(std::memory_order_relaxed) ? L"Hardware filters" : L"VideoProcessor")
-
-                : backend == 2 ? L"Shader" : L"—";
-
-            const bool wired_mode = m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WiredUsb;
-
-            state.connection_mode = wired_mode ? 1 : 0;
-
-            state.transport_name = wired_mode ? L"AirPlay over Apple USB Ethernet"
-
-                : meta_snap.active_transport == "DirectIpc" ? L"Direct IPC" : L"Local RTP/UDP";
-
-            if (wired_mode) {
-
-                state.wired_needs_mirroring_reconnect = m_wired_reconnect_hint.load(std::memory_order_acquire);
-
-                HWND hwnd = m_main_hwnd.load(std::memory_order_acquire);
-
-                if (hwnd) ::PostMessageW(hwnd, WM_DUWN_WIRED_REFRESH, 0, 0);
-
-
-
-                state.control_state = m_wired_control.GetState();
-
-                auto cm = m_wired_control.GetMetrics();
-
-                state.control_events_sent = cm.events_sent;
-
-                state.control_events_failed = cm.events_failed;
-
-                state.control_latency_avg_ms = cm.latency_avg_ms;
-
-                state.control_latency_p50_ms = cm.latency_p50_ms;
-
-                state.control_latency_p95_ms = cm.latency_p95_ms;
-
-                state.control_latency_p99_ms = cm.latency_p99_ms;
-
-                auto dev = m_wired_control.GetDeviceInfo();
-
-                if (!dev.device_name.empty()) state.control_device_name = dev.device_name;
-
-                if (!dev.ios_version.empty()) state.control_ios_version = dev.ios_version;
-
-
-
-            }
-
-            constexpr uint32_t filter_bits[] = {1u, 2u, 8u, 4u, 32u};
-
-            const uint32_t filter_caps = m_active_filter_caps.load(std::memory_order_relaxed);
-
-            for (size_t i = 0; i < 5; ++i)
-
-                state.filter_supported[i] = (filter_caps & filter_bits[i]) != 0;
-
-
-
-            // Audio device state
-
-            state.audio_buffer_ms      = m.audio_buffer_ms.load(std::memory_order_relaxed);
-
-            state.audio_underrun_count = cur_real_underruns;
-
-            state.audio_device_id      = meta_snap.monitor_device_id;
-
-            state.resolved_audio_device_name = m_wasapi
-
-                ? m_wasapi->ResolvedDeviceName() : L"—";
-
-            // audio_device_name is updated live by SetOnAudioDeviceChanged; keep stable here.
-
-        }
-
     }
-
 }
 
 

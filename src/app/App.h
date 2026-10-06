@@ -216,6 +216,8 @@ private:
     uint32_t               m_pending_aspect_count{0};
 
     // Preview and frame presentation lifecycle state
+    std::atomic<int64_t>   m_session_start_ns{0};
+    std::atomic<uint64_t>  m_session_generation{1};
     std::atomic<bool>      m_session_first_frame_handled{false};
     std::atomic<bool>      m_first_video_rtp_recorded{false};
     std::atomic<bool>      m_first_au_recorded{false};
