@@ -12,8 +12,8 @@ body:
     id: version
     attributes:
       label: Phiên bản Duwn Mirror
-      description: Ví dụ 1.1.1 (xem trong bảng điều khiển hoặc Help -> About)
-      placeholder: "1.1.1"
+      description: Ví dụ 1.1.2 (xem trong bảng điều khiển hoặc Help -> About)
+      placeholder: "1.1.2"
     validations:
       required: true
 

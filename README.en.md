@@ -51,8 +51,8 @@ Visit the [Official GitHub Releases](https://github.com/leduwn/Duwn-Mirror/relea
 
 | Package | Size | Intended Audience & Details |
 | :--- | :--- | :--- |
-| **`Duwn-Mirror-Setup-1.1.1-x64.exe`** (Recommended) | ~79 MB | **Complete Bootstrapper:** Automatically detects and installs Microsoft Visual C++ 2015-2026 Redistributable (x64) if missing; configures Windows Firewall rules automatically. |
-| **`Duwn-Mirror-1.1.1-x64.msi`** | ~61 MB | **Standard Windows Installer:** Ideal for enterprise environments, automated deployments (GPO/SCCM), or systems with VC++ runtimes already present. Automatically opens firewall ports. |
+| **`Duwn-Mirror-Setup-1.1.2-x64.exe`** (Recommended) | ~79 MB | **Complete Bootstrapper:** Automatically detects and installs Microsoft Visual C++ 2015-2026 Redistributable (x64) if missing; configures Windows Firewall rules automatically. |
+| **`Duwn-Mirror-1.1.2-x64.msi`** | ~61 MB | **Standard Windows Installer:** Ideal for enterprise environments, automated deployments (GPO/SCCM), or systems with VC++ runtimes already present. Automatically opens firewall ports. |
 | **`SHA256SUMS.txt`** | < 1 KB | Cryptographic SHA-256 hashes for verifying package integrity. |
 
 ### 🛡️ Windows SmartScreen Notice

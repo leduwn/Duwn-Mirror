@@ -51,8 +51,8 @@ Truy cập [Trang phát hành chính thức (GitHub Releases)](https://github.co
 
 | Gói cài đặt | Dung lượng | Đối tượng & Mục đích sử dụng |
 | :--- | :--- | :--- |
-| **`Duwn-Mirror-Setup-1.1.1-x64.exe`** (Khuyên dùng) | ~79 MB | **Trọn gói (Bootstrapper):** Tự động phát hiện và cài đặt Microsoft Visual C++ 2015-2026 Redistributable (x64), tự động mở cổng Windows Firewall. |
-| **`Duwn-Mirror-1.1.1-x64.msi`** | ~61 MB | **Windows Installer tiêu chuẩn:** Phù hợp quản trị viên IT, triển khai tự động qua GPO/SCCM, hoặc máy tính đã có sẵn VC++ runtime. Đã tích hợp mở cổng Firewall tự động. |
+| **`Duwn-Mirror-Setup-1.1.2-x64.exe`** (Khuyên dùng) | ~79 MB | **Trọn gói (Bootstrapper):** Tự động phát hiện và cài đặt Microsoft Visual C++ 2015-2026 Redistributable (x64), tự động mở cổng Windows Firewall. |
+| **`Duwn-Mirror-1.1.2-x64.msi`** | ~61 MB | **Windows Installer tiêu chuẩn:** Phù hợp quản trị viên IT, triển khai tự động qua GPO/SCCM, hoặc máy tính đã có sẵn VC++ runtime. Đã tích hợp mở cổng Firewall tự động. |
 | **`SHA256SUMS.txt`** | < 1 KB | Bảng mã băm SHA-256 đối chiếu tính toàn vẹn của các tệp tin phát hành. |
 
 ### 🛡️ Lưu ý về cảnh báo Windows SmartScreen
