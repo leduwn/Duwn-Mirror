@@ -52,6 +52,7 @@ pm_fullscreen.csv
 pm_normal.csv
 pm_output.csv
 artifacts/
+Testing/
 
 # Python
 __pycache__/

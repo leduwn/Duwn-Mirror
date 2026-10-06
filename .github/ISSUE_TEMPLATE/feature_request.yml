@@ -1,0 +1,31 @@
+name: 💡 Đề xuất tính năng (Feature Request)
+description: Đề xuất một tính năng hoặc cải tiến mới cho Duwn Mirror
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Cảm ơn bạn đã đóng góp ý tưởng để phát triển Duwn Mirror! Vui lòng chia sẻ chi tiết về tính năng bạn muốn thấy.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Bài toán hoặc nhu cầu thực tế
+      description: Tính năng này giải quyết vấn đề gì trong quy trình làm việc của bạn?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Giải pháp đề xuất
+      description: Mô tả chi tiết cách bạn muốn tính năng hoạt động
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Các giải pháp thay thế đã cân nhắc
+      description: Bạn đã thử giải pháp nào khác chưa?

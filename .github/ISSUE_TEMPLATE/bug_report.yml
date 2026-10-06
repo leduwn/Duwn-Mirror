@@ -1,0 +1,75 @@
+name: 🐛 Báo cáo lỗi (Bug Report)
+description: Báo cáo sự cố hoặc hành vi bất thường trong quá trình sử dụng Duwn Mirror
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Cảm ơn bạn đã báo cáo sự cố! Vui lòng cung cấp chi tiết thông tin bên dưới để đội ngũ phát triển có thể tái hiện và khắc phục nhanh chóng.
+
+  - type: input
+    id: version
+    attributes:
+      label: Phiên bản Duwn Mirror
+      description: Ví dụ 1.1.1 (xem trong bảng điều khiển hoặc Help -> About)
+      placeholder: "1.1.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Phiên bản hệ điều hành Windows
+      options:
+        - "Windows 11 (64-bit)"
+        - "Windows 10 22H2 (64-bit)"
+        - "Windows 10 phiên bản cũ hơn"
+        - "Khác"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: Card đồ họa (GPU) & Driver
+      description: Tên card đồ họa và phiên bản driver hiển thị trên máy tính của bạn
+      placeholder: "NVIDIA GeForce RTX 3060, Driver 551.86 / Intel UHD Graphics 770"
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Thiết bị nguồn (iOS / iPadOS)
+      description: Mẫu máy iPhone/iPad và phiên bản hệ điều hành
+      placeholder: "iPhone 15 Pro Max (iOS 17.4.1) / iPad Pro 11 (iPadOS 17.5)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Mô tả chi tiết sự cố
+      description: Chuyện gì đã xảy ra so với kỳ vọng của bạn?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Các bước tái hiện lỗi
+      description: Các bước cụ thể để sự cố xảy ra
+      value: |
+        1. Khởi chạy Duwn Mirror trên Windows
+        2. Mở iPhone -> Control Center -> Screen Mirroring
+        3. Chọn kết nối Duwn Mirror
+        4. Quan sát thấy...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Nhật ký (Logs) hoặc Ảnh chụp màn hình
+      description: Dán nội dung log liên quan hoặc đính kèm ảnh chụp màn hình lỗi (nếu có)
