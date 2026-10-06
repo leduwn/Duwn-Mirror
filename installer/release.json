@@ -8,8 +8,8 @@
     "legacy_msi_upgrade_code":  "A3D1E428-8902-4D9A-90A7-6831F901B94C",
     "installer":  {
                       "filename":  "Duwn-Mirror-Setup-1.1.3-x64.exe",
-                      "sha256":  "EC388C018F674BEDFFB3C6A5D2E5C34E9C7B3355B7DFE2DB62A7AEB619786D55",
-                      "size":  69751159
+                      "sha256":  "67201B0534B798C6EB90A3497D09D1801251A99D1A6A1B650BFCD28471BEBD82",
+                      "size":  69751220
                   },
     "binary":  {
                    "filename":  "duwn-mirror.exe",

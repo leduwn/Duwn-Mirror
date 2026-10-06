@@ -101,8 +101,8 @@ vi.DowngradeBlocked=Phiên bản mới hơn của Duwn Mirror (%1) đã được
 en.AppCloseFailed=Failed to close running Duwn Mirror instance. Please close the application manually before continuing.
 vi.AppCloseFailed=Không thể đóng phiên làm việc của Duwn Mirror. Vui lòng đóng ứng dụng thủ công trước khi tiếp tục.
 
-en.PriorUninstallFailed=Failed to uninstall previous version of Duwn Mirror (code: %1). Installation has been stopped to avoid duplicate entries.
-vi.PriorUninstallFailed=Gỡ bỏ phiên bản cũ của Duwn Mirror thất bại (mã lỗi: %1). Quá trình cài đặt đã dừng lại để tránh tạo hai bản cài song song.
+en.PriorUninstallFailed=Failed to remove previous version of Duwn Mirror (error code: %1). Installation has been halted to avoid duplicate or conflicting installations. Please restart your computer and run Setup again, or remove the previous version via Windows Settings before retrying.
+vi.PriorUninstallFailed=Gỡ bỏ phiên bản Duwn Mirror trước đây thất bại (mã lỗi: %1). Quá trình cài đặt đã dừng lại để tránh tạo bản cài đặt xung đột. Vui lòng khởi động lại máy tính và chạy lại Setup, hoặc gỡ bỏ bản cũ qua Cài đặt Windows trước khi thử lại.
 
 [Components]
 Name: "main"; Description: "{cm:CompMain}"; Types: full compact custom; Flags: fixed
