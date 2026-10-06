@@ -51,9 +51,17 @@ Truy cập [Trang phát hành chính thức (GitHub Releases)](https://github.co
 
 | Gói cài đặt | Dung lượng | Đối tượng & Mục đích sử dụng |
 | :--- | :--- | :--- |
-| **`Duwn-Mirror-Setup-1.1.2-x64.exe`** (Khuyên dùng) | ~79 MB | **Trọn gói (Bootstrapper):** Tự động phát hiện và cài đặt Microsoft Visual C++ 2015-2026 Redistributable (x64), tự động mở cổng Windows Firewall. |
-| **`Duwn-Mirror-1.1.2-x64.msi`** | ~61 MB | **Windows Installer tiêu chuẩn:** Phù hợp quản trị viên IT, triển khai tự động qua GPO/SCCM, hoặc máy tính đã có sẵn VC++ runtime. Đã tích hợp mở cổng Firewall tự động. |
-| **`SHA256SUMS.txt`** | < 1 KB | Bảng mã băm SHA-256 đối chiếu tính toàn vẹn của các tệp tin phát hành. |
+| **`Duwn-Mirror-Setup-1.1.3-x64.exe`** (Chính thức) | ~79 MB | **Trọn gói Inno Setup:** Giao diện sáng Windows 11 hiện đại, song ngữ Việt - Anh. Tự động kiểm tra và cài đặt VC++ Redistributable (x64), đăng ký DirectShow VirtualCam, cấu hình Windows Firewall và tự động nâng cấp từ các bản WiX/Inno cũ mà không làm mất cấu hình. |
+| **`SHA256SUMS.txt`** | < 1 KB | Bảng mã băm SHA-256 đối chiếu tính toàn vẹn của tệp cài đặt và tệp nhị phân phát hành. |
+
+### 🔄 Các tình huống cài đặt và nâng cấp
+
+- **Cài đặt mới:** Chọn thư mục đích, chọn thành phần (Ứng dụng chính, DirectShow Virtual Camera). Trình cài đặt tự động mở cổng Windows Firewall (AirPlay RTSP 7000/7001/7100, RTP 6000-7100, mDNS 5353) và khởi chạy ứng dụng dưới quyền người dùng thông thường.
+- **Nâng cấp từ bản WiX cũ (MSI / Burn):** Bộ cài tự động phát hiện bản cài đặt WiX trước đây, gỡ bỏ sạch sẽ bản cũ trong quá trình cài đặt và chuyển sang Inno Setup. Toàn bộ cấu hình người dùng, vị trí cửa sổ, thông số âm thanh và chất lượng tại `%LOCALAPPDATA%\Duwn Mirror\settings.json` được bảo toàn nguyên vẹn.
+- **Cài đè / Sửa chữa:** Khi chạy bộ cài cùng phiên bản, cho phép cài lại để sửa chữa các tệp hỏng mà không mất dữ liệu.
+- **Chặn hạ phiên bản (Downgrade Prevention):** Khi phát hiện bản cài trên máy mới hơn bộ cài, hệ thống sẽ cảnh báo và chặn hạ phiên bản để tránh lỗi dữ liệu.
+- **Phát hiện tiến trình đang chạy:** Nếu `duwn-mirror.exe` đang hoạt động, bộ cài sẽ gửi tín hiệu yêu cầu đóng nhẹ nhàng để lưu cấu hình trước khi cập nhật tệp nhị phân.
+- **Gỡ cài đặt sạch sẽ:** Gỡ bỏ toàn bộ tệp nhị phân, COM server, shortcut và firewall rule; cấu hình cá nhân tại `%LOCALAPPDATA%\Duwn Mirror` được giữ nguyên.
 
 ### 🛡️ Lưu ý về cảnh báo Windows SmartScreen
 
@@ -139,7 +147,7 @@ Duwn Mirror cung cấp 2 phương thức kết nối chuyên nghiệp để đư
 - **Hệ điều hành:** Windows 10/11 x64.
 - **Trình biên dịch:** Visual Studio 2022 (với gói tải *Desktop development with C++*).
 - **Công cụ xây dựng:** CMake 3.25 trở lên.
-- **Đóng gói installer (tùy chọn):** WiX Toolset v5 và .NET SDK.
+- **Đóng gói installer (tùy chọn):** Inno Setup 6 (phiên bản 6.3 trở lên, khuyến nghị 6.7.3+ hỗ trợ `WizardStyle=modern light windows11`). Cài đặt qua winget: `winget install JRSoftware.InnoSetup`.
 
 ### Các bước thực hiện
 
@@ -157,8 +165,8 @@ cmake --build build/release --config Release
 # 4. Chạy kiểm thử tự động (Unit Tests)
 ctest --test-dir build/release --output-on-failure -C Release
 
-# 5. Đóng gói bộ cài đặt WiX (Tùy chọn)
-powershell -ExecutionPolicy Bypass -File installer/build-installer.ps1 -Configuration Release
+# 5. Đóng gói bộ cài đặt Inno Setup (Tùy chọn)
+powershell -ExecutionPolicy Bypass -File installer/build-installer.ps1
 ```
 
 ---

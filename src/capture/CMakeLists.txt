@@ -16,7 +16,10 @@ add_library(duwn-virtualcam SHARED
     virtualcam/DuwnVirtualCam.cpp
     virtualcam/DllMain.cpp
     virtualcam/duwn-virtualcam.def
+    "${CMAKE_BINARY_DIR}/generated/virtualcam-version.rc"
 )
+
+add_dependencies(duwn-virtualcam duwn-version-update)
 
 target_include_directories(duwn-virtualcam
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"

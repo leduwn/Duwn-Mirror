@@ -51,9 +51,17 @@ Visit the [Official GitHub Releases](https://github.com/leduwn/Duwn-Mirror/relea
 
 | Package | Size | Intended Audience & Details |
 | :--- | :--- | :--- |
-| **`Duwn-Mirror-Setup-1.1.2-x64.exe`** (Recommended) | ~79 MB | **Complete Bootstrapper:** Automatically detects and installs Microsoft Visual C++ 2015-2026 Redistributable (x64) if missing; configures Windows Firewall rules automatically. |
-| **`Duwn-Mirror-1.1.2-x64.msi`** | ~61 MB | **Standard Windows Installer:** Ideal for enterprise environments, automated deployments (GPO/SCCM), or systems with VC++ runtimes already present. Automatically opens firewall ports. |
-| **`SHA256SUMS.txt`** | < 1 KB | Cryptographic SHA-256 hashes for verifying package integrity. |
+| **`Duwn-Mirror-Setup-1.1.3-x64.exe`** (Official) | ~79 MB | **Single Inno Setup Installer:** Modern Windows 11 light design, bilingual (English & Vietnamese). Automatically verifies and installs VC++ Redistributable (x64), registers DirectShow VirtualCam, configures Windows Firewall, and performs seamless upgrades from legacy WiX/Inno installations preserving user configuration. |
+| **`SHA256SUMS.txt`** | < 1 KB | Cryptographic SHA-256 hashes for verifying package and binary integrity. |
+
+### 🔄 Installation & Upgrade Scenarios
+
+- **Fresh Installation:** Select target directory and components (Core Application, DirectShow Virtual Camera). Setup configures Windows Firewall (RTSP 7000/7001/7100, RTP 6000-7100, mDNS 5353) and launches under standard user privileges.
+- **Seamless Upgrade from WiX (MSI / Burn):** Setup automatically detects any existing legacy WiX installation, cleanly removes the old package during setup, and transitions to Inno Setup. All user settings, window geometry, audio settings, and quality preferences in `%LOCALAPPDATA%\Duwn Mirror\settings.json` are strictly preserved.
+- **Reinstall / Repair:** Running setup for the currently installed version allows repairing corrupted files without settings loss.
+- **Downgrade Prevention:** Setup compares versions numerically and prevents accidental downgrades with an informative warning.
+- **Active Process Detection:** If `duwn-mirror.exe` is running, setup politely requests graceful shutdown via `WM_CLOSE` to flush configuration before file extraction.
+- **Clean Uninstallation:** Removes all installed binaries, COM server registrations, shortcuts, and firewall rules while preserving user configuration in `%LOCALAPPDATA%\Duwn Mirror`.
 
 ### 🛡️ Windows SmartScreen Notice
 
@@ -139,7 +147,7 @@ Duwn Mirror supports two integration workflows for streaming software:
 - **OS:** Windows 10/11 x64.
 - **Compiler:** Visual Studio 2022 (with *Desktop development with C++* workload).
 - **Build System:** CMake 3.25 or newer.
-- **Installer Tooling (Optional):** WiX Toolset v5 and .NET SDK.
+- **Installer Tooling (Optional):** Inno Setup 6 (version 6.3 or newer, recommended 6.7.3+ with `WizardStyle=modern light windows11`). Install via winget: `winget install JRSoftware.InnoSetup`.
 
 ### Build Commands
 
@@ -157,8 +165,8 @@ cmake --build build/release --config Release
 # 4. Run automated unit tests
 ctest --test-dir build/release --output-on-failure -C Release
 
-# 5. Build WiX MSI and Setup EXE installers (Optional)
-powershell -ExecutionPolicy Bypass -File installer/build-installer.ps1 -Configuration Release
+# 5. Build Inno Setup installer (Optional)
+powershell -ExecutionPolicy Bypass -File installer/build-installer.ps1
 ```
 
 ---
