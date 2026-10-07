@@ -10,12 +10,12 @@
 #define DUWN_VERSION_PATCH       4
 #define DUWN_VERSION_STRING      "1.1.4"
 #define DUWN_VERSION_STRING_W    L"1.1.4"
-#define DUWN_GIT_COMMIT_HASH     "d3ce943216a8783b8c2c0c9865e41043c9a49d88"
-#define DUWN_GIT_COMMIT_SHORT    "d3ce943"
-#define DUWN_GIT_BRANCH          "hotfix/1.1.4-airplay-port"
+#define DUWN_GIT_COMMIT_HASH     "c49c539f05e94d8560ea842ec8f954e7af8fa82d"
+#define DUWN_GIT_COMMIT_SHORT    "c49c539"
+#define DUWN_GIT_BRANCH          "main"
 #define DUWN_GIT_IS_DIRTY        1
-#define DUWN_BUILD_TIMESTAMP     "2026-10-07 14:28:46 UTC"
-#define DUWN_BUILD_TIMESTAMP_W   L"2026-10-07 14:28:46 UTC"
+#define DUWN_BUILD_TIMESTAMP     "2026-10-07 14:56:49 UTC"
+#define DUWN_BUILD_TIMESTAMP_W   L"2026-10-07 14:56:49 UTC"
 #define DUWN_BUILD_PLATFORM      "x64"
 #define DUWN_BUILD_PLATFORM_W    L"x64"
 #define DUWN_COPYRIGHT_W         L"Copyright (c) 2026 Duwn Mirror Contributors"
