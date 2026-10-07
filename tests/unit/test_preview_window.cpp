@@ -475,8 +475,9 @@ DUWN_TEST(PreviewRenderer_NullSafetyInAppLifecycle) {
 // ---------------------------------------------------------------------------
 DUWN_TEST(AirPlayProcess_PortArgsSemantics_ExactMatching) {
     // Priority 1 verification:
-    // UxPlay 1.74 syntax: -p port1,port2,port3
-    // When port1=7000, port2=7000, port3=7000: forces RTSP listener (port2) to TCP 7000
+    // UxPlay 1.74 syntax: -p base
+    // When base=7000: sets TCP/UDP port range 7000, 7001, 7002
+    // RTSP control channel is TCP 7001, mirror data channel is TCP 7000
     AirPlayProcessConfig config{};
     config.airplay_port_base = 7000;
     config.video_rtp_port = 7010;
@@ -491,8 +492,8 @@ DUWN_TEST(AirPlayProcess_PortArgsSemantics_ExactMatching) {
     AirPlayProcess proc(config, session_state, nullptr);
     std::wstring cmd = proc.BuildCommandLine();
 
-    // Verify cmd contains exact "-p 7000,7000,7000"
-    DUWN_ASSERT(cmd.find(L"-p 7000,7000,7000") != std::wstring::npos);
+    // Verify cmd contains exact "-p 7000 "
+    DUWN_ASSERT(cmd.find(L"-p 7000 ") != std::wstring::npos);
     DUWN_ASSERT(cmd.find(L"-vrtp") != std::wstring::npos);
     DUWN_ASSERT(cmd.find(L"port=7010") != std::wstring::npos);
     DUWN_ASSERT(cmd.find(L"port=7011") != std::wstring::npos);

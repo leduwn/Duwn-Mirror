@@ -11,7 +11,7 @@ namespace duwn::network {
 
 struct BleBeaconConfig {
     std::string ipv4_address{};
-    uint16_t airplay_port{7000};
+    uint16_t airplay_port{7001}; // Apple AirPlay Type 0x09 Discovery Beacon advertises RTSP control endpoint (base + 1)
     bool     enable_beacon{true};
 };
 

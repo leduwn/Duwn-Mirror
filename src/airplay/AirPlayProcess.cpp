@@ -40,7 +40,7 @@ static std::wstring Utf8ToWide(std::string_view s) noexcept {
     return w;
 }
 
-static bool IsProcessListeningOnPort(DWORD pid, uint16_t port1, uint16_t port2) noexcept {
+static bool IsProcessListeningOnPort(DWORD pid, uint16_t port) noexcept {
     if (pid == 0) return false;
     DWORD size = 0;
     if (::GetExtendedTcpTable(nullptr, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) == ERROR_INSUFFICIENT_BUFFER) {
@@ -51,7 +51,7 @@ static bool IsProcessListeningOnPort(DWORD pid, uint16_t port1, uint16_t port2) 
                 const auto& entry = table->table[i];
                 if (entry.dwOwningPid == pid && entry.dwState == MIB_TCP_STATE_LISTEN) {
                     uint16_t local_port = ::ntohs(static_cast<uint16_t>(entry.dwLocalPort));
-                    if (local_port == port1 || local_port == port2) {
+                    if (local_port == port) {
                         return true;
                     }
                 }
@@ -68,7 +68,7 @@ static bool IsProcessListeningOnPort(DWORD pid, uint16_t port1, uint16_t port2) 
                 const auto& entry = table6->table[i];
                 if (entry.dwOwningPid == pid && entry.dwState == MIB_TCP_STATE_LISTEN) {
                     uint16_t local_port = ::ntohs(static_cast<uint16_t>(entry.dwLocalPort));
-                    if (local_port == port1 || local_port == port2) {
+                    if (local_port == port) {
                         return true;
                     }
                 }
@@ -243,6 +243,8 @@ bool AirPlayProcess::IsPortBlockAvailable(uint16_t base) noexcept {
             available = false;
             break;
         }
+        int opt = 1;
+        ::setsockopt(s_tcp, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&opt), sizeof(opt));
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -260,6 +262,7 @@ bool AirPlayProcess::IsPortBlockAvailable(uint16_t base) noexcept {
             available = false;
             break;
         }
+        ::setsockopt(s_udp, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&opt), sizeof(opt));
         if (::bind(s_udp, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
             ::closesocket(s_udp);
             available = false;
@@ -708,10 +711,8 @@ std::wstring AirPlayProcess::BuildCommandLine() const noexcept {
                                profile == LatencyProfile::LiveFullLowLatency;
     const wchar_t* sink_options = sink_sync_off ? L" sync=false" : L"";
     std::wstring cmd = std::format(
-        L"\"{}\" -p {},{},{} -n \"{}\" -nh -s {}x{}@{} -fps {}{}{} -vrtp \"config-interval=1 ! udpsink host=127.0.0.1 port={}{}\" -artp \"pt=96 ! udpsink host=127.0.0.1 port={}{}\" -nc",
+        L"\"{}\" -p {} -n \"{}\" -nh -s {}x{}@{} -fps {}{}{} -vrtp \"config-interval=1 ! udpsink host=127.0.0.1 port={}{}\" -artp \"pt=96 ! udpsink host=127.0.0.1 port={}{}\" -nc",
         m_config.uxplay_exe_path,
-        m_active_port_base,
-        m_active_port_base,
         m_active_port_base,
         name_utf16,
         env.width,
@@ -1050,11 +1051,12 @@ void AirPlayProcess::SupervisionLoop(std::stop_token stop) noexcept {
                 }
 
                 bool sockets_ready = m_sockets_ready.load(std::memory_order_acquire);
-                if (!sockets_ready && IsProcessListeningOnPort(m_proc_info.dwProcessId, m_active_port_base, m_active_port_base + 1)) {
+                const uint16_t rtsp_port = static_cast<uint16_t>(m_active_port_base + 1);
+                if (!sockets_ready && IsProcessListeningOnPort(m_proc_info.dwProcessId, rtsp_port)) {
                     if (!m_sockets_ready.exchange(true, std::memory_order_acq_rel)) {
                         duwn::telemetry::ConnectionTimeline::Get().Record(
                             duwn::telemetry::ConnectionMilestone::C4_UxPlaySocketsInitialized,
-                            std::format("TCP port {} listening", m_active_port_base));
+                            std::format("TCP port {} listening", rtsp_port));
                         duwn::telemetry::ConnectionTimeline::Get().Record(
                             duwn::telemetry::ConnectionMilestone::C4A_MdnsPublicationInitiated,
                             "mDNS publication active (UDP 5353)");

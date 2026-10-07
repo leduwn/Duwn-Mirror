@@ -31,7 +31,7 @@ if (-not $Files -or $Files.Count -eq 0) {
     $Files = @(
         "$rootDir\build-msvc\bin\Release\duwn-mirror.exe",
         "$rootDir\build-msvc\bin\Release\duwn-virtualcam.dll",
-        "$rootDir\installer\Duwn-Mirror-Setup-1.1.3-x64.exe"
+        "$rootDir\installer\Duwn-Mirror-Setup-1.1.4-x64.exe"
     )
 }
 

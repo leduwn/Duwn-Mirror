@@ -86,6 +86,7 @@ public:
     DWORD GetPid() const noexcept { return m_proc_info.dwProcessId ? m_proc_info.dwProcessId : m_last_pid; }
 
     uint16_t ActiveAirPlayPortBase() const noexcept { return m_active_port_base; }
+    uint16_t ActiveAirPlayRtspPort() const noexcept { return static_cast<uint16_t>(m_active_port_base + 1); }
     static bool IsPortBlockAvailable(uint16_t base) noexcept;
     static uint16_t SelectDeterministicAirPlayPort(uint16_t preferred_base) noexcept;
 
