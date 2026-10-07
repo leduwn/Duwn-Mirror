@@ -42,7 +42,7 @@ SetupIconFile=..\assets\app_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 ; Compression and Packaging
-Compression=lzma2/ultra64
+Compression=lzma2/max
 SolidCompression=yes
 OutputDir=.
 OutputBaseFilename=Duwn-Mirror-Setup-{#AppVersion}-x64
@@ -119,7 +119,7 @@ Source: "..\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\UxPlay-GPL-3.0.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Virtual Camera DirectShow Filter (Optional Component)
-Source: "..\build-msvc\bin\Release\duwn-virtualcam.dll"; DestDir: "{app}"; Flags: restartreplace uninsrestartdelete 64bit; Components: vcam
+Source: "..\build-msvc\bin\Release\duwn-virtualcam.dll"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete 64bit; Components: vcam
 
 ; AirPlay Engine & GStreamer Runtime
 Source: "..\build-msvc\bin\Release\duwn-airplay\uxplay.exe"; DestDir: "{app}\duwn-airplay"; Flags: ignoreversion

@@ -80,6 +80,9 @@ public:
     void SetMediaInfrastructureReady(bool ready) noexcept {
         m_media_infrastructure_ready.store(ready, std::memory_order_release);
     }
+    uint64_t SessionFramesPresented() const noexcept {
+        return m_session_frames_presented.load(std::memory_order_relaxed);
+    }
 
 private:
     bool Init() noexcept;
@@ -150,7 +153,6 @@ private:
     std::unique_ptr<video::VideoDecoder>  m_video_decoder;
     std::unique_ptr<video::FrameScheduler> m_scheduler;
     std::unique_ptr<video::IVideoRenderer> m_renderer;
-    std::unique_ptr<video::IVideoRenderer> m_preview_renderer;
     std::unique_ptr<capture::CaptureServer> m_capture_server;
     std::unique_ptr<capture::SharedTexture> m_shared_texture;
     std::atomic<uint64_t>                  m_export_frame_index{0};
@@ -218,6 +220,7 @@ private:
     // Preview and frame presentation lifecycle state
     std::atomic<int64_t>   m_session_start_ns{0};
     std::atomic<uint64_t>  m_session_generation{1};
+    std::atomic<uint64_t>  m_session_frames_presented{0};
     std::atomic<bool>      m_session_first_frame_handled{false};
     std::atomic<bool>      m_first_video_rtp_recorded{false};
     std::atomic<bool>      m_first_au_recorded{false};

@@ -285,7 +285,7 @@ int App::Run(bool test_motion, bool verify_capture, bool test_rotate) noexcept {
 
     common::CpuCapabilities::Get().LogCapabilities();
 
-    m_net_env = network::NetworkEnvironmentInfo::Probe();
+    m_net_env = network::NetworkEnvironmentInfo::Probe(m_settings.connection_mode == ConnectionMode::WiredUsb);
 
     m_verify_capture = verify_capture;
     m_test_rotate    = test_rotate;
@@ -449,10 +449,7 @@ int App::Run(bool test_motion, bool verify_capture, bool test_rotate) noexcept {
 
             if (msg.message == WM_DUWN_FIRST_FRAME) {
                 const uint64_t msg_gen = static_cast<uint64_t>(msg.lParam);
-                if (msg_gen != m_session_generation.load(std::memory_order_acquire)) {
-                    // Stale message from prior session generation; discard
-                    continue;
-                }
+                const uint64_t cur_gen = m_session_generation.load(std::memory_order_acquire);
 
                 const uint32_t fw = static_cast<uint32_t>(msg.wParam >> 32);
                 const uint32_t fh = static_cast<uint32_t>(msg.wParam & 0xFFFFFFFF);
@@ -460,9 +457,8 @@ int App::Run(bool test_motion, bool verify_capture, bool test_rotate) noexcept {
                 if (m_window) {
                     std::lock_guard lock{m_window->StateMutex()};
                     auto& st = m_window->State();
-                    if (st.status == ui::ConnectionStatus::Idle ||
-                        st.session_state == airplay::AirPlaySessionState::Idle) {
-                        // Current session is idle; do not promote to streaming
+                    if (!ui::IsSessionGenerationAccepted(msg_gen, cur_gen, st.status, st.session_state)) {
+                        // Stale generation message or session idle discarded
                         continue;
                     }
                     m_window->SetStatusText(ui::loc::Get(ui::loc::S::Status_Streaming));
@@ -503,7 +499,7 @@ int App::Run(bool test_motion, bool verify_capture, bool test_rotate) noexcept {
 
             if (msg.message == WM_DUWN_NETWORK_CHANGED) {
 
-                OnNetworkEnvironmentChanged(m_net_monitor ? m_net_monitor->CurrentEnvironment() : network::NetworkEnvironmentInfo::Probe());
+                OnNetworkEnvironmentChanged(m_net_monitor ? m_net_monitor->CurrentEnvironment() : network::NetworkEnvironmentInfo::Probe(m_connection_mode.load(std::memory_order_acquire) == ConnectionMode::WiredUsb));
 
                 continue;
 
@@ -959,6 +955,7 @@ bool App::Init() noexcept {
     ap_cfg.receiver_quality_name = std::string(GetReceiverQualityName(m_settings.receiver_quality));
     ap_cfg.enable_fps_data       = true;
     ap_cfg.debug_log             = m_settings.debug_log;
+    ap_cfg.is_wired              = (m_settings.connection_mode == ConnectionMode::WiredUsb);
 
     m_airplay = std::make_unique<airplay::AirPlayEngine>(std::move(ap_cfg));
     m_airplay->SetVideoCallback([this](const uint8_t* d, size_t s,
@@ -1042,9 +1039,14 @@ bool App::Init() noexcept {
         OnMetadata(m);
     });
 
-    if (m_settings.connection_mode == ConnectionMode::WirelessAirPlay && !m_airplay->Start()) {
-        DUWN_LOG_ERROR("App", "AirPlayEngine early start failed");
-        return false;
+    if (m_settings.connection_mode == ConnectionMode::WirelessAirPlay) {
+        if (!m_net_env.best_adapter_ip.empty()) {
+            m_airplay->SetBindIpv4(std::wstring(m_net_env.best_adapter_ip.begin(), m_net_env.best_adapter_ip.end()), m_net_env.best_adapter_prefix);
+        }
+        if (!m_airplay->Start()) {
+            DUWN_LOG_ERROR("App", "AirPlayEngine early start failed");
+            return false;
+        }
     }
 
     m_ble_beacon = std::make_unique<network::BleBeaconPublisher>();
@@ -1244,8 +1246,6 @@ bool App::Init() noexcept {
     if (m_d3d->Device()) {
         m_shared_texture->Create(m_d3d->Device(), init_w, init_h);
     }
-
-    m_preview_renderer->LogSwapChainConfig("PreviewWindow");
 
     // Video minimal infrastructure is ready
     m_video_min_ready.store(true, std::memory_order_release);
@@ -1724,7 +1724,6 @@ void App::UpdateWiredConnection() noexcept {
             if (m_audio_engine) m_audio_engine->Flush();
 
             if (m_renderer) m_renderer->PresentBlack();
-            if (m_preview_renderer) m_preview_renderer->PresentBlack();
             if (m_output_window) {
                 m_output_window->Hide();
                 m_output_window->SetHasFrame(false);
@@ -1768,6 +1767,8 @@ void App::UpdateWiredConnection() noexcept {
             current.network_if_index, current.network_luid, current.network_prefix);
 
         if (m_airplay) {
+
+            m_airplay->SetIsWired(true);
 
             m_airplay->SetBindIpv4(m_wired_bind_ipv4, current.network_prefix);
 
@@ -1859,6 +1860,10 @@ void App::StartWiredControl() noexcept {
 
     m_wired_control.Start();
 
+    if (m_output_window) {
+        m_output_window->SetInteractiveControlMode(true);
+    }
+
     if (m_window) {
 
         auto& s = m_window->State();
@@ -1878,6 +1883,10 @@ void App::StartWiredControl() noexcept {
 void App::StopWiredControl() noexcept {
 
     m_wired_control.Stop();
+
+    if (m_output_window) {
+        m_output_window->SetInteractiveControlMode(false);
+    }
 
     if (m_window) {
 
@@ -1924,8 +1933,6 @@ void App::SwitchConnectionMode(ConnectionMode mode) noexcept {
     if (m_audio_ring) m_audio_ring->Flush();
 
     if (m_renderer) m_renderer->PresentBlack();
-
-    if (m_preview_renderer) m_preview_renderer->PresentBlack();
 
     ResetSessionFirstEvents();
 
@@ -1983,12 +1990,20 @@ void App::SwitchConnectionMode(ConnectionMode mode) noexcept {
 
         if (m_ble_beacon) {
             network::BleBeaconConfig ble_cfg;
+            ble_cfg.ipv4_address = m_net_env.best_adapter_ip;
             ble_cfg.airplay_port = 7000;
             ble_cfg.enable_beacon = true;
             m_ble_beacon->Start(ble_cfg);
         }
 
-        if (m_airplay) m_airplay->SetBindIpv4({});
+        if (m_airplay) {
+            m_airplay->SetIsWired(false);
+            if (!m_net_env.best_adapter_ip.empty()) {
+                m_airplay->SetBindIpv4(std::wstring(m_net_env.best_adapter_ip.begin(), m_net_env.best_adapter_ip.end()), m_net_env.best_adapter_prefix);
+            } else {
+                m_airplay->SetBindIpv4({});
+            }
+        }
 
         if (m_airplay) m_airplay->ConfigureReceiverQuality(
 
@@ -2045,8 +2060,6 @@ bool App::RecreateVideoPipeline() noexcept {
     m_video_decoder.reset();
 
     m_renderer.reset();
-
-    m_preview_renderer.reset();
 
     m_d3d.reset();
 
@@ -3311,24 +3324,6 @@ void App::ApplySettingChange(int id, int value) noexcept {
 
     }
 
-    if (m_preview_renderer) {
-
-        m_preview_renderer->SetAspectRatioMode(GetEffectiveAspectRatioMode());
-
-        m_preview_renderer->SetPixelPerfect(static_cast<int>(m_settings.pixel_perfect));
-
-        m_preview_renderer->SetScalingQuality(static_cast<int>(m_settings.scaling_quality));
-
-        m_preview_renderer->SetColorSpace(static_cast<int>(m_settings.color_range), static_cast<int>(m_settings.color_matrix));
-
-        const int controls[] = {m_settings.brightness, m_settings.contrast, m_settings.saturation,
-
-                                m_settings.hue, m_settings.sharpness};
-
-        for (size_t i = 0; i < 5; ++i) m_preview_renderer->SetColorControl(i, controls[i]);
-
-    }
-
     m_match_source.store(m_settings.match_source, std::memory_order_relaxed);
 
     if (m_output_window && (id == Control_Set_Output || id == Control_Set_CaptureCanvas || id == Control_Set_CustomOutput || id == Control_Set_Profile || id == Control_Set_AspectMode)) {
@@ -3545,8 +3540,6 @@ void App::Shutdown() noexcept {
 
     m_renderer.reset();
 
-    m_preview_renderer.reset();
-
     m_d3d.reset();
 
     m_output_window.reset();
@@ -3589,6 +3582,7 @@ bool App::WaitForMediaReadiness(uint32_t timeout_ms) const noexcept {
 
 void App::ResetSessionFirstEvents() noexcept {
     m_session_generation.fetch_add(1, std::memory_order_acq_rel);
+    m_session_frames_presented.store(0, std::memory_order_release);
     m_session_first_frame_handled.store(false, std::memory_order_release);
     m_first_video_rtp_recorded.store(false, std::memory_order_release);
     m_first_au_recorded.store(false, std::memory_order_release);
@@ -3844,7 +3838,6 @@ void App::OnPhase(airplay::SessionPhase prev,
     switch (next) {
     case P::Advertising:
         if (m_renderer) m_renderer->PresentBlack();
-        if (m_preview_renderer) m_preview_renderer->PresentBlack();
         ResetSessionFirstEvents();
         m_last_preview_src_w = 0;
         m_last_preview_src_h = 0;
@@ -3859,7 +3852,6 @@ void App::OnPhase(airplay::SessionPhase prev,
         if (m_scheduler)     m_scheduler->Flush();
         if (m_audio_engine)  m_audio_engine->Flush();
         if (m_renderer)      m_renderer->PresentBlack();
-        if (m_preview_renderer) m_preview_renderer->PresentBlack();
         StopIpcConsumer();
         ResetSessionFirstEvents();
         m_last_preview_src_w = 0;
@@ -4093,27 +4085,9 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
 
 
 
-    // First presented frame / rotation handling for OutputWindow
+    // Stream geometry / rotation tracking for OutputWindow
     if (frame.visible_width > 0 && frame.visible_height > 0) {
-        bool was_handled = m_session_first_frame_handled.exchange(true, std::memory_order_relaxed);
-        if (!was_handled) {
-            HWND main_hwnd = m_main_hwnd.load(std::memory_order_acquire);
-            if (main_hwnd) {
-                const uint64_t gen = m_session_generation.load(std::memory_order_acquire);
-                const WPARAM wp = (static_cast<WPARAM>(frame.visible_width) << 32) | static_cast<WPARAM>(frame.visible_height);
-                const LPARAM lp = static_cast<LPARAM>(gen);
-                ::PostMessageW(main_hwnd, WM_DUWN_FIRST_FRAME, wp, lp);
-            }
-            if (m_output_window) {
-                m_output_window->SetHasFrame(true);
-                m_output_window->OnStreamGeometryChanged(frame.visible_width, frame.visible_height);
-                if (!m_output_window->IsUserHiddenForSession()) {
-                    m_output_window->ShowNoActivate();
-                }
-            }
-            m_last_preview_src_w = frame.visible_width;
-            m_last_preview_src_h = frame.visible_height;
-        } else if (frame.visible_width != m_last_preview_src_w || frame.visible_height != m_last_preview_src_h) {
+        if (frame.visible_width != m_last_preview_src_w || frame.visible_height != m_last_preview_src_h) {
             if (m_output_window) {
                 m_output_window->OnStreamGeometryChanged(frame.visible_width, frame.visible_height);
             }
@@ -4253,6 +4227,7 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
     const video::PresentResult result = m_renderer->Present(frame, skip_wait);
 
     if (result == video::PresentResult::Ok) {
+        m_session_frames_presented.fetch_add(1, std::memory_order_relaxed);
         if (!m_first_output_present_recorded.exchange(true, std::memory_order_relaxed)) {
             duwn::telemetry::ConnectionTimeline::Get().Record(
                 duwn::telemetry::ConnectionMilestone::C13_FirstOutputPresent,
@@ -4266,6 +4241,13 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
                 const WPARAM wp = (static_cast<WPARAM>(frame.visible_width) << 32) | static_cast<WPARAM>(frame.visible_height);
                 const LPARAM lp = static_cast<LPARAM>(gen);
                 ::PostMessageW(main_hwnd, WM_DUWN_FIRST_FRAME, wp, lp);
+            }
+            if (m_output_window) {
+                m_output_window->SetHasFrame(true);
+                m_output_window->OnStreamGeometryChanged(frame.visible_width, frame.visible_height);
+                if (!m_output_window->IsUserHiddenForSession()) {
+                    m_output_window->ShowNoActivate();
+                }
             }
         }
 
@@ -4319,29 +4301,6 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
         }
     }
 
-    if (m_preview_renderer) {
-        const int64_t preview_select_qpc = clock::MonotonicClock::NowQpcTicks();
-        const video::PresentResult prev_res = m_preview_renderer->Present(frame, true);
-        const int64_t preview_present_qpc = clock::MonotonicClock::NowQpcTicks();
-
-        if (prev_res == video::PresentResult::Ok) {
-            if (!m_first_preview_present_recorded.exchange(true, std::memory_order_relaxed)) {
-                duwn::telemetry::ConnectionTimeline::Get().Record(
-                    duwn::telemetry::ConnectionMilestone::C12_FirstPreviewPresent,
-                    std::format("{}x{} visible", frame.visible_width, frame.visible_height));
-                DUWN_LOG_INFOF("Diagnostics",
-                    "FIRST EVENT: Preview frame presented successfully ({}x{})",
-                    frame.visible_width, frame.visible_height);
-            }
-            telemetry::LatencyTelemetry::Get().RecordPreviewSuccess(
-                decoder_output_qpc, preview_select_qpc, preview_present_qpc);
-        } else if (prev_res == video::PresentResult::Skipped) {
-            telemetry::LatencyTelemetry::Get().RecordPreviewSkip();
-        } else {
-            telemetry::LatencyTelemetry::Get().RecordPreviewError();
-        }
-    }
-
     m_active_filter_caps.store(m_renderer->FilterCaps(), std::memory_order_relaxed);
 
     switch (result) {
@@ -4365,8 +4324,6 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
             frame.pts_ns, frame.width, frame.height, frame.visible_width, frame.visible_height, ::GetCurrentThreadId());
 
         m_renderer->HandleDeviceRemoved();
-
-        if (m_preview_renderer) m_preview_renderer->HandleDeviceRemoved();
 
         PostFatalShutdown(1);
 
@@ -5194,12 +5151,35 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
                 state.resolved_audio_device_name = m_wasapi
                     ? m_wasapi->ResolvedDeviceName() : L"—";
 
-                const bool has_video_evidence = (cur_v_rend > 0 || v_rend_fps > 0.0 || v_dec_fps > 0.0 || eff_vis_w > 0);
+                const uint64_t session_pres = m_session_frames_presented.load(std::memory_order_relaxed);
+                const auto eval = ui::EvaluateStreamingStatus(
+                    state.session_state,
+                    session_pres,
+                    uptime_sec,
+                    cur_v_rtp,
+                    cur_v_dec,
+                    cur_v_rend,
+                    m.video_queue_depth.load(std::memory_order_relaxed));
+
                 if (state.session_state == airplay::AirPlaySessionState::Streaming ||
                     state.session_state == airplay::AirPlaySessionState::Connected) {
-                    state.status = ui::ConnectionStatus::Streaming;
-                    state.status_message = has_video_evidence ? ui::loc::Get(ui::loc::S::Status_Streaming)
-                                                              : ui::loc::Get(ui::loc::S::Status_ConnectedWaitingVideo);
+                    state.status = eval.status;
+                    if (eval.status == ui::ConnectionStatus::Streaming) {
+                        state.status_message = ui::loc::Get(ui::loc::S::Status_Streaming);
+                    } else {
+                        if (eval.stall_stage != ui::StallStage::None) {
+                            static int64_t s_last_stall_log_sec = 0;
+                            if (uptime_sec - s_last_stall_log_sec >= 3) {
+                                s_last_stall_log_sec = uptime_sec;
+                                DUWN_LOG_WARNF("Diagnostics",
+                                    "[AIRPLAY_STALL_STAGE] stage={} uptime={}s rtp_pkts={} dec_frames={} rend_frames={} queue_depth={}",
+                                    eval.stall_stage_name, uptime_sec, cur_v_rtp, cur_v_dec, cur_v_rend, m.video_queue_depth.load(std::memory_order_relaxed));
+                            }
+                            state.status_message = eval.stall_message;
+                        } else {
+                            state.status_message = ui::loc::Get(ui::loc::S::Status_ConnectedWaitingVideo);
+                        }
+                    }
                 }
             }
         }

@@ -33,14 +33,101 @@ enum class SettingsSubTab {
 enum class ConnectionStatus {
     Ready,          // Ready for AirPlay / USB connection (advertising)
     Connecting,     // Handshake in progress
+    Connected,      // Session established, waiting for video
     Streaming,      // Actively presenting frames
     Paused,         // Paused / static screen
     Reconnecting,   // Stream dropped, attempting reconnect
     Disconnected,   // Session terminated / disconnected
     Error,          // Fatal error or sidecar failure
-    Idle = Ready,   // Alias for Ready
-    Connected = Streaming // Alias for Streaming
+    Idle = Ready    // Alias for Ready
 };
+
+enum class StallStage {
+    None,
+    WaitingVideoPacket,
+    WaitingDecoder,
+    WaitingRenderer,
+    WaitingPresent
+};
+
+inline const char* StallStageToString(StallStage s) noexcept {
+    switch (s) {
+    case StallStage::WaitingVideoPacket: return "WAITING_VIDEO_PACKET";
+    case StallStage::WaitingDecoder:     return "WAITING_DECODER";
+    case StallStage::WaitingRenderer:    return "WAITING_RENDERER";
+    case StallStage::WaitingPresent:     return "WAITING_PRESENT";
+    default:                             return "NONE";
+    }
+}
+
+struct StreamingStatusEvaluation {
+    ConnectionStatus status{ConnectionStatus::Idle};
+    StallStage stall_stage{StallStage::None};
+    const char* stall_stage_name{"NONE"};
+    std::wstring stall_message;
+};
+
+inline StreamingStatusEvaluation EvaluateStreamingStatus(
+    airplay::AirPlaySessionState session_state,
+    uint64_t session_frames_presented,
+    int64_t uptime_sec,
+    uint64_t rtp_packets,
+    uint64_t decoded_frames,
+    uint64_t rendered_frames,
+    uint64_t queue_depth) noexcept
+{
+    StreamingStatusEvaluation eval;
+    const bool has_video_evidence = (session_frames_presented > 0);
+    if (session_state == airplay::AirPlaySessionState::Streaming ||
+        session_state == airplay::AirPlaySessionState::Connected) {
+        if (has_video_evidence) {
+            eval.status = ConnectionStatus::Streaming;
+            eval.stall_stage = StallStage::None;
+            eval.stall_stage_name = "NONE";
+            eval.stall_message = L"Đang phát";
+        } else {
+            eval.status = ConnectionStatus::Connected;
+            if (uptime_sec >= 3) {
+                if (rtp_packets == 0) {
+                    eval.stall_stage = StallStage::WaitingVideoPacket;
+                    eval.stall_stage_name = "WAITING_VIDEO_PACKET";
+                    eval.stall_message = L"Chờ hình ảnh... (Chờ gói video RTP / Firewall UDP 7010)";
+                } else if (decoded_frames == 0) {
+                    eval.stall_stage = StallStage::WaitingDecoder;
+                    eval.stall_stage_name = "WAITING_DECODER";
+                    eval.stall_message = L"Chờ hình ảnh... (Đang giải mã H.264/HEVC)";
+                } else if (queue_depth == 0 && rendered_frames == 0) {
+                    eval.stall_stage = StallStage::WaitingRenderer;
+                    eval.stall_stage_name = "WAITING_RENDERER";
+                    eval.stall_message = L"Chờ hình ảnh... (Chờ bộ dựng hình)";
+                } else {
+                    eval.stall_stage = StallStage::WaitingPresent;
+                    eval.stall_stage_name = "WAITING_PRESENT";
+                    eval.stall_message = L"Chờ hình ảnh... (Đang hoàn tất hiển thị)";
+                }
+            } else {
+                eval.stall_message = L"Chờ video...";
+            }
+        }
+    } else {
+        eval.status = ConnectionStatus::Idle;
+    }
+    return eval;
+}
+
+inline bool IsSessionGenerationAccepted(
+    uint64_t message_generation,
+    uint64_t current_generation,
+    ConnectionStatus current_status,
+    airplay::AirPlaySessionState session_state) noexcept
+{
+    if (message_generation != current_generation) return false;
+    if (current_status == ConnectionStatus::Idle ||
+        session_state == airplay::AirPlaySessionState::Idle) {
+        return false;
+    }
+    return true;
+}
 
 struct AudioDeviceItem {
     std::wstring id;

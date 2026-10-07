@@ -103,11 +103,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     WSADATA wsa_data{};
     int wsa_res = ::WSAStartup(MAKEWORD(2, 2), &wsa_data);
 
-    duwn::app::App app;
-    int ret = app.Run(test_motion, verify_capture, test_rotate);
+    int ret = 0;
+    {
+        duwn::app::App app;
+        ret = app.Run(test_motion, verify_capture, test_rotate);
+    }
 
     if (wsa_res == 0) {
         ::WSACleanup();
     }
-    return ret;
+    ::ExitProcess(static_cast<UINT>(ret));
 }

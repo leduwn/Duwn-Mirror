@@ -45,12 +45,14 @@ AdapterClassification ClassifyAdapter(
     bool is_up,
     bool is_wifi,
     bool is_ethernet,
-    int* out_score = nullptr) noexcept;
+    int* out_score = nullptr,
+    bool is_wired_mode = false) noexcept;
 
 struct AdapterDetails {
     std::wstring          name;
     std::wstring          description;
     std::string           ipv4_address;
+    uint8_t               ipv4_prefix{24};
     bool                  is_physical{false};
     bool                  is_wifi{false};
     bool                  is_ethernet{false};
@@ -65,6 +67,7 @@ struct NetworkEnvironmentInfo {
     bool network_isolation_suspected{false};
     bool public_rules_localsubnet{false};
     std::string best_adapter_ip;
+    uint8_t best_adapter_prefix{24};
     std::wstring best_adapter_name;
     AdapterClassification best_adapter_class{AdapterClassification::Disconnected};
     int best_adapter_score{0};
@@ -74,7 +77,7 @@ struct NetworkEnvironmentInfo {
     std::vector<AdapterDetails> adapters;
 
     // Probes network interfaces and firewall profiles.
-    static NetworkEnvironmentInfo Probe() noexcept;
+    static NetworkEnvironmentInfo Probe(bool is_wired_mode = false) noexcept;
 
     // Emits structured logs and actionable firewall recommendations.
     void LogEnvironment() const noexcept;

@@ -38,6 +38,7 @@ struct AirPlayProcessConfig {
     bool         enable_fps_data{true}; // Enable -FPSdata for client streaming reports
     bool         debug_log{false};
     std::wstring control_pipe_name{L"\\\\.\\pipe\\duwn-mirror-control"};
+    bool         is_wired{false};
 };
 
 struct AirPlayEnvelope {

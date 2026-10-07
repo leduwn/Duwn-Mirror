@@ -152,6 +152,9 @@ void StartAsyncWorkerIfNeeded() {
     if (g_async_queue.started) return;
     g_async_queue.stop_requested = false;
     g_async_queue.worker = std::jthread([](std::stop_token st) {
+        std::stop_callback cb(st, [] {
+            g_async_queue.cv.notify_all();
+        });
         while (!st.stop_requested()) {
             std::vector<std::string> batch;
             {
@@ -287,6 +290,11 @@ void Logger::Write(LogLevel level, std::string_view component,
         Timestamp(), LevelName(level), component, clean_msg);
 
     ::OutputDebugStringA(line.c_str());
+
+    {
+        std::lock_guard lock{g_log.mutex};
+        if (!g_log.initialised) return;
+    }
 
     StartAsyncWorkerIfNeeded();
     {

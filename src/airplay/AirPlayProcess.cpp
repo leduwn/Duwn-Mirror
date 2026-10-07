@@ -5,6 +5,7 @@
 #include "AirPlayProcess.h"
 #include "SidecarVerificationCache.h"
 #include "AppleModelDatabase.h"
+#include "network/NetworkEnvironment.h"
 #include "common/logging/Logger.h"
 #include "common/metrics/Metrics.h"
 #include "common/clock/MonotonicClock.h"
@@ -707,8 +708,10 @@ std::wstring AirPlayProcess::BuildCommandLine() const noexcept {
                                profile == LatencyProfile::LiveFullLowLatency;
     const wchar_t* sink_options = sink_sync_off ? L" sync=false" : L"";
     std::wstring cmd = std::format(
-        L"\"{}\" -p {} -n \"{}\" -nh -s {}x{}@{} -fps {}{}{} -vrtp \"config-interval=1 ! udpsink host=127.0.0.1 port={}{}\" -artp \"pt=96 ! udpsink host=127.0.0.1 port={}{}\" -nc",
+        L"\"{}\" -p {},{},{} -n \"{}\" -nh -s {}x{}@{} -fps {}{}{} -vrtp \"config-interval=1 ! udpsink host=127.0.0.1 port={}{}\" -artp \"pt=96 ! udpsink host=127.0.0.1 port={}{}\" -nc",
         m_config.uxplay_exe_path,
+        m_active_port_base,
+        m_active_port_base,
         m_active_port_base,
         name_utf16,
         env.width,
@@ -724,8 +727,12 @@ std::wstring AirPlayProcess::BuildCommandLine() const noexcept {
     );
 
     if (m_config.debug_log) cmd += L" -d";
+
     if (!m_config.bind_ipv4.empty()) {
         cmd += std::format(L" -bind-ip {} -bind-prefix {}", m_config.bind_ipv4, m_config.bind_prefix);
+    }
+
+    if (m_config.is_wired) {
         if (IsWiredH265Enabled()) {
             cmd += L" -h265";
         }
@@ -1047,7 +1054,7 @@ void AirPlayProcess::SupervisionLoop(std::stop_token stop) noexcept {
                     if (!m_sockets_ready.exchange(true, std::memory_order_acq_rel)) {
                         duwn::telemetry::ConnectionTimeline::Get().Record(
                             duwn::telemetry::ConnectionMilestone::C4_UxPlaySocketsInitialized,
-                            std::format("TCP port {} listening", m_active_port_base + 1));
+                            std::format("TCP port {} listening", m_active_port_base));
                         duwn::telemetry::ConnectionTimeline::Get().Record(
                             duwn::telemetry::ConnectionMilestone::C4A_MdnsPublicationInitiated,
                             "mDNS publication active (UDP 5353)");

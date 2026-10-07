@@ -214,6 +214,14 @@ void OutputWindow::UpdateToolbarPosition() noexcept {
         // Place below if not enough room above
         tb_y = rc.bottom;
     }
+    if (tb_y + tb_h > mi.rcWork.bottom) {
+        tb_y = mi.rcWork.bottom - tb_h;
+    }
+    if (tb_x < mi.rcWork.left) {
+        tb_x = mi.rcWork.left;
+    } else if (tb_x + w > mi.rcWork.right) {
+        tb_x = mi.rcWork.right - w;
+    }
 
     ::SetWindowPos(m_toolbar_hwnd, m_always_on_top ? HWND_TOPMOST : HWND_TOP,
                    tb_x, tb_y, w, tb_h,
@@ -340,25 +348,11 @@ void OutputWindow::ToggleAlwaysOnTop() noexcept {
 
 void OutputWindow::SetToolbarVisible(bool visible) noexcept {
     if (m_show_toolbar == visible) return;
-    int base_tb_h = static_cast<int>(std::round(38.0f * GetDpiScale()));
     m_show_toolbar = visible;
     if (!m_fullscreen) {
         m_restore_toolbar = visible;
-        if (m_hwnd) {
-            RECT rc{};
-            ::GetWindowRect(m_hwnd, &rc);
-            int cur_w = rc.right - rc.left;
-            int cur_h = rc.bottom - rc.top;
-            int new_h = visible ? (cur_h + base_tb_h) : (cur_h - base_tb_h);
-            ::SetWindowPos(m_hwnd, nullptr, rc.left, rc.top, cur_w, new_h,
-                           SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-            EnsureAccessiblePlacement();
-        }
     }
-    LayoutChildren();
-    if (m_on_resize) {
-        m_on_resize(VideoSurfaceWidth(), VideoSurfaceHeight());
-    }
+    UpdateToolbarPosition();
 }
 
 void OutputWindow::SetHasFrame(bool has) noexcept {
@@ -859,32 +853,28 @@ LRESULT OutputWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) n
         break;
 
     case WM_NCHITTEST: {
-        if (m_fullscreen) return HTCLIENT;
         POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT rc{};
         ::GetWindowRect(hwnd, &rc);
         int border = static_cast<int>(std::round(8.0f * GetDpiScale()));
-        if (border < 4) border = 4;
-
-        bool on_left   = (pt.x >= rc.left && pt.x < rc.left + border);
-        bool on_right  = (pt.x <= rc.right && pt.x > rc.right - border);
-        bool on_top    = (pt.y >= rc.top && pt.y < rc.top + border);
-        bool on_bottom = (pt.y <= rc.bottom && pt.y > rc.bottom - border);
-
-        if (on_top && on_left)     return HTTOPLEFT;
-        if (on_top && on_right)    return HTTOPRIGHT;
-        if (on_bottom && on_left)  return HTBOTTOMLEFT;
-        if (on_bottom && on_right) return HTBOTTOMRIGHT;
-        if (on_left)   return HTLEFT;
-        if (on_right)  return HTRIGHT;
-        if (on_top)    return HTTOP;
-        if (on_bottom) return HTBOTTOM;
-
-        return HTCLIENT;
+        return ComputeHitTest(
+            m_fullscreen,
+            ::IsZoomed(hwnd) != FALSE,
+            m_interactive_control_mode,
+            pt,
+            rc,
+            border);
     }
 
+    case WM_NCLBUTTONDBLCLK:
+        if (wp == HTCAPTION) {
+            ToggleFullscreen();
+            return 0;
+        }
+        break;
+
     case WM_LBUTTONDOWN: {
-        if (!m_fullscreen) {
+        if (!m_fullscreen && !::IsZoomed(hwnd) && !m_interactive_control_mode) {
             ::ReleaseCapture();
             ::SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
             return 0;
@@ -971,10 +961,10 @@ static ToolbarLayout ComputeToolbarLayout(int w, float s) noexcept {
     int gap = static_cast<int>(6.0f * s);
 
     int close_w = static_cast<int>(28.0f * s);
-    int fs_w = static_cast<int>(62.0f * s);
-    int pin_w = static_cast<int>(46.0f * s);
-    int fit_w = static_cast<int>(44.0f * s);
-    int mute_w = static_cast<int>(64.0f * s);
+    int fs_w    = static_cast<int>(62.0f * s);
+    int pin_w   = static_cast<int>(46.0f * s);
+    int fit_w   = static_cast<int>(44.0f * s);
+    int mute_w  = static_cast<int>(64.0f * s);
 
     int cur_r = w - static_cast<int>(8.0f * s);
     l.close_rc = RECT{ cur_r - close_w, ty, cur_r, ty + bh };
@@ -989,7 +979,8 @@ static ToolbarLayout ComputeToolbarLayout(int w, float s) noexcept {
     l.fit_rc = RECT{ cur_r - fit_w, ty, cur_r, ty + bh };
     cur_r -= (fit_w + gap);
 
-    int left_x = static_cast<int>(8.0f * s);
+    int drag_grip_w = static_cast<int>(16.0f * s);
+    int left_x = static_cast<int>(8.0f * s) + drag_grip_w;
     l.mute_rc = RECT{ left_x, ty, left_x + mute_w, ty + bh };
     int avail_w = cur_r - (l.mute_rc.right + static_cast<int>(8.0f * s));
 
@@ -1023,27 +1014,70 @@ static void DrawOutputToolbar(HWND hwnd, OutputWindow* win, float s,
     HBITMAP mbm = ::CreateCompatibleBitmap(hdc, w, h);
     HGDIOBJ obm = ::SelectObject(mdc, mbm);
 
-    HBRUSH bg = ::CreateSolidBrush(RGB(22, 27, 34));
-    ::FillRect(mdc, &rc, bg); ::DeleteObject(bg);
+    // Clean white background
+    HBRUSH bg = ::CreateSolidBrush(RGB(255, 255, 255));
+    ::FillRect(mdc, &rc, bg);
+    ::DeleteObject(bg);
 
-    HPEN sp = ::CreatePen(PS_SOLID, 1, RGB(48, 54, 61));
+    // Subtle light bottom divider #E2E8F0
+    HPEN sp = ::CreatePen(PS_SOLID, 1, RGB(226, 232, 240));
     HGDIOBJ op = ::SelectObject(mdc, sp);
     ::MoveToEx(mdc, 0, h - 1, nullptr); ::LineTo(mdc, w, h - 1);
     ::SelectObject(mdc, op); ::DeleteObject(sp);
+
+    // 6-dot drag grip handle on the far left (indicating the toolbar is draggable)
+    int dot_r = static_cast<int>(1.5f * s);
+    if (dot_r < 1) dot_r = 1;
+    HBRUSH dot_br = ::CreateSolidBrush(RGB(148, 163, 184)); // Slate-400
+    HGDIOBJ old_br = ::SelectObject(mdc, dot_br);
+    HPEN dot_pen = ::CreatePen(PS_NULL, 0, RGB(0, 0, 0));
+    HGDIOBJ old_pen = ::SelectObject(mdc, dot_pen);
+    int dot_x1 = static_cast<int>(8.0f * s);
+    int dot_x2 = static_cast<int>(13.0f * s);
+    int dot_cy = h / 2;
+    int dot_sp = static_cast<int>(5.0f * s);
+    for (int dy : { -dot_sp, 0, dot_sp }) {
+        ::Ellipse(mdc, dot_x1 - dot_r, dot_cy + dy - dot_r, dot_x1 + dot_r + 1, dot_cy + dy + dot_r + 1);
+        ::Ellipse(mdc, dot_x2 - dot_r, dot_cy + dy - dot_r, dot_x2 + dot_r + 1, dot_cy + dy + dot_r + 1);
+    }
+    ::SelectObject(mdc, old_pen); ::DeleteObject(dot_pen);
+    ::SelectObject(mdc, old_br); ::DeleteObject(dot_br);
 
     ::SetBkMode(mdc, TRANSPARENT);
     HFONT fnt = ::CreateFontW(static_cast<int>(-11.0f * s), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
         DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     HGDIOBJ ofnt = ::SelectObject(mdc, fnt);
 
-    auto DrawBtn = [&](const RECT& r, const wchar_t* txt, bool act, bool hov) {
-        HBRUSH fbr = ::CreateSolidBrush(act ? RGB(30, 58, 138) : (hov ? RGB(33, 38, 45) : RGB(22, 27, 34)));
-        HPEN pbr = ::CreatePen(PS_SOLID, 1, act ? RGB(59, 130, 246) : RGB(48, 54, 61));
+    auto DrawBtn = [&](const RECT& r, const wchar_t* txt, bool act, bool hov, bool is_close = false) {
+        COLORREF bg_col;
+        COLORREF pen_col;
+        COLORREF txt_col;
+
+        if (is_close) {
+            bg_col = hov ? RGB(254, 226, 226) : RGB(248, 250, 252);
+            pen_col = hov ? RGB(239, 68, 68) : RGB(226, 232, 240);
+            txt_col = hov ? RGB(220, 38, 38) : RGB(100, 116, 139);
+        } else if (act) {
+            bg_col = RGB(219, 234, 254);   // Light blue #DBEAFE
+            pen_col = RGB(59, 130, 246);   // Accent blue #3B82F6
+            txt_col = RGB(29, 78, 216);    // Dark blue #1D4ED8
+        } else if (hov) {
+            bg_col = RGB(226, 232, 240);   // Gray hover #E2E8F0
+            pen_col = RGB(148, 163, 184);  // Slate-400
+            txt_col = RGB(15, 23, 42);     // Slate-900
+        } else {
+            bg_col = RGB(248, 250, 252);   // Slate-50 #F8FAFC
+            pen_col = RGB(226, 232, 240);  // Slate-200 #E2E8F0
+            txt_col = RGB(51, 65, 85);     // Slate-700 #334155
+        }
+
+        HBRUSH fbr = ::CreateSolidBrush(bg_col);
+        HPEN pbr = ::CreatePen(PS_SOLID, 1, pen_col);
         HGDIOBJ oP = ::SelectObject(mdc, pbr), oB = ::SelectObject(mdc, fbr);
         ::RoundRect(mdc, r.left, r.top, r.right, r.bottom, static_cast<int>(6 * s), static_cast<int>(6 * s));
         ::SelectObject(mdc, oP); ::SelectObject(mdc, oB);
         ::DeleteObject(fbr); ::DeleteObject(pbr);
-        ::SetTextColor(mdc, act || hov ? RGB(240, 246, 252) : RGB(201, 209, 217));
+        ::SetTextColor(mdc, txt_col);
         RECT tr = r; ::DrawTextW(mdc, txt, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     };
 
@@ -1053,20 +1087,23 @@ static void DrawOutputToolbar(HWND hwnd, OutputWindow* win, float s,
     if (layout.has_slider) {
         int th = static_cast<int>(4 * s);
         RECT trk{ layout.sx0, layout.sy, layout.sx1, layout.sy + th };
-        HBRUSH tbg = ::CreateSolidBrush(RGB(48, 54, 61)); ::FillRect(mdc, &trk, tbg); ::DeleteObject(tbg);
+        HBRUSH tbg = ::CreateSolidBrush(RGB(226, 232, 240)); ::FillRect(mdc, &trk, tbg); ::DeleteObject(tbg);
 
         int fx = layout.sx0 + static_cast<int>((layout.sx1 - layout.sx0) * vol);
         RECT frc{ layout.sx0, layout.sy, fx, layout.sy + th };
         HBRUSH fbr = ::CreateSolidBrush(RGB(59, 130, 246)); ::FillRect(mdc, &frc, fbr); ::DeleteObject(fbr);
 
         int tr = static_cast<int>(6 * s);
-        HBRUSH thm = ::CreateSolidBrush(RGB(240, 246, 252));
+        HBRUSH thm = ::CreateSolidBrush(RGB(255, 255, 255));
+        HPEN thm_pen = ::CreatePen(PS_SOLID, 1, RGB(59, 130, 246));
+        HGDIOBJ oP = ::SelectObject(mdc, thm_pen);
         HGDIOBJ oB = ::SelectObject(mdc, thm);
         ::Ellipse(mdc, fx - tr, layout.sy + th / 2 - tr, fx + tr, layout.sy + th / 2 + tr);
         ::SelectObject(mdc, oB); ::DeleteObject(thm);
+        ::SelectObject(mdc, oP); ::DeleteObject(thm_pen);
 
         std::wstring vs = std::format(L"{}%", static_cast<int>(std::round(vol * 100.0f)));
-        ::SetTextColor(mdc, RGB(139, 148, 158));
+        ::SetTextColor(mdc, RGB(100, 116, 139));
         RECT prc = layout.prc;
         ::DrawTextW(mdc, vs.c_str(), -1, &prc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
@@ -1074,7 +1111,7 @@ static void DrawOutputToolbar(HWND hwnd, OutputWindow* win, float s,
     DrawBtn(layout.fit_rc, ui::loc::Get(ui::loc::S::Output_Fit), false, hov_btn == 3);
     DrawBtn(layout.pin_rc, ui::loc::Get(ui::loc::S::Output_AlwaysOnTop), pin, hov_btn == 4);
     DrawBtn(layout.fs_rc, ui::loc::Get(ui::loc::S::Output_Fullscreen), fs, hov_btn == 5);
-    DrawBtn(layout.close_rc, L"\x2715", false, hov_btn == 6);
+    DrawBtn(layout.close_rc, L"\x2715", false, hov_btn == 6, true);
 
     ::BitBlt(hdc, 0, 0, w, h, mdc, 0, 0, SRCCOPY);
     ::SelectObject(mdc, ofnt); ::DeleteObject(fnt);
@@ -1152,8 +1189,21 @@ LRESULT OutputWindow::HandleToolbarMessage(HWND hwnd, UINT msg, WPARAM wp, LPARA
             Hide();
             m_user_hidden_for_session = true;
             if (m_on_visibility) m_on_visibility(false);
+        } else if (hit == 0) {
+            if (m_hwnd && !m_fullscreen) {
+                ::ReleaseCapture();
+                ::SendMessageW(m_hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+            }
         }
         return 0;
+    }
+    case WM_LBUTTONDBLCLK: {
+        int px = GET_X_LPARAM(lp), py = GET_Y_LPARAM(lp);
+        if (HitBtn(px, py) == 0) {
+            ToggleFullscreen();
+            return 0;
+        }
+        break;
     }
     case WM_LBUTTONUP:
         if (m_is_dragging_volume) {
@@ -1166,8 +1216,10 @@ LRESULT OutputWindow::HandleToolbarMessage(HWND hwnd, UINT msg, WPARAM wp, LPARA
         if (HitBtn(pt.x, pt.y) != 0) {
             ::SetCursor(::LoadCursorW(nullptr, IDC_HAND));
             return TRUE;
+        } else {
+            ::SetCursor(::LoadCursorW(nullptr, IDC_ARROW));
+            return TRUE;
         }
-        break;
     }
     }
     return ::DefWindowProcW(hwnd, msg, wp, lp);
@@ -1175,6 +1227,9 @@ LRESULT OutputWindow::HandleToolbarMessage(HWND hwnd, UINT msg, WPARAM wp, LPARA
 
 LRESULT OutputWindow::HandleVideoChildMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) noexcept {
     switch (msg) {
+    case WM_NCHITTEST:
+        return HTTRANSPARENT;
+
     case WM_PAINT: {
         if (!m_has_frame) {
             PAINTSTRUCT ps;
@@ -1209,6 +1264,9 @@ LRESULT OutputWindow::HandleVideoChildMessage(HWND hwnd, UINT msg, WPARAM wp, LP
 
 LRESULT OutputWindow::HandlePlaceholderMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) noexcept {
     switch (msg) {
+    case WM_NCHITTEST:
+        return HTTRANSPARENT;
+
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = ::BeginPaint(hwnd, &ps);
