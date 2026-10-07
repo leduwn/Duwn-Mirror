@@ -935,7 +935,7 @@ void MainWindowView::RenderHeader(const UiState& state, float width) noexcept {
     const bool has_video_evidence = (state.total_frames_presented > 0 || state.render_fps > 0.0 || state.decoded_fps > 0.0 || state.width > 0);
 
     if (state.connection_mode == 1) {
-        if (state.status == ConnectionStatus::Streaming) {
+        if (state.status == ConnectionStatus::Streaming || state.status == ConnectionStatus::Connected) {
             if (has_video_evidence) {
                 status_color = colors::StatusGreen;
                 status_text  = loc::Get(loc::S::Status_Streaming);
@@ -967,6 +967,10 @@ void MainWindowView::RenderHeader(const UiState& state, float width) noexcept {
             status_text  = (state.device_name != L"—" && !state.device_name.empty())
                            ? loc::Get(loc::S::Status_Connecting)
                            : loc::Get(loc::S::Status_StartingAirPlay);
+            break;
+        case ConnectionStatus::Connected:
+            status_color = colors::StatusAmber;
+            status_text  = loc::Get(loc::S::Status_ConnectedWaitingVideo);
             break;
         case ConnectionStatus::Streaming:
             if (has_video_evidence) {

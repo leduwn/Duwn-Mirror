@@ -42,7 +42,8 @@ AdapterClassification ClassifyAdapter(
     bool is_up,
     bool is_wifi,
     bool is_ethernet,
-    int* out_score) noexcept
+    int* out_score,
+    bool is_wired_mode) noexcept
 {
     if (!is_up || ipv4.empty()) {
         if (out_score) *out_score = -1;
@@ -62,7 +63,7 @@ AdapterClassification ClassifyAdapter(
         low_d.find(L"apple mobile device ethernet") != std::wstring::npos ||
         low_n.find(L"apple mobile") != std::wstring::npos ||
         low_d.find(L"apple mobile") != std::wstring::npos) {
-        if (out_score) *out_score = 20; // 20 in wireless mode (prioritized separately in wired mode)
+        if (out_score) *out_score = is_wired_mode ? 200 : 20; // 200 in wired mode to guarantee priority over Wi-Fi (100)
         return AdapterClassification::AppleUsb;
     }
 
@@ -156,7 +157,7 @@ bool DetectSuspectedNetworkIsolation(const NetworkEnvironmentInfo& env, int mock
     return true;
 }
 
-NetworkEnvironmentInfo NetworkEnvironmentInfo::Probe() noexcept {
+NetworkEnvironmentInfo NetworkEnvironmentInfo::Probe(bool is_wired_mode) noexcept {
     NetworkEnvironmentInfo info;
 
     // 1. Probe Windows Firewall Network Profile via INetworkListManager
@@ -236,7 +237,7 @@ NetworkEnvironmentInfo NetworkEnvironmentInfo::Probe() noexcept {
 
             int score = 0;
             ad.classification = ClassifyAdapter(ad.name, ad.description, ad.ipv4_address,
-                                                ad.is_up, ad.is_wifi, ad.is_ethernet, &score);
+                                                ad.is_up, ad.is_wifi, ad.is_ethernet, &score, is_wired_mode);
             ad.priority_score = score;
             ad.is_physical = (ad.classification == AdapterClassification::PhysicalLan);
 

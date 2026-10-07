@@ -52,7 +52,9 @@ public:
     bool IsUserHiddenForSession() const noexcept { return m_user_hidden_for_session; }
     bool HasCustomSize() const noexcept { return m_user_has_custom_size; }
     float DesiredLongEdgeDip() const noexcept { return m_desired_long_edge_dip; }
+    bool IsInteractiveControlMode() const noexcept { return m_interactive_control_mode; }
 
+    void SetInteractiveControlMode(bool enabled) noexcept { m_interactive_control_mode = enabled; }
     void SetAlwaysOnTop(bool top) noexcept;
     void ToggleAlwaysOnTop() noexcept;
     void ToggleFullscreen() noexcept;
@@ -152,6 +154,7 @@ private:
     bool                  m_has_frame{false};
     bool                  m_user_hidden_for_session{false};
     bool                  m_pending_geometry_update{false};
+    bool                  m_interactive_control_mode{false};
 
     bool                  m_audio_muted{false};
     float                 m_audio_volume{1.0f};

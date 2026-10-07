@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "CrashHandler.h"
+#include "ui/Loc.h"
 
 #include "AppIcon.h"
 #include "video/VideoGeometry.h"
@@ -220,8 +221,8 @@ void MainWindow::UpdateSessionState(airplay::AirPlaySessionState state) noexcept
                                  : L"Starting AirPlay…";
         break;
     case S::Connected:
-        m_state.status = ui::ConnectionStatus::Streaming;
-        m_state.status_message = L"Connected";
+        m_state.status = ui::ConnectionStatus::Connected;
+        m_state.status_message = duwn::ui::loc::Get(duwn::ui::loc::S::Status_ConnectedWaitingVideo);
         break;
     case S::Streaming:
         m_state.status = ui::ConnectionStatus::Streaming;

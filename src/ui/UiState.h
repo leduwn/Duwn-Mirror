@@ -33,13 +33,13 @@ enum class SettingsSubTab {
 enum class ConnectionStatus {
     Ready,          // Ready for AirPlay / USB connection (advertising)
     Connecting,     // Handshake in progress
+    Connected,      // Session established, waiting for video
     Streaming,      // Actively presenting frames
     Paused,         // Paused / static screen
     Reconnecting,   // Stream dropped, attempting reconnect
     Disconnected,   // Session terminated / disconnected
     Error,          // Fatal error or sidecar failure
-    Idle = Ready,   // Alias for Ready
-    Connected = Streaming // Alias for Streaming
+    Idle = Ready    // Alias for Ready
 };
 
 struct AudioDeviceItem {

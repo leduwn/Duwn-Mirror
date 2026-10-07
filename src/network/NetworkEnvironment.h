@@ -45,7 +45,8 @@ AdapterClassification ClassifyAdapter(
     bool is_up,
     bool is_wifi,
     bool is_ethernet,
-    int* out_score = nullptr) noexcept;
+    int* out_score = nullptr,
+    bool is_wired_mode = false) noexcept;
 
 struct AdapterDetails {
     std::wstring          name;
@@ -74,7 +75,7 @@ struct NetworkEnvironmentInfo {
     std::vector<AdapterDetails> adapters;
 
     // Probes network interfaces and firewall profiles.
-    static NetworkEnvironmentInfo Probe() noexcept;
+    static NetworkEnvironmentInfo Probe(bool is_wired_mode = false) noexcept;
 
     // Emits structured logs and actionable firewall recommendations.
     void LogEnvironment() const noexcept;
