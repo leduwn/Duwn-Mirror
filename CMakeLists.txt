@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(DuwnMirror
-    VERSION 1.1.3
+    VERSION 1.1.4
     DESCRIPTION "Wireless AirPlay and USB device connection for Windows"
     LANGUAGES CXX
 )

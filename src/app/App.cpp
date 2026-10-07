@@ -1053,7 +1053,8 @@ bool App::Init() noexcept {
     if (m_settings.connection_mode == ConnectionMode::WirelessAirPlay) {
         network::BleBeaconConfig ble_cfg;
         ble_cfg.ipv4_address = m_net_env.best_adapter_ip;
-        ble_cfg.airplay_port = 7000;
+        // Apple AirPlay Type 0x09 discovery beacon specifies the RTSP control channel port (base + 1)
+        ble_cfg.airplay_port = m_airplay ? m_airplay->ActiveAirPlayRtspPort() : 7001;
         ble_cfg.enable_beacon = true;
         m_ble_beacon->Start(ble_cfg);
     }
@@ -1991,7 +1992,8 @@ void App::SwitchConnectionMode(ConnectionMode mode) noexcept {
         if (m_ble_beacon) {
             network::BleBeaconConfig ble_cfg;
             ble_cfg.ipv4_address = m_net_env.best_adapter_ip;
-            ble_cfg.airplay_port = 7000;
+            // Apple AirPlay Type 0x09 discovery beacon specifies the RTSP control channel port (base + 1)
+            ble_cfg.airplay_port = m_airplay ? m_airplay->ActiveAirPlayRtspPort() : 7001;
             ble_cfg.enable_beacon = true;
             m_ble_beacon->Start(ble_cfg);
         }
@@ -2192,7 +2194,8 @@ void App::OnNetworkEnvironmentChanged(const network::NetworkEnvironmentInfo& new
         if (m_ble_beacon) {
             network::BleBeaconConfig ble_cfg;
             ble_cfg.ipv4_address = m_net_env.best_adapter_ip;
-            ble_cfg.airplay_port = 7000;
+            // Apple AirPlay Type 0x09 discovery beacon specifies the RTSP control channel port (base + 1)
+            ble_cfg.airplay_port = m_airplay ? m_airplay->ActiveAirPlayRtspPort() : 7001;
             ble_cfg.enable_beacon = true;
             m_ble_beacon->Start(ble_cfg);
         }

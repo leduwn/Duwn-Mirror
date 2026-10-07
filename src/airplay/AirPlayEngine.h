@@ -77,6 +77,8 @@ public:
 
     uint64_t GetSidecarGeneration() const noexcept { return m_process ? m_process->Generation() : 0; }
     DWORD GetSidecarPid() const noexcept { return m_process ? m_process->GetPid() : 0; }
+    uint16_t ActiveAirPlayPortBase() const noexcept { return m_process ? m_process->ActiveAirPlayPortBase() : 7000; }
+    uint16_t ActiveAirPlayRtspPort() const noexcept { return static_cast<uint16_t>(ActiveAirPlayPortBase() + 1); }
 
     SessionPhase        CurrentPhase() const noexcept { return m_state.Current(); }
     AirPlaySessionState CurrentSessionState() const noexcept { return m_state.CurrentState(); }
