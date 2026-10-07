@@ -84,6 +84,7 @@ DUWN_TEST(wired_h265_probe_command_line_isolation) {
         AirPlayProcessConfig cfg{};
         cfg.uxplay_exe_path = L"uxplay.exe";
         cfg.receiver_name = L"Duwn Test";
+        cfg.is_wired = true;
         cfg.bind_ipv4 = L"172.20.10.4";
         cfg.bind_prefix = 28;
         AirPlayProcess proc(cfg, state, nullptr);
@@ -100,6 +101,7 @@ DUWN_TEST(wired_h265_probe_command_line_isolation) {
         AirPlayProcessConfig cfg{};
         cfg.uxplay_exe_path = L"uxplay.exe";
         cfg.receiver_name = L"Duwn Test";
+        cfg.is_wired = true;
         cfg.bind_ipv4 = L"172.20.10.4";
         cfg.bind_prefix = 28;
         AirPlayProcess proc(cfg, state, nullptr);
@@ -144,6 +146,7 @@ DUWN_TEST(wireless_dev_h265_probe_isolation) {
         DUWN_ASSERT(cmd.find(L"-h265") != std::wstring::npos);
         DUWN_ASSERT(cmd.find(L"-bind-ip") == std::wstring::npos);
     }
+    ::SetEnvironmentVariableW(L"DUWN_DEV_WIRELESS_H265_PROBE", nullptr);
 
     // 3. Wired mode with DUWN_DEV_WIRED_H265_PROBE=0: -h265 must NOT appear
     ::SetEnvironmentVariableW(L"DUWN_DEV_WIRED_H265_PROBE", L"0");
@@ -151,6 +154,7 @@ DUWN_TEST(wireless_dev_h265_probe_isolation) {
         AirPlayProcessConfig cfg{};
         cfg.uxplay_exe_path = L"uxplay.exe";
         cfg.receiver_name = L"Duwn Test";
+        cfg.is_wired = true;
         cfg.bind_ipv4 = L"172.20.10.4"; // Wired
         cfg.bind_prefix = 28;
         AirPlayProcess proc(cfg, state, nullptr);

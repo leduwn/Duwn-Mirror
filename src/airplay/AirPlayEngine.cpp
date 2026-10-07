@@ -71,6 +71,7 @@ bool AirPlayEngine::Start() noexcept {
     proc_cfg.receiver_quality_name  = m_config.receiver_quality_name;
     proc_cfg.enable_fps_data        = m_config.enable_fps_data;
     proc_cfg.debug_log              = m_config.debug_log;
+    proc_cfg.is_wired               = m_config.is_wired;
 
     m_process = std::make_unique<AirPlayProcess>(
         std::move(proc_cfg),

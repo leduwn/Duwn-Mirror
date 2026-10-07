@@ -230,6 +230,8 @@ NetworkEnvironmentInfo NetworkEnvironmentInfo::Probe(bool is_wired_mode) noexcep
                     char ip_buf[INET_ADDRSTRLEN] = {0};
                     if (::inet_ntop(AF_INET, &sin->sin_addr, ip_buf, sizeof(ip_buf))) {
                         ad.ipv4_address = ip_buf;
+                        ad.ipv4_prefix = (unicast->OnLinkPrefixLength > 0 && unicast->OnLinkPrefixLength <= 32)
+                            ? unicast->OnLinkPrefixLength : 24;
                         break;
                     }
                 }
@@ -267,6 +269,7 @@ NetworkEnvironmentInfo NetworkEnvironmentInfo::Probe(bool is_wired_mode) noexcep
 
     if (best) {
         info.best_adapter_ip = best->ipv4_address;
+        info.best_adapter_prefix = best->ipv4_prefix;
         info.best_adapter_name = best->name;
         info.best_adapter_class = best->classification;
         info.best_adapter_score = best_score;
@@ -313,8 +316,8 @@ void NetworkEnvironmentInfo::LogEnvironment() const noexcept {
     }
 
     if (!best_adapter_ip.empty()) {
-        DUWN_LOG_INFOF("Network", "Selected Primary AirPlay Adapter: {} (IP: {}, Class: {}, Score: {})",
-            WideToUtf8(best_adapter_name), best_adapter_ip,
+        DUWN_LOG_INFOF("Network", "Selected Primary AirPlay Adapter: {} (IP: {}/{}, Class: {}, Score: {})",
+            WideToUtf8(best_adapter_name), best_adapter_ip, best_adapter_prefix,
             AdapterClassificationToString(best_adapter_class), best_adapter_score);
     } else {
         DUWN_LOG_WARN("Network", "No suitable active network adapter identified.");

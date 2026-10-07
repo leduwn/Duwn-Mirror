@@ -732,10 +732,7 @@ std::wstring AirPlayProcess::BuildCommandLine() const noexcept {
         cmd += std::format(L" -bind-ip {} -bind-prefix {}", m_config.bind_ipv4, m_config.bind_prefix);
     }
 
-    const bool is_wired = m_config.is_wired ||
-                          (!m_config.bind_ipv4.empty() && m_config.bind_ipv4.rfind(L"172.20.", 0) == 0);
-
-    if (is_wired) {
+    if (m_config.is_wired) {
         if (IsWiredH265Enabled()) {
             cmd += L" -h265";
         }

@@ -2,7 +2,10 @@
 // comfortable sizing calculations, Settings persistence, and three-window architecture.
 
 #include "app/Settings.h"
+#include "app/OutputWindow.h"
 #include "airplay/AirPlayProcess.h"
+#include "airplay/SessionState.h"
+#include "network/NetworkEnvironment.h"
 #include "ui/UiState.h"
 #include "common/telemetry/LatencyTelemetry.h"
 #include "video/VideoFrame.h"
@@ -630,72 +633,53 @@ DUWN_TEST(OutputWindow_HitTesting_And_Toolbar_Clamping) {
 // 15. Priority 3 & 4: Session Generation Anti-Stale Message Guard
 // ---------------------------------------------------------------------------
 DUWN_TEST(AirPlay_SessionGeneration_StaleMessageRejection) {
-    std::atomic<uint64_t> current_generation{5};
-    duwn::ui::ConnectionStatus ui_status = duwn::ui::ConnectionStatus::Connected;
+    const uint64_t current_generation = 5;
+    const auto ui_status = duwn::ui::ConnectionStatus::Connected;
+    const auto session_state = duwn::airplay::AirPlaySessionState::Connected;
 
-    auto handle_first_frame_message = [&](uint64_t msg_generation) -> bool {
-        if (msg_generation != current_generation.load(std::memory_order_acquire)) {
-            // Stale generation message discarded
-            return false;
-        }
-        ui_status = duwn::ui::ConnectionStatus::Streaming;
-        return true;
-    };
+    // Stale generation 4 message must be rejected by production validator
+    bool accepted_stale = duwn::ui::IsSessionGenerationAccepted(
+        4, current_generation, ui_status, session_state);
+    DUWN_ASSERT(!accepted_stale);
 
-    // Stale message from generation 4 must be ignored
-    bool handled_stale = handle_first_frame_message(4);
-    DUWN_ASSERT(!handled_stale);
-    DUWN_ASSERT(ui_status == duwn::ui::ConnectionStatus::Connected);
+    // Matching generation 5 must be accepted by production validator
+    bool accepted_current = duwn::ui::IsSessionGenerationAccepted(
+        5, current_generation, ui_status, session_state);
+    DUWN_ASSERT(accepted_current);
 
-    // Matching generation 5 must be accepted
-    bool handled_current = handle_first_frame_message(5);
-    DUWN_ASSERT(handled_current);
-    DUWN_ASSERT(ui_status == duwn::ui::ConnectionStatus::Streaming);
+    // Idle session state must be rejected even if generation matches
+    bool accepted_idle = duwn::ui::IsSessionGenerationAccepted(
+        5, current_generation, duwn::ui::ConnectionStatus::Idle, duwn::airplay::AirPlaySessionState::Idle);
+    DUWN_ASSERT(!accepted_idle);
 }
 
 // ---------------------------------------------------------------------------
 // 16. Priority 3 & 5: Streaming Requires Actual Presented Frame & Watchdog Stages
 // ---------------------------------------------------------------------------
 DUWN_TEST(AirPlay_StreamingStatus_RequiresActualPresentedFrame) {
-    duwn::ui::ConnectionStatus status = duwn::ui::ConnectionStatus::Idle;
-    std::wstring status_msg;
-
-    auto evaluate_status = [&](uint64_t pres_count, uint32_t rtp, uint32_t dec, int64_t uptime) {
-        const bool has_video_evidence = (pres_count > 0);
-        if (has_video_evidence) {
-            status = duwn::ui::ConnectionStatus::Streaming;
-            status_msg = L"Đang phát";
-        } else {
-            status = duwn::ui::ConnectionStatus::Connected;
-            if (uptime >= 3) {
-                if (rtp == 0) status_msg = L"WAITING_VIDEO_PACKET";
-                else if (dec == 0) status_msg = L"WAITING_DECODER";
-                else status_msg = L"WAITING_PRESENT";
-            } else {
-                status_msg = L"Chờ video...";
-            }
-        }
-    };
+    const auto session_state = duwn::airplay::AirPlaySessionState::Connected;
 
     // 1. Initial connect, no presented frames -> Connected
-    evaluate_status(0, 0, 0, 1);
-    DUWN_ASSERT(status == duwn::ui::ConnectionStatus::Connected);
-    DUWN_ASSERT(status_msg == L"Chờ video...");
+    auto eval1 = duwn::ui::EvaluateStreamingStatus(session_state, 0, 1, 0, 0, 0, 0);
+    DUWN_ASSERT(eval1.status == duwn::ui::ConnectionStatus::Connected);
+    DUWN_ASSERT(eval1.stall_stage == duwn::ui::StallStage::None);
 
     // 2. 3s stall without RTP packets -> WAITING_VIDEO_PACKET watchdog
-    evaluate_status(0, 0, 0, 4);
-    DUWN_ASSERT(status == duwn::ui::ConnectionStatus::Connected);
-    DUWN_ASSERT(status_msg == L"WAITING_VIDEO_PACKET");
+    auto eval2 = duwn::ui::EvaluateStreamingStatus(session_state, 0, 4, 0, 0, 0, 0);
+    DUWN_ASSERT(eval2.status == duwn::ui::ConnectionStatus::Connected);
+    DUWN_ASSERT(eval2.stall_stage == duwn::ui::StallStage::WaitingVideoPacket);
+    DUWN_ASSERT(std::string(eval2.stall_stage_name) == "WAITING_VIDEO_PACKET");
 
     // 3. 3s stall with RTP but no decoded frame -> WAITING_DECODER watchdog
-    evaluate_status(0, 100, 0, 4);
-    DUWN_ASSERT(status == duwn::ui::ConnectionStatus::Connected);
-    DUWN_ASSERT(status_msg == L"WAITING_DECODER");
+    auto eval3 = duwn::ui::EvaluateStreamingStatus(session_state, 0, 4, 100, 0, 0, 0);
+    DUWN_ASSERT(eval3.status == duwn::ui::ConnectionStatus::Connected);
+    DUWN_ASSERT(eval3.stall_stage == duwn::ui::StallStage::WaitingDecoder);
+    DUWN_ASSERT(std::string(eval3.stall_stage_name) == "WAITING_DECODER");
 
     // 4. Actual frame presented -> promoted to Streaming
-    evaluate_status(1, 100, 1, 4);
-    DUWN_ASSERT(status == duwn::ui::ConnectionStatus::Streaming);
-    DUWN_ASSERT(status_msg == L"Đang phát");
+    auto eval4 = duwn::ui::EvaluateStreamingStatus(session_state, 1, 4, 100, 1, 1, 0);
+    DUWN_ASSERT(eval4.status == duwn::ui::ConnectionStatus::Streaming);
+    DUWN_ASSERT(eval4.stall_stage == duwn::ui::StallStage::None);
 }
 
 // ---------------------------------------------------------------------------
@@ -730,23 +714,91 @@ DUWN_TEST(NetworkAdapter_ModeAware_WiredPriority) {
 // 18. Priority 8 & 9: OutputWindow Interactive Control & Fullscreen Hit-Test
 // ---------------------------------------------------------------------------
 DUWN_TEST(OutputWindow_InteractiveControl_And_Fullscreen_HitTest) {
-    auto eval_hit_test = [&](bool fullscreen, bool zoomed, bool interactive_control) -> int {
-        if (fullscreen || zoomed) return 1; // HTCLIENT
-        if (interactive_control) return 1;  // HTCLIENT (Touch/Input passthrough)
-        return 2; // HTCAPTION (Draggable in View mode)
-    };
+    POINT pt_center{100, 100};
+    POINT pt_left_border{2, 100};
+    RECT rc{0, 0, 200, 200};
+    int border = 8;
 
-    // 1. View Mode (normal window): HTCAPTION (2) enables window drag
-    DUWN_ASSERT(eval_hit_test(false, false, false) == 2);
+    // 1. View Mode (normal window, center): HTCAPTION (2) enables window drag
+    DUWN_ASSERT(duwn::app::OutputWindow::ComputeHitTest(
+        false, false, false, pt_center, rc, border) == HTCAPTION);
+
+    // 1b. View Mode (border): resizable (HTLEFT)
+    DUWN_ASSERT(duwn::app::OutputWindow::ComputeHitTest(
+        false, false, false, pt_left_border, rc, border) == HTLEFT);
 
     // 2. Interactive Control Mode: HTCLIENT (1) allows touch injection without dragging
-    DUWN_ASSERT(eval_hit_test(false, false, true) == 1);
+    DUWN_ASSERT(duwn::app::OutputWindow::ComputeHitTest(
+        false, false, true, pt_center, rc, border) == HTCLIENT);
 
     // 3. Fullscreen Mode: HTCLIENT (1) prevents drag and sizing
-    DUWN_ASSERT(eval_hit_test(true, false, false) == 1);
+    DUWN_ASSERT(duwn::app::OutputWindow::ComputeHitTest(
+        true, false, false, pt_center, rc, border) == HTCLIENT);
 
     // 4. Maximized Window: HTCLIENT (1) prevents drag loop
-    DUWN_ASSERT(eval_hit_test(false, true, false) == 1);
+    DUWN_ASSERT(duwn::app::OutputWindow::ComputeHitTest(
+        false, true, false, pt_center, rc, border) == HTCLIENT);
+}
+
+// ---------------------------------------------------------------------------
+// 19. AirPlayProcess BuildCommandLine: Strict is_wired Flag vs Wireless IP Heuristic
+// ---------------------------------------------------------------------------
+DUWN_TEST(AirPlayProcess_BuildCommandLine_WiredFlag_And_SubnetPrefix) {
+    duwn::airplay::SessionState state;
+
+    // (1) Wireless mode with 172.20.x.x IP: must NEVER include -h265
+    ::SetEnvironmentVariableW(L"DUWN_DEV_WIRELESS_H265_PROBE", nullptr);
+    ::SetEnvironmentVariableW(L"DUWN_DEV_WIRED_H265_PROBE", nullptr);
+    {
+        duwn::airplay::AirPlayProcessConfig cfg{};
+        cfg.uxplay_exe_path = L"uxplay.exe";
+        cfg.receiver_name = L"Duwn Test";
+        cfg.is_wired = false;
+        cfg.bind_ipv4 = L"172.20.1.5";
+        cfg.bind_prefix = 16;
+        duwn::airplay::AirPlayProcess proc(cfg, state, nullptr);
+        std::wstring cmd = proc.BuildCommandLine();
+        DUWN_ASSERT(cmd.find(L"-h265") == std::wstring::npos);
+        DUWN_ASSERT(cmd.find(L"-bind-ip 172.20.1.5 -bind-prefix 16") != std::wstring::npos);
+    }
+
+    // (2) Wired mode with 172.20.x.x IP: MUST include -h265 and dynamic prefix 24
+    {
+        duwn::airplay::AirPlayProcessConfig cfg{};
+        cfg.uxplay_exe_path = L"uxplay.exe";
+        cfg.receiver_name = L"Duwn Test";
+        cfg.is_wired = true;
+        cfg.bind_ipv4 = L"172.20.10.4";
+        cfg.bind_prefix = 24;
+        duwn::airplay::AirPlayProcess proc(cfg, state, nullptr);
+        std::wstring cmd = proc.BuildCommandLine();
+        DUWN_ASSERT(cmd.find(L"-h265") != std::wstring::npos);
+        DUWN_ASSERT(cmd.find(L"-bind-ip 172.20.10.4 -bind-prefix 24 -h265") != std::wstring::npos);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 20. Network Environment Subnet Prefix Validation (/16 and /24)
+// ---------------------------------------------------------------------------
+DUWN_TEST(NetworkEnvironment_DynamicSubnetPrefix) {
+    duwn::network::AdapterDetails ad16;
+    ad16.ipv4_address = "172.20.1.5";
+    ad16.ipv4_prefix = 16;
+    DUWN_ASSERT(ad16.ipv4_prefix == 16);
+
+    duwn::network::AdapterDetails ad24;
+    ad24.ipv4_address = "192.168.1.100";
+    ad24.ipv4_prefix = 24;
+    DUWN_ASSERT(ad24.ipv4_prefix == 24);
+
+    duwn::network::NetworkEnvironmentInfo info;
+    info.best_adapter_ip = ad16.ipv4_address;
+    info.best_adapter_prefix = ad16.ipv4_prefix;
+    DUWN_ASSERT(info.best_adapter_prefix == 16);
+
+    info.best_adapter_ip = ad24.ipv4_address;
+    info.best_adapter_prefix = ad24.ipv4_prefix;
+    DUWN_ASSERT(info.best_adapter_prefix == 24);
 }
 
 

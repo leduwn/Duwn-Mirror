@@ -449,10 +449,7 @@ int App::Run(bool test_motion, bool verify_capture, bool test_rotate) noexcept {
 
             if (msg.message == WM_DUWN_FIRST_FRAME) {
                 const uint64_t msg_gen = static_cast<uint64_t>(msg.lParam);
-                if (msg_gen != m_session_generation.load(std::memory_order_acquire)) {
-                    // Stale message from prior session generation; discard
-                    continue;
-                }
+                const uint64_t cur_gen = m_session_generation.load(std::memory_order_acquire);
 
                 const uint32_t fw = static_cast<uint32_t>(msg.wParam >> 32);
                 const uint32_t fh = static_cast<uint32_t>(msg.wParam & 0xFFFFFFFF);
@@ -460,9 +457,8 @@ int App::Run(bool test_motion, bool verify_capture, bool test_rotate) noexcept {
                 if (m_window) {
                     std::lock_guard lock{m_window->StateMutex()};
                     auto& st = m_window->State();
-                    if (st.status == ui::ConnectionStatus::Idle ||
-                        st.session_state == airplay::AirPlaySessionState::Idle) {
-                        // Current session is idle; do not promote to streaming
+                    if (!ui::IsSessionGenerationAccepted(msg_gen, cur_gen, st.status, st.session_state)) {
+                        // Stale generation message or session idle discarded
                         continue;
                     }
                     m_window->SetStatusText(ui::loc::Get(ui::loc::S::Status_Streaming));
@@ -959,6 +955,7 @@ bool App::Init() noexcept {
     ap_cfg.receiver_quality_name = std::string(GetReceiverQualityName(m_settings.receiver_quality));
     ap_cfg.enable_fps_data       = true;
     ap_cfg.debug_log             = m_settings.debug_log;
+    ap_cfg.is_wired              = (m_settings.connection_mode == ConnectionMode::WiredUsb);
 
     m_airplay = std::make_unique<airplay::AirPlayEngine>(std::move(ap_cfg));
     m_airplay->SetVideoCallback([this](const uint8_t* d, size_t s,
@@ -1044,7 +1041,7 @@ bool App::Init() noexcept {
 
     if (m_settings.connection_mode == ConnectionMode::WirelessAirPlay) {
         if (!m_net_env.best_adapter_ip.empty()) {
-            m_airplay->SetBindIpv4(std::wstring(m_net_env.best_adapter_ip.begin(), m_net_env.best_adapter_ip.end()), 24);
+            m_airplay->SetBindIpv4(std::wstring(m_net_env.best_adapter_ip.begin(), m_net_env.best_adapter_ip.end()), m_net_env.best_adapter_prefix);
         }
         if (!m_airplay->Start()) {
             DUWN_LOG_ERROR("App", "AirPlayEngine early start failed");
@@ -1771,6 +1768,8 @@ void App::UpdateWiredConnection() noexcept {
 
         if (m_airplay) {
 
+            m_airplay->SetIsWired(true);
+
             m_airplay->SetBindIpv4(m_wired_bind_ipv4, current.network_prefix);
 
             if (!m_airplay->Start()) m_window->SetStatusText(L"USB AirPlay receiver failed to start");
@@ -1861,6 +1860,10 @@ void App::StartWiredControl() noexcept {
 
     m_wired_control.Start();
 
+    if (m_output_window) {
+        m_output_window->SetInteractiveControlMode(true);
+    }
+
     if (m_window) {
 
         auto& s = m_window->State();
@@ -1880,6 +1883,10 @@ void App::StartWiredControl() noexcept {
 void App::StopWiredControl() noexcept {
 
     m_wired_control.Stop();
+
+    if (m_output_window) {
+        m_output_window->SetInteractiveControlMode(false);
+    }
 
     if (m_window) {
 
@@ -1990,8 +1997,9 @@ void App::SwitchConnectionMode(ConnectionMode mode) noexcept {
         }
 
         if (m_airplay) {
+            m_airplay->SetIsWired(false);
             if (!m_net_env.best_adapter_ip.empty()) {
-                m_airplay->SetBindIpv4(std::wstring(m_net_env.best_adapter_ip.begin(), m_net_env.best_adapter_ip.end()), 24);
+                m_airplay->SetBindIpv4(std::wstring(m_net_env.best_adapter_ip.begin(), m_net_env.best_adapter_ip.end()), m_net_env.best_adapter_prefix);
             } else {
                 m_airplay->SetBindIpv4({});
             }
@@ -5144,39 +5152,30 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
                     ? m_wasapi->ResolvedDeviceName() : L"—";
 
                 const uint64_t session_pres = m_session_frames_presented.load(std::memory_order_relaxed);
-                const bool has_video_evidence = (session_pres > 0);
+                const auto eval = ui::EvaluateStreamingStatus(
+                    state.session_state,
+                    session_pres,
+                    uptime_sec,
+                    cur_v_rtp,
+                    cur_v_dec,
+                    cur_v_rend,
+                    m.video_queue_depth.load(std::memory_order_relaxed));
+
                 if (state.session_state == airplay::AirPlaySessionState::Streaming ||
                     state.session_state == airplay::AirPlaySessionState::Connected) {
-                    state.status = has_video_evidence ? ui::ConnectionStatus::Streaming
-                                                      : ui::ConnectionStatus::Connected;
-                    if (has_video_evidence) {
+                    state.status = eval.status;
+                    if (eval.status == ui::ConnectionStatus::Streaming) {
                         state.status_message = ui::loc::Get(ui::loc::S::Status_Streaming);
                     } else {
-                        // Diagnostic watchdog for connected-but-no-media stall
-                        if (uptime_sec >= 3) {
-                            const char* stall_stage = "WAITING_VIDEO_PACKET";
-                            std::wstring stall_msg = L"Chờ hình ảnh... (Kiểm tra Firewall UDP 7010)";
-                            if (cur_v_rtp == 0) {
-                                stall_stage = "WAITING_VIDEO_PACKET";
-                                stall_msg = L"Chờ hình ảnh... (Chờ gói video RTP / Firewall UDP 7010)";
-                            } else if (cur_v_dec == 0) {
-                                stall_stage = "WAITING_DECODER";
-                                stall_msg = L"Chờ hình ảnh... (Đang giải mã H.264/HEVC)";
-                            } else if (m.video_queue_depth.load(std::memory_order_relaxed) == 0 && cur_v_rend == 0) {
-                                stall_stage = "WAITING_RENDERER";
-                                stall_msg = L"Chờ hình ảnh... (Chờ bộ dựng hình)";
-                            } else {
-                                stall_stage = "WAITING_PRESENT";
-                                stall_msg = L"Chờ hình ảnh... (Đang hoàn tất hiển thị)";
-                            }
+                        if (eval.stall_stage != ui::StallStage::None) {
                             static int64_t s_last_stall_log_sec = 0;
                             if (uptime_sec - s_last_stall_log_sec >= 3) {
                                 s_last_stall_log_sec = uptime_sec;
                                 DUWN_LOG_WARNF("Diagnostics",
                                     "[AIRPLAY_STALL_STAGE] stage={} uptime={}s rtp_pkts={} dec_frames={} rend_frames={} queue_depth={}",
-                                    stall_stage, uptime_sec, cur_v_rtp, cur_v_dec, cur_v_rend, m.video_queue_depth.load(std::memory_order_relaxed));
+                                    eval.stall_stage_name, uptime_sec, cur_v_rtp, cur_v_dec, cur_v_rend, m.video_queue_depth.load(std::memory_order_relaxed));
                             }
-                            state.status_message = stall_msg;
+                            state.status_message = eval.stall_message;
                         } else {
                             state.status_message = ui::loc::Get(ui::loc::S::Status_ConnectedWaitingVideo);
                         }

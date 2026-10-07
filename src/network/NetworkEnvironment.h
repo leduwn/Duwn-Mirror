@@ -52,6 +52,7 @@ struct AdapterDetails {
     std::wstring          name;
     std::wstring          description;
     std::string           ipv4_address;
+    uint8_t               ipv4_prefix{24};
     bool                  is_physical{false};
     bool                  is_wifi{false};
     bool                  is_ethernet{false};
@@ -66,6 +67,7 @@ struct NetworkEnvironmentInfo {
     bool network_isolation_suspected{false};
     bool public_rules_localsubnet{false};
     std::string best_adapter_ip;
+    uint8_t best_adapter_prefix{24};
     std::wstring best_adapter_name;
     AdapterClassification best_adapter_class{AdapterClassification::Disconnected};
     int best_adapter_score{0};

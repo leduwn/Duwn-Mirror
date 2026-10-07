@@ -853,34 +853,17 @@ LRESULT OutputWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) n
         break;
 
     case WM_NCHITTEST: {
-        if (m_fullscreen || ::IsZoomed(hwnd)) return HTCLIENT;
         POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT rc{};
         ::GetWindowRect(hwnd, &rc);
-        if (pt.x < rc.left || pt.x > rc.right || pt.y < rc.top || pt.y > rc.bottom) {
-            return HTNOWHERE;
-        }
-        if (m_interactive_control_mode) {
-            return HTCLIENT;
-        }
         int border = static_cast<int>(std::round(8.0f * GetDpiScale()));
-        if (border < 4) border = 4;
-
-        bool on_left   = (pt.x >= rc.left && pt.x < rc.left + border);
-        bool on_right  = (pt.x <= rc.right && pt.x > rc.right - border);
-        bool on_top    = (pt.y >= rc.top && pt.y < rc.top + border);
-        bool on_bottom = (pt.y <= rc.bottom && pt.y > rc.bottom - border);
-
-        if (on_top && on_left)     return HTTOPLEFT;
-        if (on_top && on_right)    return HTTOPRIGHT;
-        if (on_bottom && on_left)  return HTBOTTOMLEFT;
-        if (on_bottom && on_right) return HTBOTTOMRIGHT;
-        if (on_left)   return HTLEFT;
-        if (on_right)  return HTRIGHT;
-        if (on_top)    return HTTOP;
-        if (on_bottom) return HTBOTTOM;
-
-        return HTCAPTION;
+        return ComputeHitTest(
+            m_fullscreen,
+            ::IsZoomed(hwnd) != FALSE,
+            m_interactive_control_mode,
+            pt,
+            rc,
+            border);
     }
 
     case WM_NCLBUTTONDBLCLK:

@@ -38,6 +38,7 @@ struct AirPlayEngineConfig {
     std::string  receiver_quality_name{"Auto"};
     bool         enable_fps_data{true};
     bool         debug_log{false};
+    bool         is_wired{false};
 };
 
 class AirPlayEngine {
@@ -71,6 +72,8 @@ public:
         m_config.bind_ipv4 = std::move(address);
         m_config.bind_prefix = prefix;
     }
+    void SetIsWired(bool wired) noexcept { m_config.is_wired = wired; }
+    bool IsWired() const noexcept { return m_config.is_wired; }
 
     uint64_t GetSidecarGeneration() const noexcept { return m_process ? m_process->Generation() : 0; }
     DWORD GetSidecarPid() const noexcept { return m_process ? m_process->GetPid() : 0; }
