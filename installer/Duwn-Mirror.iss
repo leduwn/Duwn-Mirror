@@ -5,7 +5,7 @@
 ; ===========================================================================
 
 #ifndef AppVersion
-  #define AppVersion "1.1.4"
+  #define AppVersion "1.1.5"
 #endif
 
 #define MyAppName "Duwn Mirror"
