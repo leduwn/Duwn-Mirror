@@ -5,6 +5,52 @@
 
 using namespace duwn::video;
 
+DUWN_TEST(SourceQuality_FpsIsIndependentOfResolution) {
+    RequestedReceiverEnvelope req;
+    ActualSourceAperture actual;
+    actual.visible_width = 1920;
+    actual.visible_height = 886;
+    actual.fps = 30.0;
+    DeviceSessionObservation obs;
+    DUWN_ASSERT(SourceQualityTracker::ClassifyResolution(req, actual, obs, true) == QualityEffectiveness::DeliveredAsRequested);
+    DUWN_ASSERT(SourceQualityTracker::Classify(req, actual, obs, true) != QualityEffectiveness::DeliveredAsRequested);
+    actual.fps = 54.9;
+    DUWN_ASSERT(SourceQualityTracker::Classify(req, actual, obs, true) != QualityEffectiveness::DeliveredAsRequested);
+    actual.fps = 55.0;
+    DUWN_ASSERT(SourceQualityTracker::Classify(req, actual, obs, true) == QualityEffectiveness::DeliveredAsRequested);
+    actual.fps = 0.0;
+    DUWN_ASSERT(SourceQualityTracker::Classify(req, actual, obs, true) == QualityEffectiveness::Unknown);
+    req.is_original = true;
+    actual.fps = 30.0;
+    DUWN_ASSERT(SourceQualityTracker::Classify(req, actual, obs, true) != QualityEffectiveness::DeliveredAsRequested);
+    req.fps = 30;
+    DUWN_ASSERT(SourceQualityTracker::Classify(req, actual, obs, true) == QualityEffectiveness::DeliveredAsRequested);
+    req.width = req.height = 2560;
+    req.is_original = false;
+    actual.fps = 60.0;
+    DUWN_ASSERT(SourceQualityTracker::ClassifyResolution(req, actual, obs, true) == QualityEffectiveness::SourceLimited);
+    DUWN_ASSERT(SourceQualityTracker::Classify(req, actual, obs, true) == QualityEffectiveness::SourceLimited);
+}
+
+DUWN_TEST(SourceQuality_FpsNeedsStableObservations) {
+    SourceQualityTracker tracker;
+    for (int i = 0; i < 65; ++i) tracker.OnFrame(1920, 896, 1920, 886, 30.0, 0.0, "H264");
+    DUWN_ASSERT(tracker.GetEffectiveness() != QualityEffectiveness::DeliveredAsRequested);
+    tracker.OnFrame(1920, 896, 1920, 886, 60.0, 0.0, "H264");
+    DUWN_ASSERT(tracker.GetEffectiveness() != QualityEffectiveness::DeliveredAsRequested);
+    for (int i = 0; i < 65; ++i) tracker.OnFrame(1920, 896, 1920, 886, 60.0, 0.0, "H264");
+    DUWN_ASSERT(tracker.GetEffectiveness() == QualityEffectiveness::DeliveredAsRequested);
+    tracker.OnFrame(1920, 896, 1920, 886, 30.0, 0.0, "H264");
+    DUWN_ASSERT(tracker.GetEffectiveness() != QualityEffectiveness::DeliveredAsRequested);
+}
+
+DUWN_TEST(SourceQuality_UnknownFpsIsNotReportedAs60) {
+    SourceQualityTracker tracker;
+    for (int i = 0; i < 65; ++i) tracker.OnFrame(1920, 896, 1920, 886, 0.0, 0.0, "H264");
+    DUWN_ASSERT(tracker.GetEffectiveness() == QualityEffectiveness::Unknown);
+    DUWN_ASSERT(tracker.FormatTelemetryBlock().find("fps=0\n") != std::string::npos);
+}
+
 DUWN_TEST(SourceQuality_ThreeWayResolutionSeparation) {
     SourceQualityTracker tracker;
 

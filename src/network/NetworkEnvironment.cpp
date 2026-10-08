@@ -666,7 +666,7 @@ int ExecuteFirewallCliCommand(std::wstring_view action) noexcept {
                     // 0 = cleanup successful OR rules already absent; 4 = cleanup failed
                     bool still_present = HasRule(L"Duwn Mirror Core (Public)") || HasRule(L"Duwn Mirror AirPlay (Public)") ||
                                          HasRule(L"DUWN Mirror Core (Public)") || HasRule(L"DUWN Mirror AirPlay (Public)");
-                    exit_code = still_present ? 4 : 0;
+                    exit_code = DisablePublicExitCode(still_present);
                 } else if (action == L"enable-public") {
                     std::wstring core_exe, sidecar_exe;
                     if (!GetInstalledExes(core_exe, sidecar_exe)) {

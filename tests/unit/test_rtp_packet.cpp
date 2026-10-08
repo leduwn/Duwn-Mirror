@@ -104,3 +104,22 @@ DUWN_TEST(rtp_receiver_raw_udp_and_stats) {
     receiver.Stop();
     DUWN_ASSERT(!receiver.IsRunning());
 }
+
+DUWN_TEST(rtp_sequence_integrity_classification) {
+    using duwn::network::ClassifyRtpSequence;
+
+    auto in_order = ClassifyRtpSequence(100, 101);
+    DUWN_ASSERT(in_order.advances && in_order.gaps == 0);
+
+    auto gap = ClassifyRtpSequence(101, 104);
+    DUWN_ASSERT(gap.advances && gap.gaps == 2);
+
+    auto duplicate = ClassifyRtpSequence(104, 104);
+    DUWN_ASSERT(duplicate.duplicate && !duplicate.advances);
+
+    auto out_of_order = ClassifyRtpSequence(104, 103);
+    DUWN_ASSERT(out_of_order.out_of_order && !out_of_order.advances);
+
+    auto wrap = ClassifyRtpSequence(65535, 0);
+    DUWN_ASSERT(wrap.advances && wrap.gaps == 0);
+}

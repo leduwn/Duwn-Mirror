@@ -12,6 +12,7 @@
 #include <mutex>
 #include <thread>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <functional>
 #include <cstdint>
@@ -30,6 +31,7 @@ enum class AudioEndpointState {
     Switching,
     Recovering,
     WaitingForDevice,
+    InitializationFailed,
     Stopped,
     Error
 };
@@ -38,6 +40,67 @@ enum class EndpointSelectionPolicy {
     SystemDefault,
     PinnedDevice
 };
+
+enum class EndpointChangeAction {
+    None,
+    OpenDefault,
+    OpenSpecific,
+    WaitForDevice
+};
+
+struct EndpointChangeDecision {
+    EndpointChangeAction action{EndpointChangeAction::None};
+    std::wstring_view target_id{};
+};
+
+constexpr EndpointChangeDecision DecideEndpointChange(
+    EndpointSelectionPolicy policy,
+    std::wstring_view selected_id,
+    std::wstring_view active_id,
+    std::wstring_view default_id,
+    bool selected_is_active) noexcept {
+    if (policy == EndpointSelectionPolicy::SystemDefault) {
+        if (default_id.empty()) return {EndpointChangeAction::WaitForDevice, {}};
+        if (active_id == default_id) return {};
+        return {EndpointChangeAction::OpenDefault, {}};
+    }
+    if (selected_id.empty() || !selected_is_active) {
+        return {EndpointChangeAction::WaitForDevice, selected_id};
+    }
+    if (active_id == selected_id) return {};
+    return {EndpointChangeAction::OpenSpecific, selected_id};
+}
+
+class EndpointWorkArbiter {
+public:
+    uint64_t BeginRequest() noexcept {
+        std::lock_guard lock(m_mutex);
+        return ++m_generation;
+    }
+
+    uint64_t Capture() const noexcept {
+        std::lock_guard lock(m_mutex);
+        return m_generation;
+    }
+
+    bool TryCommit(uint64_t generation, const std::function<void()>& commit) noexcept {
+        std::lock_guard lock(m_mutex);
+        if (generation != m_generation) return false;
+        commit();
+        return true;
+    }
+
+private:
+    mutable std::mutex m_mutex;
+    uint64_t m_generation{0};
+};
+
+constexpr uint32_t kMaxAudioRecoveryAttempts = 5;
+
+constexpr uint32_t AudioRecoveryRetryDelayMs(uint32_t attempt) noexcept {
+    constexpr uint32_t delays[] = {250, 500, 1000, 2000, 4000};
+    return attempt < kMaxAudioRecoveryAttempts ? delays[attempt] : 0;
+}
 
 enum class AudioSampleType {
     Float32,
@@ -125,10 +188,18 @@ public:
     std::wstring StateString() const noexcept;
 
     double BufferMs() const noexcept { return m_buffer_ms.load(std::memory_order_relaxed); }
+    uint32_t OutputSampleRate() const noexcept;
+    uint32_t OutputChannels() const noexcept;
     uint64_t UnderrunCount() const noexcept { return m_underruns.load(std::memory_order_relaxed); }
     void SetUnderrunCallback(UnderrunCallback cb) noexcept { m_underrun_cb = std::move(cb); }
 
 private:
+    enum class TargetOpenResult {
+        Success,
+        Unavailable,
+        InitializationFailed
+    };
+
     struct AudioTargetResources {
         ComPtr<IMMDevice>          device;
         ComPtr<IAudioClient>       client;
@@ -143,7 +214,7 @@ private:
     };
 
     void RenderLoop(std::stop_token stop) noexcept;
-    bool PrepareTarget(const std::wstring& target_id, AudioTargetResources& out_target) noexcept;
+    TargetOpenResult PrepareTarget(const std::wstring& target_id, AudioTargetResources& out_target) noexcept;
     bool TryInitAudioClient3(IMMDevice* device, AudioTargetResources& target) noexcept;
     bool FallbackInitAudioClient(IMMDevice* device, AudioTargetResources& target) noexcept;
     void SetSessionIdentity(IAudioClient* client) noexcept;
@@ -151,6 +222,8 @@ private:
     // Recovery executed inside the worker loop
     bool PerformRecovery(std::stop_token stop) noexcept;
     void CleanTarget(AudioTargetResources& target) noexcept;
+    void DeactivateEndpoint(AudioEndpointState state, bool reset_recovery_attempts = true) noexcept;
+    void ConfigureForActiveTarget() noexcept;
 
     // Conversion and writing
     float NextGain() noexcept;
@@ -168,7 +241,7 @@ private:
 
     std::atomic<AudioEndpointState> m_state{AudioEndpointState::Idle};
     std::atomic<bool>               m_is_fallback{false};
-    std::atomic<uint64_t>           m_request_generation{0};
+    EndpointWorkArbiter             m_endpoint_work;
 
     std::atomic<float>    m_volume{1.0f};
     std::atomic<bool>     m_muted{false};
@@ -179,6 +252,7 @@ private:
     std::atomic<bool>     m_running{false};
     std::atomic<bool>     m_switching{false};
     std::atomic<bool>     m_first_audio_submitted{false};
+    std::atomic<uint32_t> m_recovery_attempts{0};
 
     HANDLE                m_wake_event{nullptr}; // unblocks worker for state changes/switches
     std::mutex            m_switch_mutex;
@@ -196,6 +270,7 @@ private:
     std::mutex            m_pending_mutex;
     AudioTargetResources  m_pending_target;
     bool                  m_has_pending_target{false};
+    uint64_t              m_pending_generation{0};
 };
 
 } // namespace duwn::audio

@@ -148,6 +148,18 @@ bool Settings::ValidateSettings(const Settings& s, std::string* out_reason) noex
         if (out_reason) *out_reason = std::format("audio_sync_offset_ms {} out of range [-1000, 1000]", s.audio_sync_offset_ms);
         return false;
     }
+    if (s.audio_source != L"airplay") {
+        if (out_reason) *out_reason = "audio_source is unsupported";
+        return false;
+    }
+    if (s.audio_output_mode != L"default" && s.audio_output_mode != L"specific") {
+        if (out_reason) *out_reason = "audio_output_mode must be default or specific";
+        return false;
+    }
+    if (s.audio_output_mode == L"specific" && s.audio_output_endpoint_id.empty()) {
+        if (out_reason) *out_reason = "specific audio output requires an endpoint ID";
+        return false;
+    }
     return true;
 }
 
@@ -188,6 +200,11 @@ bool Settings::MigrateSettingsV1ToV2(Settings& s) noexcept {
     return true;
 }
 
+void Settings::MigrateLegacyAudioOutputId(
+    Settings& s, std::wstring_view legacy_endpoint_id) noexcept {
+    s.SelectAudioOutput(legacy_endpoint_id);
+}
+
 Settings Settings::Load() noexcept {
     Settings s{};
     auto path = SettingsPath();
@@ -216,6 +233,23 @@ Settings Settings::Load() noexcept {
     s.aspect_ratio_locked = ParseBool(FindJsonKeyValue(json, "aspect_ratio_locked"), s.aspect_ratio_locked);
     s.audio_muted         = ParseBool(FindJsonKeyValue(json, "audio_muted"), s.audio_muted);
     s.always_on_top       = ParseBool(FindJsonKeyValue(json, "always_on_top"), s.always_on_top);
+
+    auto audio_source = FindJsonKeyValue(json, "audio_source");
+    if (!audio_source.empty()) s.audio_source = Utf8ToWide(audio_source);
+    if (s.audio_source != L"airplay") s.audio_source = L"airplay";
+
+    auto audio_output_mode = FindJsonKeyValue(json, "audio_output_mode");
+    auto audio_output_id = FindJsonKeyValue(json, "audio_output_endpoint_id");
+    if (!audio_output_mode.empty()) {
+        s.audio_output_mode = Utf8ToWide(audio_output_mode);
+        s.audio_output_endpoint_id = Utf8ToWide(audio_output_id);
+    } else {
+        auto legacy_output_id = FindJsonKeyValue(json, "monitor_device_id");
+        MigrateLegacyAudioOutputId(s, Utf8ToWide(legacy_output_id));
+    }
+    if (s.audio_output_mode != L"specific" || s.audio_output_endpoint_id.empty()) {
+        s.SelectAudioOutput(L"");
+    }
 
     auto def_name = FindJsonKeyValue(json, "default_receiver_name");
     if (!def_name.empty()) {
@@ -449,6 +483,9 @@ void Settings::Save() const noexcept {
             "  }},\n"
             "  \"aspect_ratio_locked\": {},\n"
             "  \"audio_muted\": {},\n"
+            "  \"audio_source\": \"{}\",\n"
+            "  \"audio_output_mode\": \"{}\",\n"
+            "  \"audio_output_endpoint_id\": \"{}\",\n"
             "  \"always_on_top\": {},\n"
             "  \"default_receiver_name\": \"{}\",\n"
             "  \"gpu_decode\": {},\n"
@@ -524,6 +561,9 @@ void Settings::Save() const noexcept {
             window_preferences.maximized ? "true" : "false",
             aspect_ratio_locked ? "true" : "false",
             audio_muted ? "true" : "false",
+            WideToUtf8(audio_source),
+            WideToUtf8(audio_output_mode),
+            WideToUtf8(audio_output_mode == L"specific" ? audio_output_endpoint_id : L""),
             always_on_top ? "true" : "false",
             WideToUtf8(default_receiver_name.empty() ? airplay_name : default_receiver_name),
             gpu_decode ? "true" : "false",

@@ -103,6 +103,7 @@ public:
     // Accessors
     QualityEffectiveness GetEffectiveness() const noexcept { return m_effectiveness; }
     bool IsStable() const noexcept { return m_is_stable; }
+    bool IsFpsStable() const noexcept { return m_fps_stable_frame_count >= m_min_stable_frames; }
     const RequestedReceiverEnvelope& GetRequested() const noexcept { return m_requested; }
     const ActualSourceAperture& GetActual() const noexcept { return m_stable_aperture; }
     const ActualSourceAperture& GetCurrent() const noexcept { return m_current_aperture; }
@@ -114,6 +115,16 @@ public:
         const ActualSourceAperture& actual,
         const DeviceSessionObservation& obs,
         bool is_stable) noexcept;
+
+    static QualityEffectiveness ClassifyResolution(
+        const RequestedReceiverEnvelope& req,
+        const ActualSourceAperture& actual,
+        const DeviceSessionObservation& obs,
+        bool is_stable) noexcept;
+
+    static bool MeetsRequestedFps(uint32_t requested, double actual) noexcept {
+        return requested > 0 && actual >= static_cast<double>(requested) * (55.0 / 60.0);
+    }
 
     // Formats the exact [SOURCE QUALITY] structured log block
     std::string FormatTelemetryBlock() const;
@@ -128,6 +139,8 @@ private:
     ActualSourceAperture m_stable_aperture{};
     DeviceSessionObservation m_observation{};
     uint32_t m_stable_frame_count{0};
+    uint32_t m_fps_stable_frame_count{0};
+    double m_candidate_fps{0.0};
     bool m_is_stable{false};
     QualityEffectiveness m_effectiveness{QualityEffectiveness::Unknown};
 };

@@ -1,6 +1,7 @@
 #include "SourceQualityTracker.h"
 #include "common/logging/Logger.h"
 #include <windows.h>
+#include <cmath>
 
 namespace duwn::video {
 
@@ -28,6 +29,16 @@ void SourceQualityTracker::OnFrame(uint32_t coded_w, uint32_t coded_h,
     if (!m_current_aperture.IsValid()) {
         return;
     }
+
+    if (fps > 0.0 && std::abs(fps - m_candidate_fps) <= 3.0 &&
+        MeetsRequestedFps(m_requested.fps, fps) == MeetsRequestedFps(m_requested.fps, m_candidate_fps)) {
+        m_fps_stable_frame_count = std::min(m_fps_stable_frame_count + 1, m_min_stable_frames);
+    } else {
+        m_candidate_fps = fps;
+        m_fps_stable_frame_count = fps > 0.0 ? 1u : 0u;
+    }
+    // Never retain a previous 60 FPS success while the current rate is lower or unknown.
+    if (!IsFpsStable()) m_effectiveness = QualityEffectiveness::Unknown;
 
     // Check if current frame matches candidate aperture
     if (vis_w == m_candidate_aperture.visible_width &&
@@ -77,6 +88,7 @@ void SourceQualityTracker::OnFrame(uint32_t coded_w, uint32_t coded_h,
 }
 
 void SourceQualityTracker::SetRequestedEnvelope(const RequestedReceiverEnvelope& env) noexcept {
+    if (env.fps != m_requested.fps) m_fps_stable_frame_count = 0;
     m_requested = env;
     Reevaluate();
 }
@@ -94,6 +106,8 @@ void SourceQualityTracker::SetClientInfo(const std::wstring& model,
 
 void SourceQualityTracker::ResetSession() noexcept {
     m_stable_frame_count = 0;
+    m_fps_stable_frame_count = 0;
+    m_candidate_fps = 0.0;
     m_is_stable = false;
     m_current_aperture = {};
     m_candidate_aperture = {};
@@ -103,6 +117,22 @@ void SourceQualityTracker::ResetSession() noexcept {
 }
 
 QualityEffectiveness SourceQualityTracker::Classify(
+    const RequestedReceiverEnvelope& req,
+    const ActualSourceAperture& actual,
+    const DeviceSessionObservation& obs,
+    bool is_stable) noexcept {
+    const auto resolution = ClassifyResolution(req, actual, obs, is_stable);
+    if (resolution == QualityEffectiveness::Unknown || actual.fps <= 0.0 || !std::isfinite(actual.fps)) {
+        return QualityEffectiveness::Unknown;
+    }
+    if (!MeetsRequestedFps(req.fps, actual.fps)) {
+        return resolution == QualityEffectiveness::DeliveredAsRequested
+            ? QualityEffectiveness::PartiallyDelivered : resolution;
+    }
+    return resolution;
+}
+
+QualityEffectiveness SourceQualityTracker::ClassifyResolution(
     const RequestedReceiverEnvelope& req,
     const ActualSourceAperture& actual,
     const DeviceSessionObservation& obs,
@@ -159,7 +189,7 @@ QualityEffectiveness SourceQualityTracker::Classify(
 }
 
 void SourceQualityTracker::Reevaluate() noexcept {
-    m_effectiveness = Classify(m_requested, m_stable_aperture, m_observation, m_is_stable);
+    m_effectiveness = Classify(m_requested, m_stable_aperture, m_observation, m_is_stable && IsFpsStable());
 }
 
 std::string SourceQualityTracker::FormatTelemetryBlock() const {
@@ -187,7 +217,7 @@ std::string SourceQualityTracker::FormatTelemetryBlock() const {
         actual.coded_width, actual.coded_height,
         actual.visible_width, actual.visible_height,
         actual.LongEdge(),
-        actual.fps > 0.0 ? actual.fps : 60.0,
+        actual.fps,
         actual.bitrate_mbps,
         actual.codec.empty() ? "H264" : actual.codec,
         trans.empty() ? "Wireless" : trans,

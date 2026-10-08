@@ -134,6 +134,8 @@ DUWN_TEST(AirPlayProcess_CommandLineContainsNhFlag) {
     DUWN_ASSERT(cmd.find(L"-nh") != std::wstring::npos);
     DUWN_ASSERT(cmd.find(L"-n \"Duwn Mirror\"") != std::wstring::npos);
     DUWN_ASSERT(cmd.find(L"-s 1920x1920@60") != std::wstring::npos);
+    DUWN_ASSERT(cmd.find(L"-fps 60") != std::wstring::npos);
+    DUWN_ASSERT(cmd.find(L"-FPSdata") != std::wstring::npos);
 }
 
 DUWN_TEST(AirPlayProcess_DevelopmentLatencyProfiles) {

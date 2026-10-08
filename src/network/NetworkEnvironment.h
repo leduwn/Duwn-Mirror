@@ -99,6 +99,12 @@ bool DetectSuspectedNetworkIsolation(const NetworkEnvironmentInfo& env, int mock
 // Fixed CLI entry point invoked when process runs with --firewall <action>
 int ExecuteFirewallCliCommand(std::wstring_view action) noexcept;
 
+// Pure result mapping used after a disable-public removal attempt.
+// Absent target rules are an idempotent success.
+constexpr int DisablePublicExitCode(bool target_rules_still_present) noexcept {
+    return target_rules_still_present ? 4 : 0;
+}
+
 struct FirewallReconciliationResult {
     bool setting_value{false};
     bool needs_save{false};

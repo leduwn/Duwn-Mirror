@@ -75,8 +75,9 @@ bool RtpPacket::Parse(std::span<const uint8_t> data,
 
 // ---- RtpReceiver ----
 
-RtpReceiver::RtpReceiver(RtpCallback callback, ReceiverPriorityPolicy priority) noexcept
-    : m_callback(std::move(callback)), m_priority_policy(priority) {
+RtpReceiver::RtpReceiver(RtpCallback callback, ReceiverPriorityPolicy priority,
+                         RtpStreamKind stream_kind) noexcept
+    : m_callback(std::move(callback)), m_priority_policy(priority), m_stream_kind(stream_kind) {
     // Ensure Winsock is initialised (safe to call multiple times).
     WSADATA wsa{};
     ::WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -193,6 +194,8 @@ void RtpReceiver::RecvLoop() noexcept {
                 GlobalMetrics().network_raw_udp_packets.fetch_add(1, std::memory_order_relaxed);
                 m_stats.malformed.fetch_add(1, std::memory_order_relaxed);
                 GlobalMetrics().network_malformed_packets.fetch_add(1, std::memory_order_relaxed);
+                if (m_stream_kind == RtpStreamKind::Audio)
+                    GlobalMetrics().audio_malformed_packets.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
 
@@ -212,6 +215,8 @@ void RtpReceiver::RecvLoop() noexcept {
                                now_ns, pkt)) {
             m_stats.malformed.fetch_add(1, std::memory_order_relaxed);
             GlobalMetrics().network_malformed_packets.fetch_add(1, std::memory_order_relaxed);
+            if (m_stream_kind == RtpStreamKind::Audio)
+                GlobalMetrics().audio_malformed_packets.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
 

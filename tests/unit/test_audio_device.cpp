@@ -154,7 +154,10 @@ DUWN_TEST(AudioDevice_UiStateAudioFieldDefaults) {
 // ---------------------------------------------------------------------------
 DUWN_TEST(AudioDevice_SettingsFieldDefaults) {
     Settings s{};
-    DUWN_ASSERT(s.monitor_device_id.empty()); // empty = system default
+    DUWN_ASSERT(s.audio_source == L"airplay");
+    DUWN_ASSERT(s.audio_output_mode == L"default");
+    DUWN_ASSERT(s.audio_output_endpoint_id.empty());
+    DUWN_ASSERT(s.AudioOutputSelectionId().empty());
     DUWN_ASSERT(s.language        == L"auto");
     DUWN_ASSERT(s.start_on_boot   == false);
     DUWN_ASSERT(s.start_minimized == false);
@@ -185,6 +188,99 @@ DUWN_TEST(AudioDevice_SelectionPolicy_PinnedVsDefault) {
     wasapi.SwitchEndpoint(L"");
     DUWN_ASSERT(wasapi.SelectionPolicy() == EndpointSelectionPolicy::SystemDefault);
     DUWN_ASSERT(wasapi.PreferredDeviceId().empty());
+}
+
+DUWN_TEST(AudioDevice_RoutingPolicy_DefaultFollowsAndSpecificStaysPinned) {
+    auto follow_default = DecideEndpointChange(
+        EndpointSelectionPolicy::SystemDefault, L"", L"A", L"B", false);
+    DUWN_ASSERT(follow_default.action == EndpointChangeAction::OpenDefault);
+
+    auto pinned_ignores_default = DecideEndpointChange(
+        EndpointSelectionPolicy::PinnedDevice, L"A", L"A", L"B", true);
+    DUWN_ASSERT(pinned_ignores_default.action == EndpointChangeAction::None);
+
+    auto unplugged = DecideEndpointChange(
+        EndpointSelectionPolicy::PinnedDevice, L"A", L"A", L"B", false);
+    DUWN_ASSERT(unplugged.action == EndpointChangeAction::WaitForDevice);
+    DUWN_ASSERT(unplugged.target_id == L"A");
+
+    auto returned = DecideEndpointChange(
+        EndpointSelectionPolicy::PinnedDevice, L"A", L"", L"B", true);
+    DUWN_ASSERT(returned.action == EndpointChangeAction::OpenSpecific);
+    DUWN_ASSERT(returned.target_id == L"A");
+
+    auto default_invalidated = DecideEndpointChange(
+        EndpointSelectionPolicy::SystemDefault, L"", L"A", L"C", false);
+    DUWN_ASSERT(default_invalidated.action == EndpointChangeAction::OpenDefault);
+
+    auto specific_invalidated = DecideEndpointChange(
+        EndpointSelectionPolicy::PinnedDevice, L"A", L"", L"C", false);
+    DUWN_ASSERT(specific_invalidated.action == EndpointChangeAction::WaitForDevice);
+}
+
+DUWN_TEST(AudioDevice_RecoveryCommitRejectsStaleGeneration) {
+    EndpointWorkArbiter arbiter;
+    std::wstring active_endpoint = L"A";
+
+    const uint64_t recovery_a = arbiter.Capture();
+    const uint64_t select_b = arbiter.BeginRequest();
+    DUWN_ASSERT(arbiter.TryCommit(select_b, [&] { active_endpoint = L"B"; }));
+
+    const bool stale_recovery_committed = arbiter.TryCommit(
+        recovery_a, [&] { active_endpoint = L"A"; });
+    DUWN_ASSERT(!stale_recovery_committed);
+    DUWN_ASSERT(active_endpoint == L"B");
+}
+
+DUWN_TEST(AudioDevice_TransientInitializationRecoveryIsBoundedAndCanCommit) {
+    DUWN_ASSERT(AudioRecoveryRetryDelayMs(0) == 250);
+    DUWN_ASSERT(AudioRecoveryRetryDelayMs(1) == 500);
+    DUWN_ASSERT(AudioRecoveryRetryDelayMs(2) == 1000);
+    DUWN_ASSERT(AudioRecoveryRetryDelayMs(3) == 2000);
+    DUWN_ASSERT(AudioRecoveryRetryDelayMs(4) == 4000);
+    DUWN_ASSERT(AudioRecoveryRetryDelayMs(5) == 0);
+
+    EndpointWorkArbiter arbiter;
+    const uint64_t recovery = arbiter.Capture();
+    bool output_ready = false;
+    DUWN_ASSERT(arbiter.TryCommit(recovery, [&] { output_ready = true; }));
+    DUWN_ASSERT(output_ready);
+}
+
+DUWN_TEST(AudioDevice_SelectionSurvivesEnumerationOrderChanges) {
+    std::vector<AudioDeviceItem> first = {
+        {L"A", L"Speakers"}, {L"B", L"USB DAC"}, {L"C", L"HDMI"}
+    };
+    std::vector<AudioDeviceItem> reordered = {
+        {L"C", L"HDMI"}, {L"A", L"Speakers"}, {L"B", L"USB DAC"}
+    };
+    DUWN_ASSERT(FindAudioDeviceIndexById(first, L"B") == 1);
+    DUWN_ASSERT(FindAudioDeviceIndexById(reordered, L"B") == 2);
+    DUWN_ASSERT(reordered[FindAudioDeviceIndexById(reordered, L"B")].id == L"B");
+}
+
+DUWN_TEST(AudioDevice_SettingsRestoreSpecificEndpointId) {
+    Settings settings{};
+    settings.SelectAudioOutput(L"{0.0.0.00000000}.{usb-dac}");
+    DUWN_ASSERT(settings.audio_output_mode == L"specific");
+    DUWN_ASSERT(settings.AudioOutputSelectionId() == L"{0.0.0.00000000}.{usb-dac}");
+    settings.SelectAudioOutput(L"");
+    DUWN_ASSERT(settings.audio_output_mode == L"default");
+    DUWN_ASSERT(settings.audio_output_endpoint_id.empty());
+}
+
+DUWN_TEST(AudioDevice_LegacySettingsMigrationPreservesEndpointId) {
+    Settings legacy_default{};
+    Settings::MigrateLegacyAudioOutputId(legacy_default, L"");
+    DUWN_ASSERT(legacy_default.audio_output_mode == L"default");
+    DUWN_ASSERT(legacy_default.audio_output_endpoint_id.empty());
+
+    Settings legacy_specific{};
+    const std::wstring endpoint_id = L"{0.0.0.00000000}.{legacy-usb-dac}";
+    Settings::MigrateLegacyAudioOutputId(legacy_specific, endpoint_id);
+    DUWN_ASSERT(legacy_specific.audio_output_mode == L"specific");
+    DUWN_ASSERT(legacy_specific.audio_output_endpoint_id == endpoint_id);
+    DUWN_ASSERT(legacy_specific.AudioOutputSelectionId() == endpoint_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +371,10 @@ DUWN_TEST(AudioDevice_RapidSwitching_Stress100Cycles) {
 
     // State is alive and query safe
     AudioEndpointState st = wasapi.State();
-    DUWN_ASSERT(st == AudioEndpointState::Playing || st == AudioEndpointState::WaitingForDevice || st == AudioEndpointState::Idle);
+    DUWN_ASSERT(st == AudioEndpointState::Playing ||
+                st == AudioEndpointState::WaitingForDevice ||
+                st == AudioEndpointState::InitializationFailed ||
+                st == AudioEndpointState::Idle);
 
     wasapi.Stop();
     DUWN_ASSERT(wasapi.State() == AudioEndpointState::Stopped);
@@ -419,7 +518,28 @@ DUWN_TEST(AudioDevice_FormatValidation_AllTypesAndInvalid) {
     DUWN_ASSERT(ValidateAudioFormat(reinterpret_cast<const WAVEFORMATEX*>(&ext_32), cfg));
     DUWN_ASSERT(cfg.sample_type == AudioSampleType::Int32);
 
-    // 6. Invalid formats rejected cleanly
+    // 6. Multichannel mix formats are supported; stereo source maps to L/R.
+    WAVEFORMATEXTENSIBLE ext_51 = ext_float;
+    ext_51.Format.nChannels = 6;
+    ext_51.Format.nBlockAlign = 24;
+    ext_51.Format.nAvgBytesPerSec = 48000 * 24;
+    ext_51.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT |
+        SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY |
+        SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT;
+    DUWN_ASSERT(ValidateAudioFormat(reinterpret_cast<const WAVEFORMATEX*>(&ext_51), cfg));
+    DUWN_ASSERT(cfg.channels == 6);
+    float stereo_frame[2] = {0.25f, -0.5f};
+    float output_51[6] = {};
+    DUWN_ASSERT(WriteAudioFrames(
+        reinterpret_cast<BYTE*>(output_51), sizeof(output_51), 1,
+        stereo_frame, 1, cfg) == sizeof(output_51));
+    DUWN_ASSERT(output_51[0] == 0.25f);
+    DUWN_ASSERT(output_51[1] == -0.5f);
+    for (size_t channel = 2; channel < 6; ++channel) {
+        DUWN_ASSERT(output_51[channel] == 0.0f);
+    }
+
+    // 7. Invalid formats rejected cleanly
     DUWN_ASSERT(!ValidateAudioFormat(nullptr, cfg));
 
     WAVEFORMATEX invalid{};
@@ -688,9 +808,9 @@ DUWN_TEST(AudioDevice_Resampling_PersistentFifoAndRemainderPreserved) {
 }
 
 // ---------------------------------------------------------------------------
-// 21. AudioDevice: Candidate failure preserves active endpoint and Playing state
+// 21. AudioDevice: unavailable specific endpoint never falls back
 // ---------------------------------------------------------------------------
-DUWN_TEST(AudioDevice_SwitchHandoff_CandidateFailurePreservesActive) {
+DUWN_TEST(AudioDevice_SwitchHandoff_UnavailableSpecificHasNoFallback) {
     AudioRingBuffer ring(4096, 2);
     WasapiOutput wasapi(ring);
 
@@ -703,10 +823,13 @@ DUWN_TEST(AudioDevice_SwitchHandoff_CandidateFailurePreservesActive) {
     if (wasapi.State() == AudioEndpointState::Playing) {
         // Attempt switch to totally invalid endpoint ID
         bool switch_ok = wasapi.SwitchEndpoint(L"{invalid-guid-9999-not-found}");
-        // Candidate preparation fails; must not crash and must preserve active endpoint
+        // Candidate preparation fails; selected ID is kept and output pauses.
         DUWN_ASSERT(!switch_ok);
-        DUWN_ASSERT(wasapi.State() == AudioEndpointState::Playing);
-        DUWN_ASSERT(!wasapi.ResolvedDeviceId().empty());
+        DUWN_ASSERT(wasapi.State() == AudioEndpointState::WaitingForDevice ||
+                    wasapi.State() == AudioEndpointState::InitializationFailed);
+        DUWN_ASSERT(wasapi.PreferredDeviceId() == L"{invalid-guid-9999-not-found}");
+        DUWN_ASSERT(wasapi.ResolvedDeviceId().empty());
+        DUWN_ASSERT(!wasapi.IsFallbackActive());
     }
 
     wasapi.Stop();
@@ -737,7 +860,10 @@ DUWN_TEST(AudioDevice_SwitchHandoff_Stress1000Cycles_NoDeadlock) {
     DUWN_ASSERT(wasapi.SelectionPolicy() == EndpointSelectionPolicy::SystemDefault);
 
     AudioEndpointState st = wasapi.State();
-    DUWN_ASSERT(st == AudioEndpointState::Playing || st == AudioEndpointState::WaitingForDevice || st == AudioEndpointState::Idle);
+    DUWN_ASSERT(st == AudioEndpointState::Playing ||
+                st == AudioEndpointState::WaitingForDevice ||
+                st == AudioEndpointState::InitializationFailed ||
+                st == AudioEndpointState::Idle);
 
     wasapi.Stop();
     DUWN_ASSERT(wasapi.State() == AudioEndpointState::Stopped);

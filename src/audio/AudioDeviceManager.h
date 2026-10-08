@@ -30,6 +30,7 @@ constexpr UINT WM_APP_AUDIO_DEVICE_LIST_CHANGED = WM_APP + 0x002;
 struct AudioEndpointInfo {
     std::wstring id;            // IMMDevice::GetId() — stable across reboots
     std::wstring friendly_name; // PKEY_Device_FriendlyName
+    bool         available{true};
 };
 
 class AudioDeviceManager : public IMMNotificationClient {
@@ -53,6 +54,9 @@ public:
     // Empty string on failure.
     std::wstring DefaultDeviceId() noexcept;
 
+    // Resolve one endpoint by stable ID, including inactive endpoints.
+    AudioEndpointInfo GetDeviceInfo(const std::wstring& id) noexcept;
+
     // IUnknown
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override;
     ULONG   STDMETHODCALLTYPE AddRef()  override { return m_ref.fetch_add(1) + 1; }
@@ -66,7 +70,7 @@ public:
     HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(
         LPCWSTR pwstrDeviceId, DWORD dwNewState) override;
     HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(
-        LPCWSTR pwstrDeviceId, const PROPERTYKEY key) override { return S_OK; }
+        LPCWSTR pwstrDeviceId, const PROPERTYKEY key) override;
 
     // Check if a specific endpoint ID is currently active and usable.
     bool IsDeviceActive(const std::wstring& id) noexcept;

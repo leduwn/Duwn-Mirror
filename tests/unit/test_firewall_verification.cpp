@@ -17,9 +17,9 @@ DUWN_TEST(Firewall_CliUnknownActionRejectedSafely) {
 }
 
 DUWN_TEST(Firewall_CliDisablePublicReturnsZeroWhenRulesAbsent) {
-    // When rules are absent, disable-public must return 0 (success)
-    int ret = duwn::network::ExecuteFirewallCliCommand(L"disable-public");
-    DUWN_ASSERT(ret == 0);
+    // Pure, deterministic verification: no real firewall rules are queried or removed.
+    DUWN_ASSERT(duwn::network::DisablePublicExitCode(false) == 0);
+    DUWN_ASSERT(duwn::network::DisablePublicExitCode(true) == 4);
 }
 
 DUWN_TEST(Firewall_ExactVerificationDetailsString) {

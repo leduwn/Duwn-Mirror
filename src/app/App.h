@@ -238,6 +238,8 @@ private:
 
     // Source quality and capability tracker
     video::SourceQualityTracker m_source_quality_tracker;
+    std::mutex m_source_quality_mutex;
+    std::atomic<double> m_observed_source_fps{0.0};
 
     // Media readiness decomposition (C2)
     std::atomic<bool>      m_video_min_ready{false};

@@ -48,6 +48,17 @@ DUWN_TEST(audio_converter_resample_44k_to_48k) {
     }
 }
 
+DUWN_TEST(audio_converter_passthrough_44k_device_mix) {
+    duwn::audio::AudioConverter conv;
+    DUWN_ASSERT(conv.Init(44100, 2, 44100, 2));
+    DUWN_ASSERT(conv.IsPassthrough(44100, 2, 44100, 2));
+
+    std::vector<float> input = {0.25f, -0.25f, 0.5f, -0.5f};
+    std::vector<float> output;
+    conv.Convert(input.data(), 2, output);
+    DUWN_ASSERT(output == input);
+}
+
 DUWN_TEST(audio_converter_streaming_continuity) {
     duwn::audio::AudioConverter conv;
     conv.Init(44100, 2, 48000, 2);

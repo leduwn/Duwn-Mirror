@@ -22,10 +22,17 @@ enum class ReceiverPriorityPolicy {
     PlaybackAboveNormal = 1, // MMCSS "Playback" or THREAD_PRIORITY_ABOVE_NORMAL
 };
 
+enum class RtpStreamKind {
+    Generic,
+    Video,
+    Audio,
+};
+
 class RtpReceiver {
 public:
     explicit RtpReceiver(RtpCallback callback,
-                         ReceiverPriorityPolicy priority = ReceiverPriorityPolicy::PlaybackAboveNormal) noexcept;
+                         ReceiverPriorityPolicy priority = ReceiverPriorityPolicy::PlaybackAboveNormal,
+                         RtpStreamKind stream_kind = RtpStreamKind::Generic) noexcept;
     ~RtpReceiver();
 
     // Non-copyable, non-movable (owns a socket and thread)
@@ -51,6 +58,7 @@ private:
 
     RtpCallback            m_callback;
     ReceiverPriorityPolicy m_priority_policy{ReceiverPriorityPolicy::PlaybackAboveNormal};
+    RtpStreamKind          m_stream_kind{RtpStreamKind::Generic};
     uint16_t               m_port{0};
     uintptr_t              m_socket{static_cast<uintptr_t>(~0ull)}; // INVALID_SOCKET
     std::atomic_bool       m_running{false};

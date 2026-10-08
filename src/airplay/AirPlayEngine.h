@@ -109,6 +109,8 @@ private:
     MetadataCallback    m_meta_cb;
 
     mutable std::mutex  m_metadata_mutex;
+    bool                m_audio_sequence_initialized{false};
+    uint16_t            m_last_audio_sequence{0};
 };
 
 } // namespace duwn::airplay

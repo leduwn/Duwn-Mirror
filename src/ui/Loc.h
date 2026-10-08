@@ -201,6 +201,12 @@ enum class S {
     Video_ReceiverQuality,
     Video_Requested,
     Video_ActualSource,
+    Video_MaxFps,
+    Video_ResolutionMet,
+    Video_ResolutionLimited,
+    Video_FpsMeasuring,
+    Video_AirPlaySourceFps,
+    Video_ActualFps,
     Video_Quality_DeliveredAsRequested,
     Video_Quality_SourceLimited,
     Video_Quality_PartiallyDelivered,
@@ -613,6 +619,19 @@ enum class S {
     Output_Fullscreen,
     Output_Mute,
     Output_Unmute,
+
+    // Audio routing state
+    Audio_OutputReady,
+    Audio_SelectedDeviceDisconnected,
+    Audio_OutputUnavailable,
+    Audio_OutputInitializationFailed,
+    Audio_EndpointUnavailableFormat,
+    Audio_EndpointDisconnectedDesc,
+    Audio_SourceLabel,
+    Audio_OutputLabel,
+    Audio_Receiving,
+    Audio_Waiting,
+    Audio_FormatDynamic,
 
     _COUNT
 };

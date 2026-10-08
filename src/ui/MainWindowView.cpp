@@ -8,6 +8,20 @@
 
 namespace duwn::ui {
 
+static loc::S AudioOutputStatusLocKey(AudioOutputUiStatus status) noexcept {
+    switch (status) {
+    case AudioOutputUiStatus::Ready:
+        return loc::S::Audio_OutputReady;
+    case AudioOutputUiStatus::SelectedDeviceDisconnected:
+        return loc::S::Audio_SelectedDeviceDisconnected;
+    case AudioOutputUiStatus::InitializationFailed:
+        return loc::S::Audio_OutputInitializationFailed;
+    case AudioOutputUiStatus::Unavailable:
+    default:
+        return loc::S::Audio_OutputUnavailable;
+    }
+}
+
 MainWindowView::MainWindowView() noexcept = default;
 
 bool MainWindowView::Init(HWND hwnd) noexcept {
@@ -251,6 +265,7 @@ bool MainWindowView::OnMouseDown(int x, int y, UiState& state) noexcept {
                     if (m_on_audio_device_changed) m_on_audio_device_changed(L"");
                 } else if (static_cast<size_t>(item_index - 1) < state.available_audio_devices.size()) {
                     const auto& dev = state.available_audio_devices[item_index - 1];
+                    if (!dev.available) return true;
                     state.audio_device_id = dev.id;
                     state.audio_device_name = dev.name;
                     if (m_on_audio_device_changed) m_on_audio_device_changed(dev.id);
@@ -1556,17 +1571,21 @@ void MainWindowView::RenderDevicePreview(const UiState& state, const D2D1_RECT_F
             (state.render_fps > 0.0 ? std::format(L"{:.1f} FPS", state.render_fps) :
                 (is_paused ? std::wstring(loc::Get(loc::S::Mirror_Static)) : L"0.0 FPS")) :
             std::wstring(loc::Get(loc::S::Common_NoData));
+        const std::wstring audio_rate_str = std::format(
+            L"{:.1f}→{:.0f}kHz",
+            static_cast<double>(state.audio_source_rate) / 1000.0,
+            static_cast<double>(state.audio_output_rate) / 1000.0);
         std::wstring audio_str;
         if (state.audio_muted) {
             audio_str = loc::Get(loc::S::Audio_Mute);
         } else if (state.status == ConnectionStatus::Idle) {
-            audio_str = std::format(L"48kHz • {}", loc::Get(loc::S::Status_Idle));
+            audio_str = std::format(L"{} • {}", audio_rate_str, loc::Get(loc::S::Status_Idle));
         } else if (state.audio_active) {
-            audio_str = std::format(L"48kHz • {}", loc::Get(loc::S::Perf_Active));
+            audio_str = std::format(L"{} • {}", audio_rate_str, loc::Get(loc::S::Perf_Active));
         } else if (state.audio_rtp_packets > 0) {
-            audio_str = std::format(L"48kHz • {}", loc::Get(loc::S::Status_Paused));
+            audio_str = std::format(L"{} • {}", audio_rate_str, loc::Get(loc::S::Status_Paused));
         } else {
-            audio_str = std::format(L"48kHz • {}", loc::Get(loc::S::Status_Idle));
+            audio_str = std::format(L"{} • {}", audio_rate_str, loc::Get(loc::S::Status_Idle));
         }
 
         int64_t up = state.session_uptime_sec;
@@ -2174,15 +2193,19 @@ void MainWindowView::RenderStatusBar(const UiState& state, float bottom_y, float
                     state.session_state == airplay::AirPlaySessionState::Streaming ||
                     state.session_state == airplay::AirPlaySessionState::Paused);
 
+    const std::wstring audio_rate_str = std::format(
+        L"{:.1f}→{:.0f}kHz",
+        static_cast<double>(state.audio_source_rate) / 1000.0,
+        static_cast<double>(state.audio_output_rate) / 1000.0);
     std::wstring audio_status_str;
     if (state.audio_muted) {
         audio_status_str = loc::Get(loc::S::Audio_Mute);
     } else if (state.audio_active) {
-        audio_status_str = std::format(L"48kHz ({})", loc::Get(loc::S::Perf_Active));
+        audio_status_str = std::format(L"{} ({})", audio_rate_str, loc::Get(loc::S::Perf_Active));
     } else if (state.audio_rtp_packets > 0) {
-        audio_status_str = std::format(L"48kHz ({})", loc::Get(loc::S::Status_Paused));
+        audio_status_str = std::format(L"{} ({})", audio_rate_str, loc::Get(loc::S::Status_Paused));
     } else {
-        audio_status_str = std::format(L"48kHz ({})", loc::Get(loc::S::Status_Idle));
+        audio_status_str = std::format(L"{} ({})", audio_rate_str, loc::Get(loc::S::Status_Idle));
     }
 
     std::wstring fps_footer = state.has_fps_sample ?
@@ -2460,9 +2483,13 @@ void MainWindowView::RenderPerformanceView(const UiState& state, const D2D1_RECT
     D2D1_RECT_F c4_st_lbl = D2D1::RectF(c4_left_col, c3_r1_top, c4_left_col + c4_half_w, c3_r1_top + 14.0f);
     m_renderer.DrawTextSimple(loc::Get(loc::S::Perf_Lbl_AudioStatus), m_renderer.FontSmall(), c4_st_lbl, m_renderer.BrushTextMuted());
     D2D1_RECT_F c4_st_val = D2D1::RectF(c4_left_col, c3_r1_top + 14.0f, c4_left_col + c4_half_w, c3_r1_top + 36.0f);
+    const std::wstring c4_rate = std::format(
+        L"{:.1f}→{:.0f}kHz",
+        static_cast<double>(state.audio_source_rate) / 1000.0,
+        static_cast<double>(state.audio_output_rate) / 1000.0);
     std::wstring c4_audio_status = state.audio_muted ? std::wstring(loc::Get(loc::S::Audio_Mute))
-        : (state.audio_active ? std::format(L"{} (48kHz)", loc::Get(loc::S::Perf_Active))
-                              : std::format(L"{} (48kHz)", loc::Get(loc::S::Status_Idle)));
+        : (state.audio_active ? std::format(L"{} ({})", loc::Get(loc::S::Perf_Active), c4_rate)
+                              : std::format(L"{} ({})", loc::Get(loc::S::Status_Idle), c4_rate));
     m_renderer.DrawTextSimple(c4_audio_status, m_renderer.FontSubheader(), c4_st_val, state.audio_active ? m_renderer.BrushStatusGreen() : m_renderer.BrushTextPrimary());
 
     D2D1_RECT_F c4_buf_lbl = D2D1::RectF(c4_right_col, c3_r1_top, c4_right_col + c4_half_w, c3_r1_top + 14.0f);
@@ -2694,7 +2721,13 @@ void MainWindowView::RenderVideoView(const UiState& state, const D2D1_RECT_F& ar
     D2D1_RECT_F req_lbl = D2D1::RectF(req_rc.left + 8.0f, req_rc.top + 2.0f, req_rc.right - 8.0f, req_rc.top + 18.0f);
     m_renderer.DrawTextSimple(loc::Get(loc::S::Video_Requested), m_renderer.FontSmall(), req_lbl, m_renderer.BrushTextMuted());
     D2D1_RECT_F req_val = D2D1::RectF(req_rc.left + 8.0f, req_rc.top + 16.0f, req_rc.right - 8.0f, req_rc.bottom - 2.0f);
-    std::wstring req_str = state.requested_quality_class.empty() || state.requested_quality_class == L"—" ? rec_desc : state.requested_quality_class;
+    std::wstring requested_preset = rec_desc;
+    if (const size_t separator = requested_preset.find(L" · "); separator != std::wstring::npos) {
+        requested_preset.resize(separator);
+    }
+    std::wstring req_str = std::format(
+        L"{} • {}", requested_preset,
+        std::vformat(loc::Get(loc::S::Video_MaxFps), std::make_wformat_args(state.requested_fps)));
     m_renderer.DrawTextSimple(req_str, m_renderer.FontSmallBold(), req_val, m_renderer.BrushBrandCyan());
 
     // Actual Source Resolution & Framerate Box
@@ -2704,7 +2737,9 @@ void MainWindowView::RenderVideoView(const UiState& state, const D2D1_RECT_F& ar
     m_renderer.DrawTextSimple(loc::Get(loc::S::Video_ActualSource), m_renderer.FontSmall(), src_lbl, m_renderer.BrushTextMuted());
     D2D1_RECT_F src_val = D2D1::RectF(src_rc.left + 8.0f, src_rc.top + 16.0f, src_rc.right - 8.0f, src_rc.bottom - 2.0f);
     std::wstring src_str = (state.width > 0 && state.height > 0)
-        ? std::format(L"{} × {} ({} FPS)", state.width, state.height, static_cast<int>(std::round(state.nominal_fps > 0.0 ? state.nominal_fps : (state.source_fps > 0.0 ? state.source_fps : 60.0))))
+        ? (state.actual_source_fps > 0.0
+            ? std::format(L"{}×{} • {:.0f} FPS", state.width, state.height, state.actual_source_fps)
+            : std::format(L"{}×{} • — FPS", state.width, state.height))
         : L"—";
     m_renderer.DrawTextSimple(src_str, m_renderer.FontSmallBold(), src_val, m_renderer.BrushTextPrimary());
 
@@ -3258,10 +3293,20 @@ void MainWindowView::RenderDropdownOverlay(const UiState& state) noexcept {
         selected_idx = 0;
         for (size_t i = 0; i < state.available_audio_devices.size(); ++i) {
             const auto& dev = state.available_audio_devices[i];
-            items.push_back({ dev.name, loc::Get(loc::S::Opt_Audio_DirectEndpoint_Desc) });
-            if (dev.id == state.audio_device_id) {
-                selected_idx = static_cast<int>(i + 1);
-            }
+            items.push_back({
+                dev.available
+                    ? dev.name
+                    : std::vformat(
+                        loc::Get(loc::S::Audio_EndpointUnavailableFormat),
+                        std::make_wformat_args(dev.name)),
+                dev.available ? loc::Get(loc::S::Opt_Audio_DirectEndpoint_Desc)
+                              : loc::Get(loc::S::Audio_EndpointDisconnectedDesc)
+            });
+        }
+        if (const int endpoint_index =
+                FindAudioDeviceIndexById(state.available_audio_devices, state.audio_device_id);
+            endpoint_index >= 0) {
+            selected_idx = endpoint_index + 1;
         }
         break;
     case Control_Set_PreferredMonitor:
@@ -3854,9 +3899,9 @@ void MainWindowView::RenderAudioPage(const UiState& state, const D2D1_RECT_F& ar
         RegisterClickable(dd_rc, Control_Set_AudioDevice, loc::Get(loc::S::Audio_OutputDevice), true);
         y += 32.0f;
 
-        if (state.audio_fallback_active) {
-            std::wstring fallback_note = std::format(L"Đã chọn: {}  •  Đang phát tạm: {}",
-                state.audio_device_name, state.resolved_audio_device_name);
+        if (!state.audio_output_available) {
+            std::wstring fallback_note =
+                loc::Get(AudioOutputStatusLocKey(state.audio_output_status));
             D2D1_RECT_F note_rc = D2D1::RectF(content_left + 150.0f, y, content_right, y + 20.0f);
             m_renderer.DrawTextSimple(fallback_note, m_renderer.FontSmall(), note_rc,
                 m_renderer.BrushBrandBlue(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -3945,8 +3990,29 @@ void MainWindowView::RenderAudioPage(const UiState& state, const D2D1_RECT_F& ar
 
         auto buf_str = std::format(L"{:.1f} ms", state.audio_buffer_ms);
         auto ur_str  = std::format(L"{}", state.audio_underrun_count);
+        const double source_rate_khz =
+            static_cast<double>(state.audio_source_rate) / 1000.0;
+        const double output_rate_khz =
+            static_cast<double>(state.audio_output_rate) / 1000.0;
+        const auto format_str = std::vformat(
+            loc::Get(loc::S::Audio_FormatDynamic),
+            std::make_wformat_args(
+                source_rate_khz,
+                state.audio_source_channels,
+                output_rate_khz,
+                state.audio_output_channels));
+        const std::wstring source_state = std::format(
+            L"AirPlay RTP (L16) — {}",
+            loc::Get(state.audio_source_receiving
+                ? loc::S::Audio_Receiving
+                : loc::S::Audio_Waiting));
+        const std::wstring output_state = std::format(
+            L"{} — {}", state.resolved_audio_device_name,
+            loc::Get(AudioOutputStatusLocKey(state.audio_output_status)));
+        DrawDiagRow(loc::Get(loc::S::Audio_SourceLabel), source_state, y); y += 22.0f;
+        DrawDiagRow(loc::Get(loc::S::Audio_OutputLabel), output_state, y); y += 22.0f;
         DrawDiagRow(loc::Get(loc::S::Audio_SessionNameLbl), state.audio_session_display_name, y);  y += 22.0f;
-        DrawDiagRow(loc::Get(loc::S::Audio_FormatLbl),      loc::Get(loc::S::Audio_FormatVal), y); y += 22.0f;
+        DrawDiagRow(loc::Get(loc::S::Audio_FormatLbl),      format_str,                       y); y += 22.0f;
         DrawDiagRow(loc::Get(loc::S::Audio_BufferLbl),      buf_str,                          y);  y += 22.0f;
         DrawDiagRow(loc::Get(loc::S::Audio_UnderrunsLbl),   ur_str,                           y);  y += 22.0f;
         DrawDiagRow(loc::Get(loc::S::Audio_CurrentEndpoint), state.resolved_audio_device_name, y); y += 22.0f;

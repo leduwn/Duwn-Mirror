@@ -6,6 +6,7 @@
 #include "wired/WiredDeviceManager.h"
 #include "wired/WiredControlClient.h"
 #include <string>
+#include <string_view>
 #include <vector>
 #include <cstdint>
 
@@ -132,6 +133,22 @@ inline bool IsSessionGenerationAccepted(
 struct AudioDeviceItem {
     std::wstring id;
     std::wstring name;
+    bool available{true};
+};
+
+inline int FindAudioDeviceIndexById(const std::vector<AudioDeviceItem>& devices,
+                                    std::wstring_view endpoint_id) noexcept {
+    for (size_t i = 0; i < devices.size(); ++i) {
+        if (devices[i].id == endpoint_id) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+enum class AudioOutputUiStatus {
+    Unavailable,
+    Ready,
+    SelectedDeviceDisconnected,
+    InitializationFailed
 };
 
 struct UiState {
@@ -174,6 +191,7 @@ struct UiState {
     // Stream Details (0 / "—" when not streaming)
     uint32_t width{0};
     uint32_t height{0};
+    double actual_source_fps{0.0};
     double nominal_fps{0.0};
     double render_fps{0.0};
     double decode_time_ms{0.0};
@@ -263,10 +281,17 @@ struct UiState {
     std::wstring audio_device_name{L"System Default"};
     std::wstring resolved_audio_device_name{L"—"};
     bool         audio_fallback_active{false};
+    bool         audio_source_receiving{false};
+    bool         audio_output_available{false};
+    AudioOutputUiStatus audio_output_status{AudioOutputUiStatus::Unavailable};
     float        audio_volume{1.0f};          // 0.0f .. 1.0f
     std::vector<AudioDeviceItem> available_audio_devices;
     double       audio_buffer_ms{0.0};
     uint64_t     audio_underrun_count{0};
+    uint32_t     audio_source_rate{44100};
+    uint32_t     audio_source_channels{2};
+    uint32_t     audio_output_rate{48000};
+    uint32_t     audio_output_channels{2};
     std::wstring audio_session_display_name{L"Duwn Mirror"};
 
     // General / language

@@ -1,5 +1,6 @@
 #include "AirPlayEngine.h"
 #include "common/logging/Logger.h"
+#include "common/metrics/Metrics.h"
 #include "common/telemetry/ConnectionTelemetry.h"
 #include <format>
 #include <mutex>
@@ -42,7 +43,12 @@ bool AirPlayEngine::Start() noexcept {
     m_video_recv = std::make_unique<network::RtpReceiver>(
         [this](const network::RtpPacket& pkt) { OnVideoRtp(pkt); });
     m_audio_recv = std::make_unique<network::RtpReceiver>(
-        [this](const network::RtpPacket& pkt) { OnAudioRtp(pkt); });
+        [this](const network::RtpPacket& pkt) { OnAudioRtp(pkt); },
+        network::ReceiverPriorityPolicy::PlaybackAboveNormal,
+        network::RtpStreamKind::Audio);
+
+    m_audio_sequence_initialized = false;
+    m_last_audio_sequence = 0;
 
     uint16_t vport = m_video_recv->Start();
     uint16_t aport = m_audio_recv->Start();
@@ -107,6 +113,25 @@ void AirPlayEngine::OnVideoRtp(const network::RtpPacket& pkt) noexcept {
 }
 
 void AirPlayEngine::OnAudioRtp(const network::RtpPacket& pkt) noexcept {
+    auto& metrics = GlobalMetrics();
+    metrics.audio_payload_type.store(pkt.payload_type, std::memory_order_relaxed);
+    if (!m_audio_sequence_initialized) {
+        m_audio_sequence_initialized = true;
+        m_last_audio_sequence = pkt.sequence;
+    } else {
+        const auto delta = network::ClassifyRtpSequence(m_last_audio_sequence, pkt.sequence);
+        if (delta.duplicate) {
+            metrics.audio_duplicate_packets.fetch_add(1, std::memory_order_relaxed);
+        } else if (delta.advances) {
+            if (delta.gaps > 0) {
+                metrics.audio_sequence_gaps.fetch_add(
+                    delta.gaps, std::memory_order_relaxed);
+            }
+            m_last_audio_sequence = pkt.sequence;
+        } else {
+            metrics.audio_out_of_order_packets.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     ConnectionTelemetry::Get().RecordPhase(ConnectionPhase::AudioRtpStarted,
         std::format("ts={} size={}", pkt.timestamp, pkt.payload.size()));
     m_state.RecordAudioPacket(pkt.arrival_ns);

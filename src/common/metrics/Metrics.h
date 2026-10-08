@@ -21,6 +21,7 @@ struct alignas(64) Metrics {
     std::atomic<double>   network_jitter_ms{0.0};
 
     std::atomic<uint64_t> video_rtp_packets{0};
+    std::atomic<uint64_t> video_rtp_frame_boundaries{0}; // RTP marker: end of encoded frame, not packet count
     std::atomic<uint64_t> video_rtp_bytes{0};
     std::atomic<uint64_t> video_dropped_min_ready{0};
     std::atomic<uint64_t> video_dropped_ipc_active{0};
@@ -190,6 +191,10 @@ struct alignas(64) Metrics {
     // Audio
     std::atomic<uint64_t> audio_rtp_packets{0};
     std::atomic<uint64_t> audio_rtp_bytes{0};
+    std::atomic<uint64_t> audio_sequence_gaps{0};
+    std::atomic<uint64_t> audio_out_of_order_packets{0};
+    std::atomic<uint64_t> audio_duplicate_packets{0};
+    std::atomic<uint64_t> audio_malformed_packets{0};
     std::atomic<uint32_t> audio_payload_type{96};
     std::atomic<uint32_t> audio_input_rate{44100};
     std::atomic<uint32_t> audio_output_rate{48000};

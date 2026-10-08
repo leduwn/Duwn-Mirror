@@ -703,6 +703,11 @@ DUWN_TEST(OutputWindow_DismissCrashBannerLifecycleInvariant) {
 // 21. Settings: Persistent Output Geometry Serialization Roundtrip
 // ---------------------------------------------------------------------------
 DUWN_TEST(OutputWindow_SettingsPersistenceSerializationRoundtrip) {
+    struct RestoreSettings {
+        Settings value;
+        ~RestoreSettings() { value.Save(); }
+    } restore{Settings::Load()};
+
     Settings original{};
     original.output_x = -1920; // Secondary monitor left of primary
     original.output_y = 150;
@@ -713,6 +718,7 @@ DUWN_TEST(OutputWindow_SettingsPersistenceSerializationRoundtrip) {
     original.output_last_aspect_w = 1184;
     original.output_last_aspect_h = 2560;
     original.output_last_monitor_dpi = 120; // 125% DPI
+    original.SelectAudioOutput(L"{0.0.0.00000000}.{persisted-usb-dac}");
 
     // Save to isolated settings
     original.Save();
@@ -728,6 +734,10 @@ DUWN_TEST(OutputWindow_SettingsPersistenceSerializationRoundtrip) {
     DUWN_ASSERT(loaded.output_last_aspect_w == original.output_last_aspect_w);
     DUWN_ASSERT(loaded.output_last_aspect_h == original.output_last_aspect_h);
     DUWN_ASSERT(loaded.output_last_monitor_dpi == original.output_last_monitor_dpi);
+    DUWN_ASSERT(loaded.audio_source == L"airplay");
+    DUWN_ASSERT(loaded.audio_output_mode == L"specific");
+    DUWN_ASSERT(loaded.audio_output_endpoint_id == L"{0.0.0.00000000}.{persisted-usb-dac}");
+    DUWN_ASSERT(loaded.AudioOutputSelectionId() == original.AudioOutputSelectionId());
 }
 
 // ---------------------------------------------------------------------------

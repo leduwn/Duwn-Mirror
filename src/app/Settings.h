@@ -169,9 +169,25 @@ struct Settings {
 
     // Audio
     bool         monitor_enabled{false};
-    std::wstring monitor_device_id{}; // empty = default
+    std::wstring audio_source{L"airplay"};
+    std::wstring audio_output_mode{L"default"}; // "default" | "specific"
+    std::wstring audio_output_endpoint_id{};     // IMMDevice endpoint ID for specific mode
     float        monitor_volume{1.0f};
     int32_t      audio_sync_offset_ms{0}; // user-adjustable A/V offset trim
+
+    std::wstring AudioOutputSelectionId() const {
+        return audio_output_mode == L"specific" ? audio_output_endpoint_id : std::wstring{};
+    }
+
+    void SelectAudioOutput(std::wstring_view endpoint_id) {
+        if (endpoint_id.empty()) {
+            audio_output_mode = L"default";
+            audio_output_endpoint_id.clear();
+        } else {
+            audio_output_mode = L"specific";
+            audio_output_endpoint_id.assign(endpoint_id);
+        }
+    }
 
     // Receiver
     std::wstring airplay_name{L"DuwnMirror"};
@@ -227,6 +243,8 @@ struct Settings {
     // Migration and validation
     static bool MigrateSettingsV0ToV1(Settings& s) noexcept;
     static bool MigrateSettingsV1ToV2(Settings& s) noexcept;
+    static void MigrateLegacyAudioOutputId(
+        Settings& s, std::wstring_view legacy_endpoint_id) noexcept;
     static bool ValidateSettings(const Settings& s, std::string* out_reason = nullptr) noexcept;
 
     // Load/save

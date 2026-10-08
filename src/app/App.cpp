@@ -514,11 +514,24 @@ int App::Run(bool test_motion, bool verify_capture, bool test_rotate) noexcept {
                         m_window->State().audio_device_id = m_wasapi->CurrentDeviceId();
                         m_window->State().resolved_audio_device_name = m_wasapi->ResolvedDeviceName();
                         m_window->State().audio_fallback_active = m_wasapi->IsFallbackActive();
-                        if (m_wasapi->IsFallbackActive()) {
-                            m_window->State().audio_device_name = std::format(L"{} (Tạm thời)", m_wasapi->ResolvedDeviceName());
-                        } else {
-                            m_window->State().audio_device_name = m_wasapi->ResolvedDeviceName();
+                        const auto endpoint_state = m_wasapi->State();
+                        m_window->State().audio_output_available =
+                            endpoint_state == audio::AudioEndpointState::Playing ||
+                            endpoint_state == audio::AudioEndpointState::Idle;
+                        if (m_window->State().audio_output_available &&
+                            m_settings.AudioOutputSelectionId().empty()) {
+                            m_window->State().audio_device_name = std::format(
+                                L"{} — {}", ui::loc::Get(ui::loc::S::Audio_SystemDefault),
+                                m_wasapi->ResolvedDeviceName());
                         }
+                        m_window->State().audio_output_status =
+                            endpoint_state == audio::AudioEndpointState::InitializationFailed
+                                ? ui::AudioOutputUiStatus::InitializationFailed
+                                : (m_window->State().audio_output_available
+                                    ? ui::AudioOutputUiStatus::Ready
+                                    : (m_settings.audio_output_mode == L"specific"
+                                        ? ui::AudioOutputUiStatus::SelectedDeviceDisconnected
+                                        : ui::AudioOutputUiStatus::Unavailable));
                         ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
                     }
                 }
@@ -532,16 +545,27 @@ int App::Run(bool test_motion, bool verify_capture, bool test_rotate) noexcept {
                     list.clear();
                     for (const auto& d : devs) {
                         list.push_back({d.id, d.friendly_name});
-                        if (d.id == m_settings.monitor_device_id) {
+                        if (d.id == m_settings.AudioOutputSelectionId()) {
                             m_window->State().audio_device_name = d.friendly_name;
                         }
                     }
-                    if (m_settings.monitor_device_id.empty()) {
+                    const std::wstring selected_id = m_settings.AudioOutputSelectionId();
+                    if (selected_id.empty()) {
                         m_window->State().audio_device_name = L"System Default";
+                    } else if (std::none_of(devs.begin(), devs.end(),
+                               [&](const auto& d) { return d.id == selected_id; })) {
+                        auto selected = m_audio_device_mgr.GetDeviceInfo(selected_id);
+                        list.push_back({selected.id, selected.friendly_name, false});
+                        m_window->State().audio_device_name = selected.friendly_name;
                     }
                     if (m_wasapi) {
                         m_window->State().resolved_audio_device_name = m_wasapi->ResolvedDeviceName();
                         m_window->State().audio_fallback_active = m_wasapi->IsFallbackActive();
+                        if (selected_id.empty() && !m_wasapi->ResolvedDeviceName().empty()) {
+                            m_window->State().audio_device_name = std::format(
+                                L"{} — {}", ui::loc::Get(ui::loc::S::Audio_SystemDefault),
+                                m_wasapi->ResolvedDeviceName());
+                        }
                     }
                     ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
                 }
@@ -814,28 +838,27 @@ bool App::Init() noexcept {
     m_window->SetOnAudioDeviceChanged([this](std::wstring_view device_id) {
 
         const std::wstring requested(device_id);
+        const bool opened = !m_wasapi || m_wasapi->SwitchEndpoint(requested);
 
-        if (m_wasapi && !m_wasapi->SwitchEndpoint(requested)) {
-
+        if (!opened) {
             if (m_window) m_window->SetStatusText(ui::loc::Get(ui::loc::S::Audio_DeviceUnavailable));
-
-            return;
-
         }
 
-        m_settings.monitor_device_id = requested;
+        m_settings.SelectAudioOutput(requested);
 
         m_settings.Save();
 
-        m_audio_device_mgr.SetWatchedDeviceId(m_settings.monitor_device_id);
+        m_audio_device_mgr.SetWatchedDeviceId(m_settings.AudioOutputSelectionId());
 
         // Update UI display name
 
         if (m_window) {
 
             if (device_id.empty()) {
-
-                m_window->State().audio_device_name = L"System Default";
+                const std::wstring resolved_name = m_wasapi ? m_wasapi->ResolvedDeviceName() : L"";
+                m_window->State().audio_device_name = resolved_name.empty()
+                    ? std::wstring(ui::loc::Get(ui::loc::S::Audio_SystemDefault))
+                    : std::format(L"{} — {}", ui::loc::Get(ui::loc::S::Audio_SystemDefault), resolved_name);
 
             } else {
 
@@ -855,11 +878,19 @@ bool App::Init() noexcept {
 
             }
 
-            m_window->State().audio_device_id = m_settings.monitor_device_id;
+            m_window->State().audio_device_id = m_settings.AudioOutputSelectionId();
 
             m_window->State().resolved_audio_device_name = m_wasapi
                 ? m_wasapi->ResolvedDeviceName() : L"—";
             m_window->State().audio_fallback_active = m_wasapi ? m_wasapi->IsFallbackActive() : false;
+            m_window->State().audio_output_available = opened;
+            m_window->State().audio_output_status = opened
+                ? ui::AudioOutputUiStatus::Ready
+                : (m_wasapi && m_wasapi->State() == audio::AudioEndpointState::InitializationFailed
+                    ? ui::AudioOutputUiStatus::InitializationFailed
+                    : (m_settings.audio_output_mode == L"specific"
+                        ? ui::AudioOutputUiStatus::SelectedDeviceDisconnected
+                        : ui::AudioOutputUiStatus::Unavailable));
 
             ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
 
@@ -977,7 +1008,11 @@ bool App::Init() noexcept {
             m_window->UpdateSessionState(next);
         }
         if (next == airplay::AirPlaySessionState::Idle || next == airplay::AirPlaySessionState::Disconnecting) {
-            m_source_quality_tracker.ResetSession();
+            {
+                std::lock_guard lock(m_source_quality_mutex);
+                m_source_quality_tracker.ResetSession();
+            }
+            m_observed_source_fps.store(0.0, std::memory_order_relaxed);
             auto& m = GlobalMetrics();
             m.client_fps.store(0.0, std::memory_order_relaxed);
             m.client_dropped_frames.store(0, std::memory_order_relaxed);
@@ -986,6 +1021,10 @@ bool App::Init() noexcept {
             m.video_rtp_bytes.store(0, std::memory_order_relaxed);
             m.audio_rtp_packets.store(0, std::memory_order_relaxed);
             m.audio_rtp_bytes.store(0, std::memory_order_relaxed);
+            m.audio_sequence_gaps.store(0, std::memory_order_relaxed);
+            m.audio_out_of_order_packets.store(0, std::memory_order_relaxed);
+            m.audio_duplicate_packets.store(0, std::memory_order_relaxed);
+            m.audio_malformed_packets.store(0, std::memory_order_relaxed);
             m.video_decoded_frames.store(0, std::memory_order_relaxed);
             m.video_rendered_frames.store(0, std::memory_order_relaxed);
             m.video_dropped_frames.store(0, std::memory_order_relaxed);
@@ -1029,6 +1068,7 @@ bool App::Init() noexcept {
         if (m_window) {
             m_window->UpdateClientInfo(info);
         }
+        std::lock_guard lock(m_source_quality_mutex);
         m_source_quality_tracker.SetClientInfo(
             info.model,
             info.model_marketing_name,
@@ -1092,11 +1132,14 @@ bool App::Init() noexcept {
         [this](video::VideoFrame frame) {
             // Called on decode thread — push to scheduler
             const char* codec_str = (m_video_decoder && m_video_decoder->GetActiveCodec() == video::VideoCodecType::H265) ? "HEVC" : "H264";
-            m_source_quality_tracker.OnFrame(
-                frame.width, frame.height,
-                frame.visible_width, frame.visible_height,
-                60.0, 0.0,
-                codec_str);
+            {
+                std::lock_guard lock(m_source_quality_mutex);
+                m_source_quality_tracker.OnFrame(
+                    frame.width, frame.height,
+                    frame.visible_width, frame.visible_height,
+                    m_observed_source_fps.load(std::memory_order_relaxed), 0.0,
+                    codec_str);
+            }
             m_scheduler->PushFrame(std::move(frame));
         }
 
@@ -1210,7 +1253,8 @@ bool App::Init() noexcept {
     else
         m_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, m_output_window->Hwnd());
 
-    m_renderer->SetNonBlocking(true);
+    // Primary output: keep primary Present accounting and pacing enabled.
+    m_renderer->SetNonBlocking(false);
     if (!m_renderer->Init(init_w, init_h)) {
         DUWN_LOG_ERROR("App", "VideoRenderer init failed");
         return false;
@@ -1259,7 +1303,7 @@ bool App::Init() noexcept {
         if (m_audio_engine) m_audio_engine->NotifyUnderrun();
     });
 
-    if (!m_wasapi->Init(m_settings.monitor_device_id)) {
+    if (!m_wasapi->Init(m_settings.AudioOutputSelectionId())) {
         DUWN_LOG_WARN("App", "WASAPI init failed; audio output disabled");
         // Non-fatal for Milestone 0
     } else {
@@ -1285,25 +1329,49 @@ bool App::Init() noexcept {
     if (!m_audio_device_mgr.Init(m_window->Hwnd())) {
         DUWN_LOG_WARN("App", "AudioDeviceManager init failed; hot-plug notifications disabled");
     }
-    m_audio_device_mgr.SetWatchedDeviceId(m_settings.monitor_device_id);
+    m_audio_device_mgr.SetWatchedDeviceId(m_settings.AudioOutputSelectionId());
     if (m_window) {
         auto devs = m_audio_device_mgr.Enumerate();
         auto& list = m_window->State().available_audio_devices;
         list.clear();
         for (const auto& d : devs) {
             list.push_back({d.id, d.friendly_name});
-            if (d.id == m_settings.monitor_device_id) {
+            if (d.id == m_settings.AudioOutputSelectionId()) {
                 m_window->State().audio_device_name = d.friendly_name;
             }
         }
-        if (m_settings.monitor_device_id.empty()) {
-            m_window->State().audio_device_name = L"System Default";
+        const std::wstring selected_id = m_settings.AudioOutputSelectionId();
+        if (selected_id.empty()) {
+            const std::wstring resolved_name = m_wasapi ? m_wasapi->ResolvedDeviceName() : L"";
+            m_window->State().audio_device_name = resolved_name.empty()
+                ? std::wstring(ui::loc::Get(ui::loc::S::Audio_SystemDefault))
+                : std::format(L"{} — {}", ui::loc::Get(ui::loc::S::Audio_SystemDefault), resolved_name);
+        } else if (std::none_of(devs.begin(), devs.end(),
+                   [&](const auto& d) { return d.id == selected_id; })) {
+            auto selected = m_audio_device_mgr.GetDeviceInfo(selected_id);
+            list.push_back({selected.id, selected.friendly_name, false});
+            m_window->State().audio_device_name = selected.friendly_name;
         }
         m_window->State().audio_volume = m_settings.monitor_volume;
         m_window->State().audio_muted = m_settings.audio_muted;
         m_window->State().resolved_audio_device_name = m_wasapi
             ? m_wasapi->ResolvedDeviceName() : L"—";
+        m_window->State().audio_output_rate = m_wasapi ? m_wasapi->OutputSampleRate() : 0;
+        m_window->State().audio_output_channels = m_wasapi ? m_wasapi->OutputChannels() : 0;
         m_window->State().audio_fallback_active = m_wasapi ? m_wasapi->IsFallbackActive() : false;
+        const auto endpoint_state = m_wasapi
+            ? m_wasapi->State() : audio::AudioEndpointState::Error;
+        m_window->State().audio_output_available =
+            endpoint_state == audio::AudioEndpointState::Playing ||
+            endpoint_state == audio::AudioEndpointState::Idle;
+        m_window->State().audio_output_status =
+            endpoint_state == audio::AudioEndpointState::InitializationFailed
+                ? ui::AudioOutputUiStatus::InitializationFailed
+                : (m_window->State().audio_output_available
+                    ? ui::AudioOutputUiStatus::Ready
+                    : (m_settings.audio_output_mode == L"specific"
+                        ? ui::AudioOutputUiStatus::SelectedDeviceDisconnected
+                        : ui::AudioOutputUiStatus::Unavailable));
     }
     m_noncritical_ready.store(true, std::memory_order_release);
 
@@ -2092,11 +2160,14 @@ bool App::RecreateVideoPipeline() noexcept {
     m_video_decoder = std::make_unique<video::VideoDecoder>(*m_d3d,
         [this](video::VideoFrame frame) {
             const char* codec_str = (m_video_decoder && m_video_decoder->GetActiveCodec() == video::VideoCodecType::H265) ? "HEVC" : "H264";
-            m_source_quality_tracker.OnFrame(
-                frame.width, frame.height,
-                frame.visible_width, frame.visible_height,
-                60.0, 0.0,
-                codec_str);
+            {
+                std::lock_guard lock(m_source_quality_mutex);
+                m_source_quality_tracker.OnFrame(
+                    frame.width, frame.height,
+                    frame.visible_width, frame.visible_height,
+                    m_observed_source_fps.load(std::memory_order_relaxed), 0.0,
+                    codec_str);
+            }
             m_scheduler->PushFrame(std::move(frame));
         });
 
@@ -2131,7 +2202,8 @@ bool App::RecreateVideoPipeline() noexcept {
     else
         m_renderer = std::make_unique<video::WarpVideoRenderer>(*m_d3d, out_hwnd);
 
-    m_renderer->SetNonBlocking(true);
+    // Recreated primary output must not be classified as a preview renderer.
+    m_renderer->SetNonBlocking(false);
     if (!m_renderer->Init(out_w, out_h)) {
         m_window->SetStatusText(L"Renderer unavailable. Choose Auto or Compatibility.");
         return false;
@@ -3664,6 +3736,7 @@ void App::OnVideoData(const uint8_t* data, size_t size,
                        bool marker, uint16_t seq) noexcept {
 
     GlobalMetrics().video_rtp_packets.fetch_add(1, std::memory_order_relaxed);
+    if (marker) GlobalMetrics().video_rtp_frame_boundaries.fetch_add(1, std::memory_order_relaxed);
 
     GlobalMetrics().video_rtp_bytes.fetch_add(size, std::memory_order_relaxed);
 
@@ -4606,6 +4679,14 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
 
 
+    int64_t previous_sample_ns = clock::MonotonicClock::Now().time_since_epoch().count();
+    uint64_t prev_rtp_frames = 0;
+    uint64_t prev_present_ok = 0;
+    uint64_t fps_window_frames[3]{};
+    double fps_window_seconds[3]{};
+    uint32_t fps_window_count = 0;
+    uint32_t fps_window_index = 0;
+
     uint64_t prev_v_rtp       = 0;
 
     uint64_t prev_v_bytes     = 0;
@@ -4717,6 +4798,29 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
         uint64_t v_drop_rate = rate_delta(cur_v_drop, prev_v_drop);
 
         uint64_t v_late_rate = rate_delta(cur_v_late, prev_v_late);
+
+        const double sample_seconds = static_cast<double>(now_ns - previous_sample_ns) / 1e9;
+        previous_sample_ns = now_ns;
+        const uint64_t rtp_frames = m.video_rtp_frame_boundaries.load(std::memory_order_relaxed);
+        const uint64_t present_ok = m.video_present_ok.load(std::memory_order_relaxed);
+        const double rtp_frame_fps = static_cast<double>(rate_delta(rtp_frames, prev_rtp_frames)) / sample_seconds;
+        const double presented_fps = static_cast<double>(rate_delta(present_ok, prev_present_ok)) / sample_seconds;
+        prev_rtp_frames = rtp_frames;
+        prev_present_ok = present_ok;
+        if (v_au_rate == 0 || cur_v_rtp < prev_v_rtp) {
+            fps_window_count = fps_window_index = 0;
+            m_observed_source_fps.store(0.0, std::memory_order_relaxed);
+        } else {
+            fps_window_frames[fps_window_index] = v_au_rate;
+            fps_window_seconds[fps_window_index] = sample_seconds;
+            fps_window_index = (fps_window_index + 1) % 3;
+            fps_window_count = std::min(fps_window_count + 1, 3u);
+            if (fps_window_count == 3) {
+                const double frames = static_cast<double>(fps_window_frames[0] + fps_window_frames[1] + fps_window_frames[2]);
+                const double seconds = fps_window_seconds[0] + fps_window_seconds[1] + fps_window_seconds[2];
+                m_observed_source_fps.store(frames / seconds, std::memory_order_relaxed);
+            }
+        }
 
 
 
@@ -5070,9 +5174,14 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
                 req_env.fps = meta_snap.req_receiver_fps;
                 req_env.preset_name = std::string(GetReceiverQualityName(meta_snap.req_receiver_quality));
                 req_env.is_original = (meta_snap.req_receiver_quality == ReceiverQuality::Original_60);
+                std::lock_guard quality_lock(m_source_quality_mutex);
                 m_source_quality_tracker.SetRequestedEnvelope(req_env);
 
-                auto eff = m_source_quality_tracker.GetEffectiveness();
+                auto measured_actual = m_source_quality_tracker.GetActual();
+                measured_actual.fps = m_observed_source_fps.load(std::memory_order_relaxed);
+                auto eff = video::SourceQualityTracker::Classify(req_env, measured_actual,
+                    m_source_quality_tracker.GetObservation(),
+                    m_source_quality_tracker.IsStable() && m_source_quality_tracker.IsFpsStable());
                 state.quality_effectiveness = static_cast<int>(eff);
                 switch (eff) {
                 case video::QualityEffectiveness::DeliveredAsRequested:
@@ -5093,19 +5202,40 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
                     break;
                 }
 
+                state.actual_source_fps = m_observed_source_fps.load(std::memory_order_relaxed);
+                const auto resolution_eff = video::SourceQualityTracker::ClassifyResolution(
+                    req_env, m_source_quality_tracker.GetActual(),
+                    m_source_quality_tracker.GetObservation(), m_source_quality_tracker.IsStable());
+                if (resolution_eff != video::QualityEffectiveness::Unknown) {
+                    const auto resolution_text = resolution_eff == video::QualityEffectiveness::DeliveredAsRequested
+                        ? ui::loc::S::Video_ResolutionMet : ui::loc::S::Video_ResolutionLimited;
+                    std::wstring fps_text = ui::loc::Get(ui::loc::S::Video_FpsMeasuring);
+                    const double client_fps = m.client_fps.load(std::memory_order_relaxed);
+                    if (m_source_quality_tracker.IsFpsStable()) {
+                        if (client_fps > 0.0 && !video::SourceQualityTracker::MeetsRequestedFps(req_env.fps, client_fps) &&
+                            !video::SourceQualityTracker::MeetsRequestedFps(req_env.fps, state.actual_source_fps)) {
+                            fps_text = std::vformat(ui::loc::Get(ui::loc::S::Video_AirPlaySourceFps), std::make_wformat_args(client_fps));
+                        } else {
+                            fps_text = std::vformat(ui::loc::Get(ui::loc::S::Video_ActualFps), std::make_wformat_args(state.actual_source_fps));
+                        }
+                    }
+                    state.quality_state_desc = std::format(L"{} • {}", ui::loc::Get(resolution_text), fps_text);
+                }
+
                 if (eff_vis_w > 0 && eff_vis_h > 0) {
                     state.orientation_desc = (eff_vis_w >= eff_vis_h) ? L"Landscape" : L"Portrait";
-                    state.actual_source_desc = std::format(L"{} × {} @ {:.0f} FPS", eff_vis_w, eff_vis_h,
-                        state.nominal_fps > 0.0 ? state.nominal_fps : 60.0);
+                    state.actual_source_desc = state.actual_source_fps > 0.0
+                        ? std::format(L"{}×{} • {:.0f} FPS", eff_vis_w, eff_vis_h, state.actual_source_fps)
+                        : std::format(L"{}×{} • — FPS", eff_vis_w, eff_vis_h);
                 } else {
                     state.orientation_desc = L"—";
                     state.actual_source_desc = L"—";
                 }
 
                 state.gpu_name = m_d3d ? m_d3d->AdapterName() : L"—";
-                state.source_fps = static_cast<double>(v_au_rate);
-                state.decoded_fps = static_cast<double>(v_dec_fps);
-                state.render_fps = static_cast<double>(v_rend_fps);
+                state.source_fps = static_cast<double>(v_au_rate) / sample_seconds;
+                state.decoded_fps = static_cast<double>(v_dec_fps) / sample_seconds;
+                state.render_fps = presented_fps;
                 state.decoder_name = dec_name;
                 state.zero_copy = is_zc;
 
@@ -5150,9 +5280,28 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
                 // Audio device state
                 state.audio_buffer_ms      = m.audio_buffer_ms.load(std::memory_order_relaxed);
                 state.audio_underrun_count = cur_real_underruns;
+                state.audio_source_rate    = m.audio_input_rate.load(std::memory_order_relaxed);
+                state.audio_source_channels = m.audio_channels.load(std::memory_order_relaxed);
+                state.audio_output_rate    = m.audio_output_rate.load(std::memory_order_relaxed);
+                state.audio_source_receiving = a_rtp_rate > 0;
                 state.audio_device_id      = meta_snap.monitor_device_id;
                 state.resolved_audio_device_name = m_wasapi
                     ? m_wasapi->ResolvedDeviceName() : L"—";
+                if (m_wasapi) {
+                    state.audio_output_channels = m_wasapi->OutputChannels();
+                    const auto endpoint_state = m_wasapi->State();
+                    state.audio_output_available =
+                        endpoint_state == audio::AudioEndpointState::Playing ||
+                        endpoint_state == audio::AudioEndpointState::Idle;
+                    state.audio_output_status =
+                        endpoint_state == audio::AudioEndpointState::InitializationFailed
+                            ? ui::AudioOutputUiStatus::InitializationFailed
+                            : (state.audio_output_available
+                                ? ui::AudioOutputUiStatus::Ready
+                                : (m_settings.audio_output_mode == L"specific"
+                                    ? ui::AudioOutputUiStatus::SelectedDeviceDisconnected
+                                    : ui::AudioOutputUiStatus::Unavailable));
+                }
 
                 const uint64_t session_pres = m_session_frames_presented.load(std::memory_order_relaxed);
                 const auto eval = ui::EvaluateStreamingStatus(
@@ -5271,6 +5420,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
             v_drop_rate, superseded_rate, v_late_rate, cur_drop_min_rdy, cur_drop_ipc, cur_drop_dec_unrdy, cur_pres_late, cur_trans_drop, cur_q_overflow, cur_sess_q_full, cur_q_full_drop, q_depth, cur_gen, coded_w, coded_h, vis_w, vis_h);
 
         if (phase_str == "Streaming" || vis_w > 0) {
+            std::lock_guard lock(m_source_quality_mutex);
             DUWN_LOG_INFO("Diagnostics", m_source_quality_tracker.FormatTelemetryBlock());
         }
 
@@ -5360,7 +5510,7 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
         DUWN_LOG_INFOF("Diagnostics",
 
-            "[STATS] AUDIO: rtp={}/s ({:.1f} KB/s) | codec=L16 (pt={}) | {}Hz -> {}Hz ({}ch) | buf={:.1f}ms | silence_fill={}/s (life={}) | real_underruns={}/s (total={}, legacy={}/s) | wasapi_run={} | resumes={} (last_gap={:.1f}ms)",
+            "[STATS] AUDIO: rtp={}/s ({:.1f} KB/s) | codec=L16 (pt={}) | {}Hz -> {}Hz ({}ch) | seq_gap={} ooo={} dup={} malf={} | buf={:.1f}ms | silence_fill={}/s (life={}) | real_underruns={}/s (total={}, legacy={}/s) | wasapi_run={} | resumes={} (last_gap={:.1f}ms)",
 
             a_rtp_rate, a_kb_rate, m.audio_payload_type.load(std::memory_order_relaxed),
 
@@ -5369,6 +5519,14 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
             m.audio_output_rate.load(std::memory_order_relaxed),
 
             m.audio_channels.load(std::memory_order_relaxed),
+
+            m.audio_sequence_gaps.load(std::memory_order_relaxed),
+
+            m.audio_out_of_order_packets.load(std::memory_order_relaxed),
+
+            m.audio_duplicate_packets.load(std::memory_order_relaxed),
+
+            m.audio_malformed_packets.load(std::memory_order_relaxed),
 
             m.audio_buffer_ms.load(std::memory_order_relaxed),
 
@@ -5613,6 +5771,14 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
 
         double client_fps_report = m.client_fps.load(std::memory_order_relaxed);
+        if (m_settings.debug_log) {
+            DUWN_LOG_INFOF("Diagnostics",
+                "[FPS DIAGNOSTIC] sample_seconds={:.6f} | client_reported_fps={:.2f} | video_rtp_packets_per_second={:.2f} | rtp_frame_fps={:.2f} | access_unit_fps={:.2f} | decoder_output_fps={:.2f} | presented_fps={:.2f} | render_queue_depth={} | rtp_frames_total={} | decoder_frames_total={} | present_ok_total={}",
+                sample_seconds, client_fps_report, static_cast<double>(v_rtp_rate) / sample_seconds,
+                rtp_frame_fps, static_cast<double>(v_au_rate) / sample_seconds,
+                static_cast<double>(v_dec_fps) / sample_seconds, presented_fps, q_depth,
+                rtp_frames, cur_v_dec, present_ok);
+        }
 
         if (client_fps_report > 0.0) {
 

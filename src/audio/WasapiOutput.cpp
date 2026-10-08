@@ -251,25 +251,22 @@ bool WasapiOutput::Init(const std::wstring& device_id) noexcept {
     m_state.store(AudioEndpointState::Opening, std::memory_order_release);
 
     AudioTargetResources target;
-    bool ok = PrepareTarget(device_id, target);
-    if (!ok && !device_id.empty()) {
-        // Fallback to system default if pinned device is missing
-        ok = PrepareTarget(L"", target);
-        if (ok) target.is_fallback = true;
-    }
+    const TargetOpenResult result = PrepareTarget(device_id, target);
 
-    if (ok) {
+    if (result == TargetOpenResult::Success) {
         std::lock_guard lock(m_active_mutex);
         m_active = std::move(target);
-        m_is_fallback.store(m_active.is_fallback, std::memory_order_release);
-        m_buffer_ms.store(m_active.buffer_ms, std::memory_order_relaxed);
+        ConfigureForActiveTarget();
         m_state.store(AudioEndpointState::Idle, std::memory_order_release);
         DUWN_LOG_INFOF("WasapiOutput", "Initialized: {}Hz, {} ch, buffer {:.1f}ms, endpoint={}",
             m_active.format.sample_rate, m_active.format.channels, m_active.buffer_ms,
             ToUtf8(m_active.resolved_name));
     } else {
-        m_state.store(AudioEndpointState::WaitingForDevice, std::memory_order_release);
-        DUWN_LOG_WARN("WasapiOutput", "Init: no usable audio endpoint; entering WaitingForDevice");
+        const auto state = result == TargetOpenResult::Unavailable
+            ? AudioEndpointState::WaitingForDevice
+            : AudioEndpointState::InitializationFailed;
+        m_state.store(state, std::memory_order_release);
+        DUWN_LOG_WARN("WasapiOutput", "Init: selected audio endpoint could not be opened");
     }
 
     return true;
@@ -333,6 +330,16 @@ std::wstring WasapiOutput::ResolvedDeviceName() const noexcept {
     return m_active.resolved_name;
 }
 
+uint32_t WasapiOutput::OutputSampleRate() const noexcept {
+    std::lock_guard lock(m_active_mutex);
+    return m_active.client ? m_active.format.sample_rate : 0;
+}
+
+uint32_t WasapiOutput::OutputChannels() const noexcept {
+    std::lock_guard lock(m_active_mutex);
+    return m_active.client ? m_active.format.channels : 0;
+}
+
 EndpointSelectionPolicy WasapiOutput::SelectionPolicy() const noexcept {
     std::lock_guard lock(m_selection_mutex);
     return m_selection_policy;
@@ -346,6 +353,7 @@ std::wstring WasapiOutput::StateString() const noexcept {
     case AudioEndpointState::Switching:        return L"Switching";
     case AudioEndpointState::Recovering:       return L"Recovering";
     case AudioEndpointState::WaitingForDevice: return L"Waiting for device";
+    case AudioEndpointState::InitializationFailed: return L"Initialization failed";
     case AudioEndpointState::Stopped:          return L"Stopped";
     case AudioEndpointState::Error:            return L"Error";
     default:                                   return L"—";
@@ -395,6 +403,41 @@ void WasapiOutput::CleanTarget(AudioTargetResources& target) noexcept {
     target.is_fallback = false;
 }
 
+void WasapiOutput::ConfigureForActiveTarget() noexcept {
+    m_is_fallback.store(false, std::memory_order_release);
+    m_buffer_ms.store(m_active.buffer_ms, std::memory_order_relaxed);
+    GlobalMetrics().audio_output_rate.store(
+        m_active.client ? m_active.format.sample_rate : 0, std::memory_order_relaxed);
+    if (m_active.client && m_active.format.needs_resample) {
+        m_resampler.Init(48000, 2, m_active.format.sample_rate, 2);
+    } else {
+        m_resampler.Reset();
+    }
+    m_resampled_fifo.clear();
+    m_recovery_attempts.store(0, std::memory_order_release);
+}
+
+void WasapiOutput::DeactivateEndpoint(
+    AudioEndpointState state, bool reset_recovery_attempts) noexcept {
+    {
+        std::lock_guard pending_lock(m_pending_mutex);
+        if (m_has_pending_target) CleanTarget(m_pending_target);
+        m_has_pending_target = false;
+        m_pending_generation = 0;
+    }
+    {
+        std::lock_guard active_lock(m_active_mutex);
+        CleanTarget(m_active);
+        ConfigureForActiveTarget();
+    }
+    m_ring.DiscardOldest(0);
+    if (reset_recovery_attempts) {
+        m_recovery_attempts.store(0, std::memory_order_release);
+    }
+    m_state.store(state, std::memory_order_release);
+    if (m_wake_event) ::SetEvent(m_wake_event);
+}
+
 bool WasapiOutput::TryInitAudioClient3(IMMDevice* device, AudioTargetResources& target) noexcept {
     if (!device) return false;
     ComPtr<IAudioClient3> client3;
@@ -407,40 +450,18 @@ bool WasapiOutput::TryInitAudioClient3(IMMDevice* device, AudioTargetResources& 
     hr = client3->GetMixFormat(&mix_fmt);
     if (FAILED(hr) || !mix_fmt) return false;
 
-    // Request 48kHz stereo float32 first
-    WAVEFORMATEXTENSIBLE req{};
-    req.Format.wFormatTag      = WAVE_FORMAT_EXTENSIBLE;
-    req.Format.nChannels       = 2;
-    req.Format.nSamplesPerSec  = 48000;
-    req.Format.wBitsPerSample  = 32;
-    req.Format.nBlockAlign     = req.Format.nChannels * req.Format.wBitsPerSample / 8;
-    req.Format.nAvgBytesPerSec = req.Format.nSamplesPerSec * req.Format.nBlockAlign;
-    req.Format.cbSize          = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
-    req.Samples.wValidBitsPerSample = 32;
-    req.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
-    req.SubFormat     = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+    if (!ValidateAudioFormat(mix_fmt, target.format)) {
+        ::CoTaskMemFree(mix_fmt);
+        return false;
+    }
 
     UINT32 default_period = 0, fundamental_period = 0, min_period = 0, max_period = 0;
     hr = client3->GetSharedModeEnginePeriod(
-        reinterpret_cast<WAVEFORMATEX*>(&req),
+        mix_fmt,
         &default_period, &fundamental_period, &min_period, &max_period);
-
-    const WAVEFORMATEX* chosen_fmt = reinterpret_cast<const WAVEFORMATEX*>(&req);
-    if (SUCCEEDED(hr) && ValidateAudioFormat(chosen_fmt, target.format)) {
-        // req accepted
-    } else {
-        chosen_fmt = mix_fmt;
-        if (!ValidateAudioFormat(mix_fmt, target.format)) {
-            ::CoTaskMemFree(mix_fmt);
-            return false;
-        }
-        hr = client3->GetSharedModeEnginePeriod(
-            mix_fmt,
-            &default_period, &fundamental_period, &min_period, &max_period);
-        if (FAILED(hr)) {
-            ::CoTaskMemFree(mix_fmt);
-            return false;
-        }
+    if (FAILED(hr)) {
+        ::CoTaskMemFree(mix_fmt);
+        return false;
     }
 
     UINT32 period = std::max(min_period, fundamental_period);
@@ -456,7 +477,7 @@ bool WasapiOutput::TryInitAudioClient3(IMMDevice* device, AudioTargetResources& 
     hr = client3->InitializeSharedAudioStream(
         AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
         period,
-        chosen_fmt,
+        mix_fmt,
         nullptr);
     ::CoTaskMemFree(mix_fmt);
     if (FAILED(hr)) return false;
@@ -521,12 +542,13 @@ bool WasapiOutput::FallbackInitAudioClient(IMMDevice* device, AudioTargetResourc
     return true;
 }
 
-bool WasapiOutput::PrepareTarget(const std::wstring& target_id, AudioTargetResources& out_target) noexcept {
+WasapiOutput::TargetOpenResult WasapiOutput::PrepareTarget(
+    const std::wstring& target_id, AudioTargetResources& out_target) noexcept {
     ComPtr<IMMDeviceEnumerator> enumerator;
     HRESULT hr = ::CoCreateInstance(
         __uuidof(MMDeviceEnumerator), nullptr,
         CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
-    if (FAILED(hr) || !enumerator) return false;
+    if (FAILED(hr) || !enumerator) return TargetOpenResult::InitializationFailed;
 
     if (target_id.empty()) {
         hr = enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, out_target.device.GetAddressOf());
@@ -540,7 +562,7 @@ bool WasapiOutput::PrepareTarget(const std::wstring& target_id, AudioTargetResou
             }
         }
     }
-    if (FAILED(hr) || !out_target.device) return false;
+    if (FAILED(hr) || !out_target.device) return TargetOpenResult::Unavailable;
 
     LPWSTR raw_id = nullptr;
     if (SUCCEEDED(out_target.device->GetId(&raw_id)) && raw_id) {
@@ -560,13 +582,13 @@ bool WasapiOutput::PrepareTarget(const std::wstring& target_id, AudioTargetResou
     if (out_target.resolved_name.empty()) out_target.resolved_name = out_target.resolved_id;
 
     out_target.ready_event = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!out_target.ready_event) return false;
+    if (!out_target.ready_event) return TargetOpenResult::InitializationFailed;
 
     bool ok = TryInitAudioClient3(out_target.device.Get(), out_target);
     if (!ok) ok = FallbackInitAudioClient(out_target.device.Get(), out_target);
     if (!ok) {
         CleanTarget(out_target);
-        return false;
+        return TargetOpenResult::InitializationFailed;
     }
 
     SetSessionIdentity(out_target.client.Get());
@@ -576,11 +598,11 @@ bool WasapiOutput::PrepareTarget(const std::wstring& target_id, AudioTargetResou
         out_target.render_client->ReleaseBuffer(out_target.buffer_frames, AUDCLNT_BUFFERFLAGS_SILENT);
     }
 
-    return true;
+    return TargetOpenResult::Success;
 }
 
 bool WasapiOutput::SwitchEndpoint(const std::wstring& device_id) noexcept {
-    const uint64_t gen = ++m_request_generation;
+    const uint64_t gen = m_endpoint_work.BeginRequest();
     std::lock_guard lock(m_switch_mutex);
 
     {
@@ -594,54 +616,50 @@ bool WasapiOutput::SwitchEndpoint(const std::wstring& device_id) noexcept {
     m_state.store(AudioEndpointState::Switching, std::memory_order_release);
 
     AudioTargetResources candidate;
-    bool ok = PrepareTarget(device_id, candidate);
+    const TargetOpenResult result = PrepareTarget(device_id, candidate);
 
-    if (!ok) {
+    if (result != TargetOpenResult::Success) {
         CleanTarget(candidate);
-        bool currently_active = false;
-        {
-            std::lock_guard act_lock(m_active_mutex);
-            currently_active = (m_active.client != nullptr);
+        const auto state = result == TargetOpenResult::Unavailable
+            ? AudioEndpointState::WaitingForDevice
+            : AudioEndpointState::InitializationFailed;
+        const bool committed = m_endpoint_work.TryCommit(gen, [this, state] {
+            DeactivateEndpoint(state);
+        });
+        if (committed) {
+            DUWN_LOG_WARN("WasapiOutput", "Selected endpoint unavailable; audio output paused without fallback");
         }
-        m_state.store(currently_active ? AudioEndpointState::Playing : AudioEndpointState::WaitingForDevice,
-                      std::memory_order_release);
-        DUWN_LOG_WARN("WasapiOutput", "SwitchEndpoint failed: candidate unavailable; preserving current endpoint");
         return false;
-    }
-
-    if (gen != m_request_generation.load(std::memory_order_acquire)) {
-        CleanTarget(candidate);
-        return true;
     }
 
     candidate.is_fallback = false;
 
     if (!m_running.load(std::memory_order_acquire)) {
-        std::lock_guard act_lock(m_active_mutex);
-        CleanTarget(m_active);
-        m_active = std::move(candidate);
-        m_is_fallback.store(m_active.is_fallback, std::memory_order_release);
-        m_buffer_ms.store(m_active.buffer_ms, std::memory_order_relaxed);
-        if (m_active.format.needs_resample) {
-            m_resampler.Init(48000, 2, m_active.format.sample_rate, 2);
-        } else {
-            m_resampler.Reset();
-        }
-        m_resampled_fifo.clear();
-        m_state.store(AudioEndpointState::Idle, std::memory_order_release);
+        const bool committed = m_endpoint_work.TryCommit(gen, [this, &candidate] {
+            std::lock_guard act_lock(m_active_mutex);
+            CleanTarget(m_active);
+            m_active = std::move(candidate);
+            ConfigureForActiveTarget();
+            m_ring.DiscardOldest(0);
+            m_state.store(AudioEndpointState::Idle, std::memory_order_release);
+        });
+        if (!committed) CleanTarget(candidate);
         return true;
     }
 
-    {
+    ::ResetEvent(m_switch_ack_event);
+    const bool queued = m_endpoint_work.TryCommit(gen, [this, gen, &candidate] {
         std::lock_guard pend_lock(m_pending_mutex);
-        if (m_has_pending_target) {
-            CleanTarget(m_pending_target);
-        }
+        if (m_has_pending_target) CleanTarget(m_pending_target);
         m_pending_target = std::move(candidate);
         m_has_pending_target = true;
+        m_pending_generation = gen;
+    });
+    if (!queued) {
+        CleanTarget(candidate);
+        return true;
     }
 
-    ::ResetEvent(m_switch_ack_event);
     if (m_wake_event) ::SetEvent(m_wake_event);
 
     DWORD wr = ::WaitForSingleObject(m_switch_ack_event, 500);
@@ -649,10 +667,12 @@ bool WasapiOutput::SwitchEndpoint(const std::wstring& device_id) noexcept {
         DUWN_LOG_WARNF("WasapiOutput", "SwitchEndpoint: worker switch ack timed out ({})", wr);
     }
 
-    m_state.store(AudioEndpointState::Playing, std::memory_order_release);
-    DUWN_LOG_INFOF("WasapiOutput", "Endpoint switched: {}Hz, {} ch, buffer {:.1f}ms, endpoint={} (fallback={})",
+    if (m_endpoint_work.Capture() != gen) return true;
+
+    std::lock_guard active_lock(m_active_mutex);
+    DUWN_LOG_INFOF("WasapiOutput", "Endpoint switched: {}Hz, {} ch, buffer {:.1f}ms, endpoint={}",
         m_active.format.sample_rate, m_active.format.channels, m_active.buffer_ms,
-        ToUtf8(m_active.resolved_name), m_active.is_fallback);
+        ToUtf8(m_active.resolved_name));
     return true;
 }
 
@@ -665,43 +685,62 @@ void WasapiOutput::OnDeviceEnvironmentChanged() noexcept {
         policy = m_selection_policy;
     }
 
-    if (policy == EndpointSelectionPolicy::PinnedDevice) {
-        if (m_is_fallback.load(std::memory_order_acquire)) {
-            ComPtr<IMMDeviceEnumerator> enumerator;
-            if (SUCCEEDED(::CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator)))) {
-                ComPtr<IMMDevice> dev;
-                if (SUCCEEDED(enumerator->GetDevice(pref_id.c_str(), dev.GetAddressOf())) && dev) {
-                    DWORD st = 0;
-                    if (SUCCEEDED(dev->GetState(&st)) && st == DEVICE_STATE_ACTIVE) {
-                        DUWN_LOG_INFO("WasapiOutput", "Pinned device re-detected; switching back from fallback");
-                        SwitchEndpoint(pref_id);
-                    }
-                }
-            }
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    if (FAILED(::CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                  IID_PPV_ARGS(&enumerator))) || !enumerator) {
+        return;
+    }
+
+    std::wstring default_id;
+    ComPtr<IMMDevice> default_device;
+    if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(
+            eRender, eMultimedia, default_device.GetAddressOf())) && default_device) {
+        LPWSTR raw_id = nullptr;
+        if (SUCCEEDED(default_device->GetId(&raw_id)) && raw_id) {
+            default_id = raw_id;
+            ::CoTaskMemFree(raw_id);
         }
-    } else {
-        ComPtr<IMMDeviceEnumerator> enumerator;
-        if (SUCCEEDED(::CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator)))) {
-            ComPtr<IMMDevice> def_dev;
-            if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, def_dev.GetAddressOf())) && def_dev) {
-                LPWSTR cur_id = nullptr;
-                if (SUCCEEDED(def_dev->GetId(&cur_id)) && cur_id) {
-                    std::wstring new_def_id = cur_id;
-                    ::CoTaskMemFree(cur_id);
-                    std::wstring cur_active = ResolvedDeviceId();
-                    if (new_def_id != cur_active) {
-                        DUWN_LOG_INFO("WasapiOutput", "System default endpoint changed; switching output");
-                        SwitchEndpoint(L"");
-                    }
-                }
-            }
+    }
+
+    bool selected_active = false;
+    if (policy == EndpointSelectionPolicy::PinnedDevice && !pref_id.empty()) {
+        ComPtr<IMMDevice> selected;
+        if (SUCCEEDED(enumerator->GetDevice(pref_id.c_str(), selected.GetAddressOf())) && selected) {
+            DWORD device_state = 0;
+            selected_active = SUCCEEDED(selected->GetState(&device_state)) &&
+                              device_state == DEVICE_STATE_ACTIVE;
         }
+    }
+
+    const auto decision = DecideEndpointChange(
+        policy, pref_id, ResolvedDeviceId(), default_id, selected_active);
+    switch (decision.action) {
+    case EndpointChangeAction::OpenDefault:
+        DUWN_LOG_INFO("WasapiOutput", "Multimedia default endpoint changed; switching output");
+        SwitchEndpoint(L"");
+        break;
+    case EndpointChangeAction::OpenSpecific:
+        DUWN_LOG_INFO("WasapiOutput", "Selected endpoint became active; reopening exact endpoint ID");
+        SwitchEndpoint(std::wstring(decision.target_id));
+        break;
+    case EndpointChangeAction::WaitForDevice:
+        if (!ResolvedDeviceId().empty() ||
+            m_state.load(std::memory_order_acquire) != AudioEndpointState::WaitingForDevice) {
+            const uint64_t gen = m_endpoint_work.BeginRequest();
+            m_endpoint_work.TryCommit(gen, [this] {
+                DeactivateEndpoint(AudioEndpointState::WaitingForDevice);
+            });
+        }
+        break;
+    case EndpointChangeAction::None:
+        break;
     }
 }
 
 bool WasapiOutput::PerformRecovery(std::stop_token stop) noexcept {
     if (stop.stop_requested() || !m_running.load(std::memory_order_acquire)) return false;
 
+    const uint64_t recovery_generation = m_endpoint_work.Capture();
     DUWN_LOG_INFO("WasapiOutput", "Performing audio endpoint recovery");
     std::wstring pref_id;
     EndpointSelectionPolicy policy;
@@ -712,44 +751,39 @@ bool WasapiOutput::PerformRecovery(std::stop_token stop) noexcept {
     }
 
     AudioTargetResources candidate;
-    bool ok = false;
-    bool fallback = false;
+    const TargetOpenResult result = PrepareTarget(
+        policy == EndpointSelectionPolicy::PinnedDevice ? pref_id : L"", candidate);
 
-    if (policy == EndpointSelectionPolicy::PinnedDevice && !pref_id.empty()) {
-        ok = PrepareTarget(pref_id, candidate);
-        if (!ok) {
-            ok = PrepareTarget(L"", candidate);
-            if (ok) fallback = true;
-        }
-    } else {
-        ok = PrepareTarget(L"", candidate);
-    }
-
-    if (ok) {
-        candidate.is_fallback = fallback;
-        if (m_running.load(std::memory_order_acquire) && candidate.client) {
-            candidate.client->Start();
-        }
-        {
+    if (result == TargetOpenResult::Success) {
+        const bool committed = m_endpoint_work.TryCommit(
+            recovery_generation, [this, &candidate] {
+            if (m_running.load(std::memory_order_acquire) && candidate.client) {
+                candidate.client->Start();
+            }
             std::lock_guard lock(m_active_mutex);
             CleanTarget(m_active);
             m_active = std::move(candidate);
+            ConfigureForActiveTarget();
+            m_state.store(AudioEndpointState::Playing, std::memory_order_release);
+        });
+        if (!committed) {
+            CleanTarget(candidate);
+            return false;
         }
-        m_is_fallback.store(m_active.is_fallback, std::memory_order_release);
-        m_buffer_ms.store(m_active.buffer_ms, std::memory_order_relaxed);
-        if (m_active.format.needs_resample) {
-            m_resampler.Init(48000, 2, m_active.format.sample_rate, 2);
-        } else {
-            m_resampler.Reset();
-        }
-        m_resampled_fifo.clear();
-        m_state.store(AudioEndpointState::Playing, std::memory_order_release);
-        DUWN_LOG_INFOF("WasapiOutput", "Recovery successful: playing on {} (fallback={})",
-            ToUtf8(m_active.resolved_name), fallback);
+        DUWN_LOG_INFO("WasapiOutput", "Recovery successful: playing on selected endpoint");
         return true;
     } else {
-        m_state.store(AudioEndpointState::WaitingForDevice, std::memory_order_release);
-        DUWN_LOG_WARN("WasapiOutput", "No audio endpoint available; entering WaitingForDevice");
+        const auto state = result == TargetOpenResult::Unavailable
+            ? AudioEndpointState::WaitingForDevice
+            : AudioEndpointState::InitializationFailed;
+        const bool committed = m_endpoint_work.TryCommit(
+            recovery_generation, [this, state] {
+            DeactivateEndpoint(
+                state, state != AudioEndpointState::InitializationFailed);
+        });
+        if (committed) {
+            DUWN_LOG_WARN("WasapiOutput", "Selected audio endpoint is still unavailable");
+        }
         return false;
     }
 }
@@ -775,35 +809,33 @@ void WasapiOutput::RenderLoop(std::stop_token stop) noexcept {
         // Check for pending endpoint switch committed by worker thread
         AudioTargetResources new_target;
         bool do_switch = false;
+        uint64_t switch_generation = 0;
         {
             std::lock_guard pend_lock(m_pending_mutex);
             if (m_has_pending_target) {
                 new_target = std::move(m_pending_target);
                 m_has_pending_target = false;
+                switch_generation = m_pending_generation;
+                m_pending_generation = 0;
                 do_switch = true;
             }
         }
         if (do_switch) {
-            if (m_active.client) {
-                m_active.client->Stop();
-            }
-            CleanTarget(m_active);
-            {
+            const bool committed = m_endpoint_work.TryCommit(
+                switch_generation, [this, &new_target] {
                 std::lock_guard act_lock(m_active_mutex);
+                CleanTarget(m_active);
                 m_active = std::move(new_target);
+                ConfigureForActiveTarget();
+                if (m_running.load(std::memory_order_acquire) && m_active.client) {
+                    m_active.client->Start();
+                }
+                m_ring.DiscardOldest(0);
+                m_state.store(AudioEndpointState::Playing, std::memory_order_release);
+            });
+            if (!committed) {
+                CleanTarget(new_target);
             }
-            m_is_fallback.store(m_active.is_fallback, std::memory_order_release);
-            m_buffer_ms.store(m_active.buffer_ms, std::memory_order_relaxed);
-            if (m_active.format.needs_resample) {
-                m_resampler.Init(48000, 2, m_active.format.sample_rate, 2);
-            } else {
-                m_resampler.Reset();
-            }
-            m_resampled_fifo.clear();
-            if (m_running.load(std::memory_order_acquire) && m_active.client) {
-                m_active.client->Start();
-            }
-            m_state.store(AudioEndpointState::Playing, std::memory_order_release);
             if (m_switch_ack_event) ::SetEvent(m_switch_ack_event);
             continue;
         }
@@ -811,8 +843,21 @@ void WasapiOutput::RenderLoop(std::stop_token stop) noexcept {
         AudioEndpointState current_st = m_state.load(std::memory_order_acquire);
         if (current_st == AudioEndpointState::WaitingForDevice) {
             m_ring.DiscardOldest(4800); // 100ms at 48kHz
-            DWORD wr = ::WaitForSingleObject(m_wake_event, 250);
-            if (wr == WAIT_OBJECT_0 || wr == WAIT_TIMEOUT) {
+            ::WaitForSingleObject(m_wake_event, 1000);
+            continue;
+        }
+
+        if (current_st == AudioEndpointState::InitializationFailed) {
+            m_ring.DiscardOldest(4800);
+            const uint32_t attempt = m_recovery_attempts.load(std::memory_order_acquire);
+            const uint32_t delay_ms = AudioRecoveryRetryDelayMs(attempt);
+            if (delay_ms == 0) {
+                ::WaitForSingleObject(m_wake_event, 1000);
+                continue;
+            }
+            const DWORD wr = ::WaitForSingleObject(m_wake_event, delay_ms);
+            if (wr == WAIT_TIMEOUT) {
+                m_recovery_attempts.fetch_add(1, std::memory_order_acq_rel);
                 PerformRecovery(stop);
             }
             continue;
@@ -848,7 +893,9 @@ void WasapiOutput::RenderLoop(std::stop_token stop) noexcept {
 
         UINT32 padding = 0;
         HRESULT hr = m_active.client->GetCurrentPadding(&padding);
-        if (hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_RESOURCES_INVALIDATED) {
+        if (hr == AUDCLNT_E_DEVICE_INVALIDATED ||
+            hr == AUDCLNT_E_RESOURCES_INVALIDATED ||
+            hr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
             lock.unlock();
             m_state.store(AudioEndpointState::Recovering, std::memory_order_release);
             continue;
@@ -867,7 +914,9 @@ void WasapiOutput::RenderLoop(std::stop_token stop) noexcept {
 
         BYTE* data = nullptr;
         hr = m_active.render_client->GetBuffer(frames_to_write, &data);
-        if (hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_RESOURCES_INVALIDATED) {
+        if (hr == AUDCLNT_E_DEVICE_INVALIDATED ||
+            hr == AUDCLNT_E_RESOURCES_INVALIDATED ||
+            hr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
             lock.unlock();
             m_state.store(AudioEndpointState::Recovering, std::memory_order_release);
             continue;
@@ -1013,7 +1062,9 @@ void WasapiOutput::RenderLoop(std::stop_token stop) noexcept {
         hr = m_active.render_client->ReleaseBuffer(frames_to_write, rel_flags);
         lock.unlock();
 
-        if (hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_RESOURCES_INVALIDATED) {
+        if (hr == AUDCLNT_E_DEVICE_INVALIDATED ||
+            hr == AUDCLNT_E_RESOURCES_INVALIDATED ||
+            hr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
             m_state.store(AudioEndpointState::Recovering, std::memory_order_release);
             continue;
         }

@@ -126,7 +126,7 @@ public:
             snap.req_receiver_height = m_req_settings.receiver_height;
             snap.req_receiver_fps = m_req_settings.receiver_fps;
             snap.req_transport_mode = m_req_settings.transport_mode;
-            snap.monitor_device_id = m_req_settings.monitor_device_id;
+            snap.monitor_device_id = m_req_settings.AudioOutputSelectionId();
 
             snap.capture_canvas = m_req_settings.capture_canvas;
             snap.output_quality = m_req_settings.output_quality;

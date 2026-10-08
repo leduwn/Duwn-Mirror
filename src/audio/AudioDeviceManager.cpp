@@ -104,6 +104,34 @@ std::wstring AudioDeviceManager::DefaultDeviceId() noexcept {
     return id;
 }
 
+AudioEndpointInfo AudioDeviceManager::GetDeviceInfo(const std::wstring& id) noexcept {
+    AudioEndpointInfo info;
+    info.id = id;
+    info.available = false;
+    if (id.empty() || !m_enumerator) return info;
+
+    ComPtr<IMMDevice> device;
+    if (FAILED(m_enumerator->GetDevice(id.c_str(), device.GetAddressOf())) || !device) {
+        info.friendly_name = id;
+        return info;
+    }
+
+    DWORD state = 0;
+    info.available = SUCCEEDED(device->GetState(&state)) && state == DEVICE_STATE_ACTIVE;
+    ComPtr<IPropertyStore> props;
+    if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, props.GetAddressOf()))) {
+        PROPVARIANT pv;
+        ::PropVariantInit(&pv);
+        if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &pv)) &&
+            pv.vt == VT_LPWSTR && pv.pwszVal) {
+            info.friendly_name = pv.pwszVal;
+        }
+        ::PropVariantClear(&pv);
+    }
+    if (info.friendly_name.empty()) info.friendly_name = id;
+    return info;
+}
+
 bool AudioDeviceManager::IsDeviceActive(const std::wstring& id) noexcept {
     if (id.empty() || !m_enumerator) return false;
     ComPtr<IMMDevice> device;
@@ -218,6 +246,25 @@ HRESULT STDMETHODCALLTYPE AudioDeviceManager::OnDeviceStateChanged(
             dwNewState == DEVICE_STATE_UNPLUGGED) {
             ::PostMessageW(m_hwnd, WM_APP_AUDIO_DEVICE_CHANGED, 0, 0);
         }
+    }
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE AudioDeviceManager::OnPropertyValueChanged(
+    LPCWSTR pwstrDeviceId, const PROPERTYKEY /*key*/) {
+    if (m_hwnd) ::PostMessageW(m_hwnd, WM_APP_AUDIO_DEVICE_LIST_CHANGED, 0, 0);
+
+    bool affects_selection = false;
+    if (::TryAcquireSRWLockShared(&m_watched_lock)) {
+        affects_selection = m_watched_device_id.empty() ||
+            (pwstrDeviceId && m_watched_device_id == pwstrDeviceId);
+        ::ReleaseSRWLockShared(&m_watched_lock);
+    } else {
+        affects_selection = true;
+    }
+
+    if (affects_selection && m_hwnd) {
+        ::PostMessageW(m_hwnd, WM_APP_AUDIO_DEVICE_CHANGED, 0, 0);
     }
     return S_OK;
 }
