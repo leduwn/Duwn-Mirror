@@ -26,6 +26,9 @@ $RECYCLE.BIN/
 .DS_Store
 %SystemDrive%/
 
+# Local agent instructions
+CLAUDE.md
+
 # WiX / Installer artifacts
 *.wixpdb
 *.wixobj
