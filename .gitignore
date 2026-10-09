@@ -46,6 +46,9 @@ release/**/*.msi
 tests/**/*.exe
 logs/
 *.log
+benchmarks/runs/
+benchmarks/analysis_report.md
+benchmarks/analysis_report.json
 cold_results.xml
 warm_results.xml
 pm_fullscreen.csv
