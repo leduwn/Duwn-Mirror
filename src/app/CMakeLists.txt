@@ -85,6 +85,9 @@ endif()
 
 # Stage private duwn-airplay runtime into output directory
 add_custom_command(TARGET duwn-mirror POST_BUILD
-    COMMAND cmd /c "if not exist \"$<TARGET_FILE_DIR:duwn-mirror>\\duwn-airplay\\uxplay.exe\" (${CMAKE_COMMAND} -E copy_directory \"${CMAKE_SOURCE_DIR}/runtime/duwn-airplay\" \"$<TARGET_FILE_DIR:duwn-mirror>/duwn-airplay\")"
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory_if_different
+            "${CMAKE_SOURCE_DIR}/runtime/duwn-airplay"
+            "$<TARGET_FILE_DIR:duwn-mirror>/duwn-airplay"
     COMMENT "Stage duwn-airplay private runtime into output directory"
+    VERBATIM
 )
