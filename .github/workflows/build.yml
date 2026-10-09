@@ -51,10 +51,10 @@ jobs:
           }
           if ($ec -ne 0) { exit $ec }
 
-      - name: Test (debug only)
+      - name: Test headless-safe suite (debug only)
         if: matrix.preset == 'debug'
         working-directory: build/debug
-        run: ctest --output-on-failure -C Debug
+        run: ctest --output-on-failure -C Debug -L headless
 
       - name: Upload build artifacts
         if: matrix.preset == 'release'

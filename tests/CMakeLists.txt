@@ -35,7 +35,21 @@ target_link_libraries(duwn-unit-tests
 target_compile_features(duwn-unit-tests PRIVATE cxx_std_20)
 
 add_test(NAME duwn-unit-tests COMMAND duwn-unit-tests)
-set_tests_properties(duwn-unit-tests PROPERTIES TIMEOUT 300)
+set_tests_properties(duwn-unit-tests PROPERTIES
+    TIMEOUT 300
+    LABELS "local-hardware"
+)
+
+add_executable(duwn-portable-tests
+    portable/streaming_policy_main.cpp
+)
+target_include_directories(duwn-portable-tests
+    PRIVATE "${CMAKE_SOURCE_DIR}/src"
+)
+target_compile_features(duwn-portable-tests PRIVATE cxx_std_20)
+add_test(NAME duwn-portable-tests COMMAND duwn-portable-tests)
+set_tests_properties(duwn-portable-tests PROPERTIES LABELS "headless")
+
 add_executable(duwn-capture-consumer
     capture_consumer_harness.cpp
 )
@@ -82,6 +96,7 @@ target_link_libraries(duwn-capture-persistence-test
 )
 target_compile_features(duwn-capture-persistence-test PRIVATE cxx_std_20)
 add_test(NAME duwn-capture-persistence-test COMMAND duwn-capture-persistence-test)
+set_tests_properties(duwn-capture-persistence-test PROPERTIES LABELS "local-hardware")
 
 
 
