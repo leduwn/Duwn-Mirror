@@ -29,7 +29,20 @@ enum class IconType {
     CheckCircle,
     Power,
     Refresh,
-    Palette
+    Palette,
+    // Expanded Phase 5 icons
+    ChevronDown,
+    ChevronRight,
+    ChevronUp,
+    Check,
+    Close,
+    Sliders,
+    Info,
+    VolumeHigh,
+    VolumeMute,
+    DisplayAspect,
+    Sun,
+    Moon
 };
 
 class UiRenderer {
@@ -64,8 +77,13 @@ public:
     float HeightDip() const noexcept;
     void GetDpi(float* out_dpi_x, float* out_dpi_y) const noexcept;
 
+    // Theme & Dynamic Palette Management
+    const ColorPalette& Palette() const noexcept { return m_palette; }
+    void ApplyPalette(const ColorPalette& pal) noexcept;
+
     // Drawing Primitives
-    void Clear(const D2D1_COLOR_F& color = colors::Background) noexcept;
+    void Clear(const D2D1_COLOR_F& color) noexcept;
+    void Clear() noexcept { Clear(m_palette.bg_base); }
 
     void FillRoundedRect(const D2D1_RECT_F& rect, float radius, ID2D1Brush* brush) noexcept;
     void DrawRoundedRect(const D2D1_RECT_F& rect, float radius, ID2D1Brush* brush, float stroke = 1.0f) noexcept;
@@ -111,17 +129,33 @@ public:
     IDWriteTextFormat* FontLargeDigit() const noexcept { return m_fmt_large_digit.Get(); }
 
     // Brush Accessors
+    ID2D1SolidColorBrush* BrushBg() const noexcept { return m_brush_bg.Get(); }
+    ID2D1SolidColorBrush* BrushCardSurface() const noexcept { return m_brush_card_surface.Get(); }
+    ID2D1SolidColorBrush* BrushCardHover() const noexcept { return m_brush_card_hover.Get(); }
+    ID2D1SolidColorBrush* BrushCardBorder() const noexcept { return m_brush_card_border.Get(); }
+    ID2D1SolidColorBrush* BrushCardBorderHover() const noexcept { return m_brush_card_border_hover.Get(); }
+    ID2D1SolidColorBrush* BrushBorderFocus() const noexcept { return m_brush_border_focus.Get(); }
+    ID2D1SolidColorBrush* BrushInnerSurface() const noexcept { return m_brush_inner_surface.Get(); }
+
+    ID2D1SolidColorBrush* BrushSidebarBg() const noexcept { return m_brush_sidebar_bg.Get(); }
+    ID2D1SolidColorBrush* BrushNavActiveBg() const noexcept { return m_brush_nav_active_bg.Get(); }
+    ID2D1SolidColorBrush* BrushNavActiveBar() const noexcept { return m_brush_nav_active_bar.Get(); }
+    ID2D1SolidColorBrush* BrushNavHoverBg() const noexcept { return m_brush_nav_hover_bg.Get(); }
+
     ID2D1SolidColorBrush* BrushTextPrimary() const noexcept { return m_brush_text_primary.Get(); }
     ID2D1SolidColorBrush* BrushTextSecondary() const noexcept { return m_brush_text_secondary.Get(); }
     ID2D1SolidColorBrush* BrushTextMuted() const noexcept { return m_brush_text_muted.Get(); }
     ID2D1SolidColorBrush* BrushTextAccent() const noexcept { return m_brush_text_accent.Get(); }
+
     ID2D1SolidColorBrush* BrushBrandBlue() const noexcept { return m_brush_brand_blue.Get(); }
     ID2D1SolidColorBrush* BrushBrandPurple() const noexcept { return m_brush_brand_purple.Get(); }
     ID2D1SolidColorBrush* BrushBrandCyan() const noexcept { return m_brush_brand_cyan.Get(); }
+
     ID2D1SolidColorBrush* BrushStatusGreen() const noexcept { return m_brush_status_green.Get(); }
     ID2D1SolidColorBrush* BrushStatusAmber() const noexcept { return m_brush_status_amber.Get(); }
     ID2D1SolidColorBrush* BrushStatusRed() const noexcept { return m_brush_status_red.Get(); }
-    ID2D1SolidColorBrush* BrushCardBorder() const noexcept { return m_brush_card_border.Get(); }
+    ID2D1SolidColorBrush* BrushStatusBlue() const noexcept { return m_brush_status_blue.Get(); }
+
     ID2D1LinearGradientBrush* BrushPrimaryGradient() const noexcept { return m_brush_gradient_primary.Get(); }
 
 private:
@@ -132,6 +166,7 @@ private:
     HWND m_hwnd{nullptr};
     uint32_t m_width{1280};
     uint32_t m_height{720};
+    ColorPalette m_palette{kDarkPalette};
 
     // Factories
     Microsoft::WRL::ComPtr<ID2D1Factory>            m_factory;
@@ -152,22 +187,32 @@ private:
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_card_hover;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_card_border;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_card_border_hover;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_border_focus;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_inner_surface;
+
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_sidebar_bg;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_nav_active_bg;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_nav_active_bar;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_nav_hover_bg;
+
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_text_primary;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_text_secondary;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_text_muted;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_text_accent;
+
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_brand_blue;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_brand_purple;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_brand_cyan;
+
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_status_green;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_status_amber;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_status_red;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_status_blue;
+
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush>    m_brush_dynamic_brush; // reusable for arbitrary colors
 
     // Gradients
     Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> m_brush_gradient_primary;
-    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> m_brush_gradient_card;
 
     // DirectWrite Formats
     Microsoft::WRL::ComPtr<IDWriteTextFormat>       m_fmt_title;

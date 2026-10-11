@@ -562,6 +562,15 @@ static constexpr const wchar_t* kEn[static_cast<size_t>(S::_COUNT)] = {
     /* Audio_Receiving              */ L"Receiving",
     /* Audio_Waiting                */ L"Waiting",
     /* Audio_FormatDynamic          */ L"Source: {:.1f} kHz, {} ch  →  Output: {:.1f} kHz, {} ch",
+
+    /* Settings_VideoDisplay        */ L"Video & Display",
+    /* Settings_Color               */ L"Color",
+    /* Settings_Appearance          */ L"Appearance",
+    /* Appearance_ThemeMode         */ L"Theme",
+    /* Appearance_ThemeDark         */ L"Dark",
+    /* Appearance_ThemeLight        */ L"Light",
+    /* Appearance_ThemeSystem       */ L"System",
+    /* Appearance_Animations        */ L"UI Animations",
 };
 
 // ---------------------------------------------------------------------------
@@ -1122,6 +1131,15 @@ static constexpr const wchar_t* kVi[static_cast<size_t>(S::_COUNT)] = {
     /* Audio_Receiving              */ L"Đang nhận",
     /* Audio_Waiting                */ L"Đang chờ",
     /* Audio_FormatDynamic          */ L"Nguồn: {:.1f} kHz, {} kênh  →  Đầu ra: {:.1f} kHz, {} kênh",
+
+    /* Settings_VideoDisplay        */ L"Video & Hiển thị",
+    /* Settings_Color               */ L"Màu sắc",
+    /* Settings_Appearance          */ L"Giao diện",
+    /* Appearance_ThemeMode         */ L"Chủ đề",
+    /* Appearance_ThemeDark         */ L"Tối",
+    /* Appearance_ThemeLight        */ L"Sáng",
+    /* Appearance_ThemeSystem       */ L"Hệ thống",
+    /* Appearance_Animations        */ L"Hiệu ứng chuyển động",
 };
 
 static_assert(static_cast<size_t>(S::_COUNT) == std::size(kEn),

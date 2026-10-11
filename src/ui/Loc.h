@@ -633,6 +633,16 @@ enum class S {
     Audio_Waiting,
     Audio_FormatDynamic,
 
+    // Phase 5 Settings Subtabs
+    Settings_VideoDisplay,
+    Settings_Color,
+    Settings_Appearance,
+    Appearance_ThemeMode,
+    Appearance_ThemeDark,
+    Appearance_ThemeLight,
+    Appearance_ThemeSystem,
+    Appearance_Animations,
+
     _COUNT
 };
 

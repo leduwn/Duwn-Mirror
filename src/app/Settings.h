@@ -6,6 +6,7 @@
 #include <string_view>
 #include <cstdint>
 #include "common/streaming/StreamingPolicy.h"
+#include "ui/Theme.h"
 
 namespace duwn::app {
 
@@ -231,6 +232,12 @@ struct Settings {
     bool show_preview_on_connect{true};
     bool hide_preview_on_disconnect{false};
     bool preview_always_on_top{false};
+
+    // Appearance & Design System
+    ui::ThemeMode theme_mode{ui::ThemeMode::System};
+    uint32_t      accent_color{0x3B82F6}; // Brand Blue
+    float         ui_scale{1.0f};
+    bool          animations_enabled{true};
 
     // Advanced
     bool debug_log{false};

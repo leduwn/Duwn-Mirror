@@ -281,6 +281,18 @@ Settings Settings::Load() noexcept {
     s.remember_window_pos   = ParseBool(FindJsonKeyValue(json, "remember_window_pos"),   s.remember_window_pos);
     s.allow_public_networks = ParseBool(FindJsonKeyValue(json, "allow_public_networks"), s.allow_public_networks);
 
+    // Appearance & Design System
+    auto theme_mode_val = FindJsonKeyValue(json, "theme_mode");
+    if (!theme_mode_val.empty()) {
+        s.theme_mode = static_cast<ui::ThemeMode>(std::clamp(ParseInt(theme_mode_val, 2), 0, 2));
+    }
+    s.accent_color = static_cast<uint32_t>(ParseInt(FindJsonKeyValue(json, "accent_color"), static_cast<int>(s.accent_color)));
+    auto ui_scale_val = FindJsonKeyValue(json, "ui_scale");
+    if (!ui_scale_val.empty()) {
+        try { s.ui_scale = std::clamp(std::stof(std::string(ui_scale_val)), 0.75f, 2.5f); } catch (...) {}
+    }
+    s.animations_enabled = ParseBool(FindJsonKeyValue(json, "animations_enabled"), s.animations_enabled);
+
     // Output Window preferences
     s.auto_open_output_window = ParseBool(FindJsonKeyValue(json, "auto_open_output_window"), s.auto_open_output_window);
     s.output_start_fullscreen = ParseBool(FindJsonKeyValue(json, "output_start_fullscreen"), s.output_start_fullscreen);
@@ -525,6 +537,10 @@ void Settings::Save() const noexcept {
             "  \"minimize_to_tray\": {},\n"
             "  \"remember_window_pos\": {},\n"
             "  \"allow_public_networks\": {},\n"
+            "  \"theme_mode\": {},\n"
+            "  \"accent_color\": {},\n"
+            "  \"ui_scale\": {:.2f},\n"
+            "  \"animations_enabled\": {},\n"
             "  \"auto_open_output_window\": {},\n"
             "  \"output_start_fullscreen\": {},\n"
             "  \"preferred_monitor\": {},\n"
@@ -589,6 +605,10 @@ void Settings::Save() const noexcept {
             minimize_to_tray        ? "true" : "false",
             remember_window_pos     ? "true" : "false",
             allow_public_networks   ? "true" : "false",
+            static_cast<uint32_t>(theme_mode),
+            accent_color,
+            ui_scale,
+            animations_enabled      ? "true" : "false",
             auto_open_output_window ? "true" : "false",
             output_start_fullscreen ? "true" : "false",
             preferred_monitor,

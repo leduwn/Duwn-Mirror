@@ -258,6 +258,11 @@ bool MainWindowView::OnMouseDown(int x, int y, UiState& state) noexcept {
                     state.language = langs[item_index];
                     if (m_on_language_changed) m_on_language_changed(langs[item_index]);
                 }
+            } else if (target_dropdown == Control_Set_ThemeMode) {
+                if (item_index >= 0 && item_index <= 2) {
+                    state.theme_mode = static_cast<ThemeMode>(item_index);
+                    if (m_on_setting_changed) m_on_setting_changed(target_dropdown, item_index);
+                }
             } else if (target_dropdown == Control_Set_AudioDevice) {
                 if (item_index == 0) {
                     state.audio_device_id = L"";
@@ -288,7 +293,7 @@ bool MainWindowView::OnMouseDown(int x, int y, UiState& state) noexcept {
                 hit == Control_Set_Renderer || hit == Control_Set_ColorPreset ||
                 hit == Control_Set_ColorRange || hit == Control_Set_ColorMatrix ||
                 hit == Control_Set_Language || hit == Control_Set_AudioDevice ||
-                hit == Control_Set_PreferredMonitor) {
+                hit == Control_Set_PreferredMonitor || hit == Control_Set_ThemeMode) {
                 if (hit != old_dropdown) state.open_dropdown = hit;
             }
             return true;
@@ -481,26 +486,35 @@ bool MainWindowView::OnMouseUp(int x, int y, UiState& state) noexcept {
             if (m_on_setting_changed) m_on_setting_changed(hit, 0);
             break;
 
-        // Settings sub-tab navigation
-        case Control_SubTab_General:
-            state.active_settings_sub_tab = SettingsSubTab::General;
+        // Settings sub-tab navigation (5 canonical groups)
+        case Control_SubTab_VideoDisplay:
+            state.active_settings_sub_tab = SettingsSubTab::VideoDisplay;
             m_scroll_y_settings = 0.0f;
             break;
-        case Control_SubTab_Output:
-            state.active_settings_sub_tab = SettingsSubTab::Output;
+        case Control_SubTab_Audio:
+            state.active_settings_sub_tab = SettingsSubTab::Audio;
             m_scroll_y_settings = 0.0f;
             break;
-        case Control_SubTab_Network:
-            state.active_settings_sub_tab = SettingsSubTab::Network;
+        case Control_SubTab_Color:
+            state.active_settings_sub_tab = SettingsSubTab::Color;
             m_scroll_y_settings = 0.0f;
             break;
-        case Control_SubTab_Privacy:
-            state.active_settings_sub_tab = SettingsSubTab::Privacy;
+        case Control_SubTab_Appearance:
+            state.active_settings_sub_tab = SettingsSubTab::Appearance;
             m_scroll_y_settings = 0.0f;
             break;
         case Control_SubTab_Advanced:
             state.active_settings_sub_tab = SettingsSubTab::Advanced;
             m_scroll_y_settings = 0.0f;
+            break;
+
+        // Appearance settings
+        case Control_Set_ThemeMode:
+            state.open_dropdown = (state.open_dropdown == hit) ? 0 : hit;
+            break;
+        case Control_Toggle_Animations:
+            state.animations_enabled = !state.animations_enabled;
+            if (m_on_setting_changed) m_on_setting_changed(hit, state.animations_enabled ? 1 : 0);
             break;
 
         // General page
@@ -665,6 +679,62 @@ bool MainWindowView::OnMouseWheel(int /*x*/, int /*y*/, int delta, UiState& stat
 }
 
 bool MainWindowView::OnKeyDown(WPARAM vk, UiState& state) noexcept {
+    if (vk == VK_ESCAPE) {
+        if (state.open_dropdown != 0) {
+            state.open_dropdown = 0;
+            return true;
+        }
+        if (state.active_tab != NavTab::Mirror) {
+            state.active_tab = NavTab::Mirror;
+            if (m_on_tab_changed) m_on_tab_changed(NavTab::Mirror);
+            return true;
+        }
+    }
+
+    if (vk == VK_TAB) {
+        if (!m_clickables.empty()) {
+            std::vector<int> focusable_ids;
+            for (const auto& c : m_clickables) {
+                if (c.control_id > 0 && c.control_id < Control_Dropdown_Item_Base) {
+                    if (std::find(focusable_ids.begin(), focusable_ids.end(), c.control_id) == focusable_ids.end()) {
+                        focusable_ids.push_back(c.control_id);
+                    }
+                }
+            }
+            if (!focusable_ids.empty()) {
+                bool shift_down = (::GetKeyState(VK_SHIFT) < 0);
+                auto it = std::find(focusable_ids.begin(), focusable_ids.end(), state.keyboard_focused_control);
+                int idx = (it != focusable_ids.end()) ? static_cast<int>(std::distance(focusable_ids.begin(), it)) : -1;
+                if (shift_down) {
+                    idx = (idx <= 0) ? static_cast<int>(focusable_ids.size()) - 1 : idx - 1;
+                } else {
+                    idx = (idx < 0 || idx >= static_cast<int>(focusable_ids.size()) - 1) ? 0 : idx + 1;
+                }
+                state.keyboard_focused_control = focusable_ids[idx];
+                return true;
+            }
+        }
+    }
+
+    if (vk == VK_RETURN || vk == VK_SPACE) {
+        if (state.keyboard_focused_control != 0) {
+            for (const auto& c : m_clickables) {
+                if (c.control_id == state.keyboard_focused_control) {
+                    float cur_scroll = GetCurrentScrollY(state.active_tab);
+                    float cx = (c.rect.left + c.rect.right) * 0.5f;
+                    float cy = (c.rect.top + c.rect.bottom) * 0.5f;
+                    if (c.scrollable) cy += cur_scroll;
+                    const float sx = m_dpi_x / 96.0f;
+                    const float sy = m_dpi_y / 96.0f;
+                    int px = static_cast<int>(std::round(cx * (sx > 0.0f ? sx : 1.0f)));
+                    int py = static_cast<int>(std::round(cy * (sy > 0.0f ? sy : 1.0f)));
+                    OnMouseDown(px, py, state);
+                    return true;
+                }
+            }
+        }
+    }
+
     // Check for Wired Device Control shortcuts (Ctrl+H, Ctrl+L, Ctrl+[, Ctrl+], Ctrl+S)
     if (state.connection_mode == 1 &&
         (state.control_state == wired::WiredControlState::Ready ||
@@ -894,6 +964,27 @@ void MainWindowView::Render(const UiState& state) noexcept {
     // 5. Floating Dropdown Overlay (rendered on top of all views)
     if (state.open_dropdown != 0) {
         RenderDropdownOverlay(state);
+    }
+
+    // 6. Focus Ring for Accessibility
+    if (state.keyboard_focused_control != 0 && state.open_dropdown == 0) {
+        for (const auto& c : m_clickables) {
+            if (c.control_id == state.keyboard_focused_control) {
+                D2D1_RECT_F focus_rc = c.rect;
+                if (c.scrollable) {
+                    focus_rc.top -= cur_scroll;
+                    focus_rc.bottom -= cur_scroll;
+                }
+                if (focus_rc.bottom >= m_viewport_top && focus_rc.top <= m_viewport_bottom) {
+                    focus_rc.left -= 2.0f;
+                    focus_rc.top -= 2.0f;
+                    focus_rc.right += 2.0f;
+                    focus_rc.bottom += 2.0f;
+                    m_renderer.DrawRoundedRect(focus_rc, 4.0f, m_renderer.BrushBrandBlue(), 2.0f);
+                }
+                break;
+            }
+        }
     }
 
     m_renderer.EndDraw();
@@ -2566,11 +2657,11 @@ void MainWindowView::RenderSettingsView(const UiState& state, const D2D1_RECT_F&
     const D2D1_RECT_F sub_area = D2D1::RectF(area.left, content_top, area.right, area.bottom);
 
     switch (state.active_settings_sub_tab) {
-    case SettingsSubTab::General:  RenderGeneralPage(state, sub_area);  break;
-    case SettingsSubTab::Output:   RenderOutputPage(state, sub_area);   break;
-    case SettingsSubTab::Network:  RenderNetworkPage(state, sub_area);  break;
-    case SettingsSubTab::Privacy:  RenderPrivacyPage(state, sub_area);  break;
-    case SettingsSubTab::Advanced: RenderAdvancedPage(state, sub_area); break;
+    case SettingsSubTab::VideoDisplay: RenderVideoView(state, sub_area);    break;
+    case SettingsSubTab::Audio:        RenderAudioPage(state, sub_area);    break;
+    case SettingsSubTab::Color:        RenderColorView(state, sub_area);    break;
+    case SettingsSubTab::Appearance:   RenderGeneralPage(state, sub_area);  break;
+    case SettingsSubTab::Advanced:     RenderAdvancedPage(state, sub_area); break;
     }
     m_content_height += content_top - area.top;
 }
@@ -2581,22 +2672,20 @@ void MainWindowView::RenderSettingsSubNav(const UiState& state, const D2D1_RECT_
     const float strip_top = area.top + 4.0f;
     const float strip_bottom = strip_top + strip_h;
 
-    // Sub-tab labels
-    struct SubTabInfo { SettingsSubTab tab; loc::S loc_id; int ctrl; };
+    // Sub-tab labels (5 canonical groups)
+    struct SubTabInfo { SettingsSubTab tab; loc::S loc_id; int ctrl; float width; };
     static const SubTabInfo kTabs[] = {
-        { SettingsSubTab::General,  loc::S::Settings_General,      Control_SubTab_General  },
-        { SettingsSubTab::Output,   loc::S::Settings_Output,       Control_SubTab_Output   },
-        { SettingsSubTab::Network,  loc::S::Settings_Network,      Control_SubTab_Network  },
-        { SettingsSubTab::Privacy,  loc::S::Settings_Privacy,      Control_SubTab_Privacy  },
-        { SettingsSubTab::Advanced, loc::S::Settings_Advanced,     Control_SubTab_Advanced },
+        { SettingsSubTab::VideoDisplay, loc::S::Settings_VideoDisplay, Control_SubTab_VideoDisplay, 125.0f },
+        { SettingsSubTab::Audio,        loc::S::Settings_Audio,        Control_SubTab_Audio,         85.0f },
+        { SettingsSubTab::Color,        loc::S::Settings_Color,        Control_SubTab_Color,         85.0f },
+        { SettingsSubTab::Appearance,   loc::S::Settings_Appearance,   Control_SubTab_Appearance,   105.0f },
+        { SettingsSubTab::Advanced,     loc::S::Settings_Advanced,     Control_SubTab_Advanced,      95.0f },
     };
 
     float x = area.left + pad;
     for (const auto& t : kTabs) {
         const wchar_t* label = loc::Get(t.loc_id);
-        // Measure text width for tab sizing
-        float tab_w = 90.0f;
-        if (t.tab == SettingsSubTab::Privacy) tab_w = 120.0f;
+        float tab_w = t.width;
 
         const D2D1_RECT_F tab_rc = D2D1::RectF(x, strip_top, x + tab_w, strip_bottom);
         const bool is_active = (state.active_settings_sub_tab == t.tab);
@@ -3288,6 +3377,14 @@ void MainWindowView::RenderDropdownOverlay(const UiState& state) noexcept {
         };
         selected_idx = (state.language == L"en-US") ? 1 : ((state.language == L"vi-VN") ? 2 : 0);
         break;
+    case Control_Set_ThemeMode:
+        items = {
+            { loc::Get(loc::S::Appearance_ThemeDark),   L"" },
+            { loc::Get(loc::S::Appearance_ThemeLight),  L"" },
+            { loc::Get(loc::S::Appearance_ThemeSystem), L"" }
+        };
+        selected_idx = std::clamp(static_cast<int>(state.theme_mode), 0, 2);
+        break;
     case Control_Set_AudioDevice:
         items.push_back({ loc::Get(loc::S::Opt_Audio_SystemDefault), loc::Get(loc::S::Opt_Audio_SystemDefault_Desc) });
         selected_idx = 0;
@@ -3601,9 +3698,52 @@ void MainWindowView::RenderGeneralPage(const UiState& state, const D2D1_RECT_F& 
 
     // Title
     D2D1_RECT_F title_rc = D2D1::RectF(content_left, y, content_right, y + 26.0f);
-    m_renderer.DrawTextSimple(loc::Get(loc::S::Settings_General), m_renderer.FontTitle(), title_rc,
+    m_renderer.DrawTextSimple(loc::Get(loc::S::Settings_Appearance), m_renderer.FontTitle(), title_rc,
         m_renderer.BrushTextPrimary(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     y += 38.0f;
+
+    // Section: Theme Mode
+    {
+        D2D1_RECT_F lbl_rc = D2D1::RectF(content_left, y, content_left + 180.0f, y + 24.0f);
+        m_renderer.DrawTextSimple(loc::Get(loc::S::Appearance_ThemeMode), m_renderer.FontBody(), lbl_rc,
+            m_renderer.BrushTextPrimary(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+        const wchar_t* theme_label =
+            (state.theme_mode == ThemeMode::Dark) ? loc::Get(loc::S::Appearance_ThemeDark) :
+            (state.theme_mode == ThemeMode::Light) ? loc::Get(loc::S::Appearance_ThemeLight) : loc::Get(loc::S::Appearance_ThemeSystem);
+
+        D2D1_RECT_F dd_rc = D2D1::RectF(content_left + 190.0f, y, content_left + 340.0f, y + 24.0f);
+        const bool hov = (state.hovered_control == Control_Set_ThemeMode);
+        m_renderer.DrawInset(dd_rc, 4.0f);
+        if (state.open_dropdown == Control_Set_ThemeMode) {
+            m_dropdown_anchor_rc = dd_rc;
+            m_renderer.DrawRoundedRect(dd_rc, 4.0f, m_renderer.BrushBrandBlue(), 1.2f);
+        } else if (hov) {
+            m_renderer.DrawRoundedRect(dd_rc, 4.0f, m_renderer.BrushCardBorder(), 1.0f);
+        }
+        D2D1_RECT_F dd_txt = D2D1::RectF(dd_rc.left + 8.0f, dd_rc.top, dd_rc.right - 20.0f, dd_rc.bottom);
+        m_renderer.DrawTextSimple(theme_label, m_renderer.FontBody(), dd_txt,
+            m_renderer.BrushTextPrimary(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        m_renderer.DrawTextSimple(L"▾", m_renderer.FontBody(),
+            D2D1::RectF(dd_rc.right - 18.0f, dd_rc.top, dd_rc.right - 2.0f, dd_rc.bottom),
+            m_renderer.BrushTextSecondary(), DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        RegisterClickable(dd_rc, Control_Set_ThemeMode, loc::Get(loc::S::Appearance_ThemeMode), true);
+        y += 32.0f;
+    }
+
+    // Section: UI Animations toggle
+    {
+        D2D1_RECT_F row = D2D1::RectF(content_left, y, content_right, y + 24.0f);
+        m_renderer.DrawTextSimple(loc::Get(loc::S::Appearance_Animations), m_renderer.FontBody(), row,
+            m_renderer.BrushTextPrimary(), DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        D2D1_RECT_F pill = D2D1::RectF(content_right - 42.0f, y + 4.0f, content_right - 2.0f, y + 20.0f);
+        m_renderer.FillRoundedRect(pill, 8.0f, state.animations_enabled ? m_renderer.BrushBrandBlue() : m_renderer.BrushCardBorder());
+        float thumb_x = state.animations_enabled ? (pill.right - 14.0f) : (pill.left + 2.0f);
+        D2D1_RECT_F thumb = D2D1::RectF(thumb_x, pill.top + 2.0f, thumb_x + 12.0f, pill.bottom - 2.0f);
+        m_renderer.FillRoundedRect(thumb, 5.0f, m_renderer.BrushTextPrimary());
+        RegisterClickable(row, Control_Toggle_Animations, loc::Get(loc::S::Appearance_Animations), true);
+        y += 32.0f;
+    }
 
     // Section: Language
     {

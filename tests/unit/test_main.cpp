@@ -94,6 +94,9 @@ void AssertTrue(bool cond, const char* expr, const char* file, int line);
 #include "test_video_pipeline_recovery.cpp"
 #include "test_workspace_and_capture.cpp"
 #include "test_video_color_space.cpp"
+#include "test_theme.cpp"
+#include "test_layout_and_dpi.cpp"
+#include "test_ui_navigation.cpp"
 
 
 #include <objbase.h>

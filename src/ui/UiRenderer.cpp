@@ -77,8 +77,21 @@ bool UiRenderer::Init(HWND hwnd) noexcept {
     create_format(12.5f, DWRITE_FONT_WEIGHT_NORMAL,    DWRITE_FONT_STYLE_NORMAL, m_fmt_body);
     create_format(11.0f, DWRITE_FONT_WEIGHT_NORMAL,    DWRITE_FONT_STYLE_NORMAL, m_fmt_small);
     create_format(11.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, m_fmt_small_bold);
-    create_format(11.5f, DWRITE_FONT_WEIGHT_MEDIUM,    DWRITE_FONT_STYLE_NORMAL, m_fmt_mono);
     create_format(26.0f, DWRITE_FONT_WEIGHT_BOLD,      DWRITE_FONT_STYLE_NORMAL, m_fmt_large_digit);
+
+    // Monospace tabular figures font (Cascadia Mono / Consolas)
+    const wchar_t* kMonoFamily = L"Cascadia Mono";
+    const wchar_t* kMonoFallback = L"Consolas";
+    HRESULT hr_mono = m_dwrite_factory->CreateTextFormat(
+        kMonoFamily, nullptr, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL, 11.5f, L"en-us", m_fmt_mono.GetAddressOf()
+    );
+    if (FAILED(hr_mono)) {
+        m_dwrite_factory->CreateTextFormat(
+            kMonoFallback, nullptr, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL, 11.5f, L"en-us", m_fmt_mono.GetAddressOf()
+        );
+    }
 
     return CreateDeviceResources();
 }
@@ -121,30 +134,41 @@ bool UiRenderer::CreateDeviceResources() noexcept {
     m_target->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     m_target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
 
-    // Create Solid Brushes
-    m_target->CreateSolidColorBrush(colors::Background, m_brush_bg.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::CardSurface, m_brush_card_surface.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::CardSurfaceHover, m_brush_card_hover.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::CardBorder, m_brush_card_border.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::CardBorderHover, m_brush_card_border_hover.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::InnerSurface, m_brush_inner_surface.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::TextPrimary, m_brush_text_primary.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::TextSecondary, m_brush_text_secondary.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::TextMuted, m_brush_text_muted.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::TextAccent, m_brush_text_accent.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::BrandBlue, m_brush_brand_blue.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::BrandPurple, m_brush_brand_purple.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::BrandCyan, m_brush_brand_cyan.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::StatusGreen, m_brush_status_green.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::StatusAmber, m_brush_status_amber.GetAddressOf());
-    m_target->CreateSolidColorBrush(colors::StatusRed, m_brush_status_red.GetAddressOf());
+    // Create Solid Brushes from current palette
+    m_target->CreateSolidColorBrush(m_palette.bg_base, m_brush_bg.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.bg_surface, m_brush_card_surface.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.bg_surface_hover, m_brush_card_hover.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.bg_border, m_brush_card_border.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.bg_border_hover, m_brush_card_border_hover.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.bg_border_focus, m_brush_border_focus.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.bg_inner, m_brush_inner_surface.GetAddressOf());
+
+    m_target->CreateSolidColorBrush(m_palette.sidebar_bg, m_brush_sidebar_bg.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.nav_active_bg, m_brush_nav_active_bg.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.nav_active_bar, m_brush_nav_active_bar.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.nav_hover_bg, m_brush_nav_hover_bg.GetAddressOf());
+
+    m_target->CreateSolidColorBrush(m_palette.text_primary, m_brush_text_primary.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.text_secondary, m_brush_text_secondary.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.text_muted, m_brush_text_muted.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.text_accent, m_brush_text_accent.GetAddressOf());
+
+    m_target->CreateSolidColorBrush(m_palette.brand_blue, m_brush_brand_blue.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.brand_purple, m_brush_brand_purple.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.brand_cyan, m_brush_brand_cyan.GetAddressOf());
+
+    m_target->CreateSolidColorBrush(m_palette.status_green, m_brush_status_green.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.status_amber, m_brush_status_amber.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.status_red, m_brush_status_red.GetAddressOf());
+    m_target->CreateSolidColorBrush(m_palette.status_blue, m_brush_status_blue.GetAddressOf());
+
     m_target->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), m_brush_dynamic_brush.GetAddressOf());
 
     // Primary Gradient Brush (Brand Blue -> Brand Purple)
     D2D1_GRADIENT_STOP stops[2];
-    stops[0].color    = colors::BrandBlue;
+    stops[0].color    = m_palette.brand_blue;
     stops[0].position = 0.0f;
-    stops[1].color    = colors::BrandPurple;
+    stops[1].color    = m_palette.brand_purple;
     stops[1].position = 1.0f;
 
     Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stop_col;
@@ -171,13 +195,17 @@ void UiRenderer::DiscardDeviceResources() noexcept {
     m_logo_64.Reset();
     m_logo_32.Reset();
     m_brush_gradient_primary.Reset();
-    m_brush_gradient_card.Reset();
     m_brush_bg.Reset();
     m_brush_card_surface.Reset();
     m_brush_card_hover.Reset();
     m_brush_card_border.Reset();
     m_brush_card_border_hover.Reset();
+    m_brush_border_focus.Reset();
     m_brush_inner_surface.Reset();
+    m_brush_sidebar_bg.Reset();
+    m_brush_nav_active_bg.Reset();
+    m_brush_nav_active_bar.Reset();
+    m_brush_nav_hover_bg.Reset();
     m_brush_text_primary.Reset();
     m_brush_text_secondary.Reset();
     m_brush_text_muted.Reset();
@@ -188,6 +216,7 @@ void UiRenderer::DiscardDeviceResources() noexcept {
     m_brush_status_green.Reset();
     m_brush_status_amber.Reset();
     m_brush_status_red.Reset();
+    m_brush_status_blue.Reset();
     m_brush_dynamic_brush.Reset();
     m_target.Reset();
 }
@@ -328,6 +357,56 @@ void UiRenderer::GetDpi(float* out_dpi_x, float* out_dpi_y) const noexcept {
     } else {
         if (out_dpi_x) *out_dpi_x = 96.0f;
         if (out_dpi_y) *out_dpi_y = 96.0f;
+    }
+}
+
+void UiRenderer::ApplyPalette(const ColorPalette& pal) noexcept {
+    m_palette = pal;
+    if (!m_target) return;
+
+    if (m_brush_bg) m_brush_bg->SetColor(m_palette.bg_base);
+    if (m_brush_card_surface) m_brush_card_surface->SetColor(m_palette.bg_surface);
+    if (m_brush_card_hover) m_brush_card_hover->SetColor(m_palette.bg_surface_hover);
+    if (m_brush_card_border) m_brush_card_border->SetColor(m_palette.bg_border);
+    if (m_brush_card_border_hover) m_brush_card_border_hover->SetColor(m_palette.bg_border_hover);
+    if (m_brush_border_focus) m_brush_border_focus->SetColor(m_palette.bg_border_focus);
+    if (m_brush_inner_surface) m_brush_inner_surface->SetColor(m_palette.bg_inner);
+
+    if (m_brush_sidebar_bg) m_brush_sidebar_bg->SetColor(m_palette.sidebar_bg);
+    if (m_brush_nav_active_bg) m_brush_nav_active_bg->SetColor(m_palette.nav_active_bg);
+    if (m_brush_nav_active_bar) m_brush_nav_active_bar->SetColor(m_palette.nav_active_bar);
+    if (m_brush_nav_hover_bg) m_brush_nav_hover_bg->SetColor(m_palette.nav_hover_bg);
+
+    if (m_brush_text_primary) m_brush_text_primary->SetColor(m_palette.text_primary);
+    if (m_brush_text_secondary) m_brush_text_secondary->SetColor(m_palette.text_secondary);
+    if (m_brush_text_muted) m_brush_text_muted->SetColor(m_palette.text_muted);
+    if (m_brush_text_accent) m_brush_text_accent->SetColor(m_palette.text_accent);
+
+    if (m_brush_brand_blue) m_brush_brand_blue->SetColor(m_palette.brand_blue);
+    if (m_brush_brand_purple) m_brush_brand_purple->SetColor(m_palette.brand_purple);
+    if (m_brush_brand_cyan) m_brush_brand_cyan->SetColor(m_palette.brand_cyan);
+
+    if (m_brush_status_green) m_brush_status_green->SetColor(m_palette.status_green);
+    if (m_brush_status_amber) m_brush_status_amber->SetColor(m_palette.status_amber);
+    if (m_brush_status_red) m_brush_status_red->SetColor(m_palette.status_red);
+    if (m_brush_status_blue) m_brush_status_blue->SetColor(m_palette.status_blue);
+
+    // Update primary gradient stops
+    D2D1_GRADIENT_STOP stops[2];
+    stops[0].color    = m_palette.brand_blue;
+    stops[0].position = 0.0f;
+    stops[1].color    = m_palette.brand_purple;
+    stops[1].position = 1.0f;
+
+    Microsoft::WRL::ComPtr<ID2D1GradientStopCollection> stop_col;
+    if (SUCCEEDED(m_target->CreateGradientStopCollection(stops, 2, stop_col.GetAddressOf()))) {
+        D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES grad_props = D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(200.0f, 40.0f)
+        );
+        m_brush_gradient_primary.Reset();
+        m_target->CreateLinearGradientBrush(
+            grad_props, stop_col.Get(), m_brush_gradient_primary.GetAddressOf()
+        );
     }
 }
 
@@ -639,6 +718,104 @@ void UiRenderer::DrawIcon(IconType icon, const D2D1_RECT_F& rect,
         DrawRoundedRect(D2D1::RectF(rect.left + 4.0f, y0 - 2.0f, rect.left + 7.0f, y0 + 2.0f), 1.0f, b, stroke);
         DrawRoundedRect(D2D1::RectF(rect.right - 8.0f, y1 - 2.0f, rect.right - 5.0f, y1 + 2.0f), 1.0f, b, stroke);
         DrawRoundedRect(D2D1::RectF(cx - 1.5f, y2 - 2.0f, cx + 1.5f, y2 + 2.0f), 1.0f, b, stroke);
+        break;
+    }
+    case IconType::ChevronDown: {
+        DrawLine(D2D1::Point2F(cx - 4.5f, cy - 2.0f), D2D1::Point2F(cx, cy + 2.5f), b, stroke * 1.1f);
+        DrawLine(D2D1::Point2F(cx, cy + 2.5f), D2D1::Point2F(cx + 4.5f, cy - 2.0f), b, stroke * 1.1f);
+        break;
+    }
+    case IconType::ChevronRight: {
+        DrawLine(D2D1::Point2F(cx - 2.0f, cy - 4.5f), D2D1::Point2F(cx + 2.5f, cy), b, stroke * 1.1f);
+        DrawLine(D2D1::Point2F(cx + 2.5f, cy), D2D1::Point2F(cx - 2.0f, cy + 4.5f), b, stroke * 1.1f);
+        break;
+    }
+    case IconType::ChevronUp: {
+        DrawLine(D2D1::Point2F(cx - 4.5f, cy + 2.5f), D2D1::Point2F(cx, cy - 2.0f), b, stroke * 1.1f);
+        DrawLine(D2D1::Point2F(cx, cy - 2.0f), D2D1::Point2F(cx + 4.5f, cy + 2.5f), b, stroke * 1.1f);
+        break;
+    }
+    case IconType::Check: {
+        DrawLine(D2D1::Point2F(cx - 4.5f, cy + 0.5f), D2D1::Point2F(cx - 1.0f, cy + 4.0f), b, stroke * 1.2f);
+        DrawLine(D2D1::Point2F(cx - 1.0f, cy + 4.0f), D2D1::Point2F(cx + 5.0f, cy - 4.0f), b, stroke * 1.2f);
+        break;
+    }
+    case IconType::Close: {
+        DrawLine(D2D1::Point2F(cx - 4.0f, cy - 4.0f), D2D1::Point2F(cx + 4.0f, cy + 4.0f), b, stroke * 1.1f);
+        DrawLine(D2D1::Point2F(cx + 4.0f, cy - 4.0f), D2D1::Point2F(cx - 4.0f, cy + 4.0f), b, stroke * 1.1f);
+        break;
+    }
+    case IconType::Sliders: {
+        float s_y0 = cy - 3.5f;
+        float s_y1 = cy + 3.5f;
+        DrawLine(D2D1::Point2F(rect.left + 2.0f, s_y0), D2D1::Point2F(rect.right - 2.0f, s_y0), b, stroke * 0.9f);
+        DrawLine(D2D1::Point2F(rect.left + 2.0f, s_y1), D2D1::Point2F(rect.right - 2.0f, s_y1), b, stroke * 0.9f);
+        DrawRoundedRect(D2D1::RectF(rect.left + 4.5f, s_y0 - 2.0f, rect.left + 8.5f, s_y0 + 2.0f), 1.0f, b, stroke);
+        DrawRoundedRect(D2D1::RectF(rect.right - 8.5f, s_y1 - 2.0f, rect.right - 4.5f, s_y1 + 2.0f), 1.0f, b, stroke);
+        break;
+    }
+    case IconType::Info: {
+        D2D1_ELLIPSE circ = D2D1::Ellipse(D2D1::Point2F(cx, cy), w * 0.42f, h * 0.42f);
+        m_target->DrawEllipse(circ, b, stroke);
+        m_target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy - 3.0f), 1.0f, 1.0f), b);
+        DrawLine(D2D1::Point2F(cx, cy - 1.0f), D2D1::Point2F(cx, cy + 3.8f), b, stroke * 1.1f);
+        break;
+    }
+    case IconType::VolumeHigh: {
+        D2D1_POINT_2F pts[6] = {
+            { rect.left + 2.0f, cy - 3.0f },
+            { rect.left + 5.0f, cy - 3.0f },
+            { rect.left + 8.5f, cy - 6.0f },
+            { rect.left + 8.5f, cy + 6.0f },
+            { rect.left + 5.0f, cy + 3.0f },
+            { rect.left + 2.0f, cy + 3.0f }
+        };
+        for (int i = 0; i < 5; ++i) DrawLine(pts[i], pts[i + 1], b, stroke);
+        DrawLine(pts[5], pts[0], b, stroke);
+        DrawRoundedRect(D2D1::RectF(cx + 0.5f, cy - 3.0f, cx + 3.5f, cy + 3.0f), 2.0f, b, stroke * 0.9f);
+        DrawRoundedRect(D2D1::RectF(cx + 2.5f, cy - 5.5f, cx + 6.5f, cy + 5.5f), 3.0f, b, stroke * 0.9f);
+        break;
+    }
+    case IconType::VolumeMute: {
+        D2D1_POINT_2F pts[6] = {
+            { rect.left + 2.0f, cy - 3.0f },
+            { rect.left + 5.0f, cy - 3.0f },
+            { rect.left + 8.5f, cy - 6.0f },
+            { rect.left + 8.5f, cy + 6.0f },
+            { rect.left + 5.0f, cy + 3.0f },
+            { rect.left + 2.0f, cy + 3.0f }
+        };
+        for (int i = 0; i < 5; ++i) DrawLine(pts[i], pts[i + 1], b, stroke);
+        DrawLine(pts[5], pts[0], b, stroke);
+        DrawLine(D2D1::Point2F(cx + 2.5f, cy - 2.5f), D2D1::Point2F(cx + 6.5f, cy + 2.5f), b, stroke * 1.1f);
+        DrawLine(D2D1::Point2F(cx + 6.5f, cy - 2.5f), D2D1::Point2F(cx + 2.5f, cy + 2.5f), b, stroke * 1.1f);
+        break;
+    }
+    case IconType::DisplayAspect: {
+        D2D1_RECT_F outer = D2D1::RectF(rect.left + 1.5f, cy - 5.0f, rect.right - 1.5f, cy + 5.0f);
+        DrawRoundedRect(outer, 2.0f, b, stroke);
+        DrawLine(D2D1::Point2F(cx - 2.5f, cy), D2D1::Point2F(cx + 2.5f, cy), b, stroke * 1.2f);
+        break;
+    }
+    case IconType::Sun: {
+        D2D1_ELLIPSE center = D2D1::Ellipse(D2D1::Point2F(cx, cy), 3.2f, 3.2f);
+        m_target->DrawEllipse(center, b, stroke);
+        float r_in = 4.8f;
+        float r_out = 7.0f;
+        for (int i = 0; i < 8; ++i) {
+            float ang = i * (3.14159265f / 4.0f);
+            float c = std::cos(ang);
+            float s = std::sin(ang);
+            DrawLine(D2D1::Point2F(cx + r_in * c, cy + r_in * s),
+                     D2D1::Point2F(cx + r_out * c, cy + r_out * s), b, stroke * 0.9f);
+        }
+        break;
+    }
+    case IconType::Moon: {
+        D2D1_ELLIPSE m1 = D2D1::Ellipse(D2D1::Point2F(cx - 1.0f, cy), 5.5f, 5.5f);
+        m_target->DrawEllipse(m1, b, stroke);
+        D2D1_ELLIPSE m2 = D2D1::Ellipse(D2D1::Point2F(cx + 1.8f, cy - 1.8f), 4.2f, 4.2f);
+        m_target->DrawEllipse(m2, b, stroke * 0.8f);
         break;
     }
     }

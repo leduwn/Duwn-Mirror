@@ -2,6 +2,7 @@
 // UiState.h — Reactive state and telemetry model for DUWN Mirror UI.
 // All metrics strictly bound to core pipeline; zero hardcoded/mocked values.
 
+#include "Theme.h"
 #include "airplay/AirPlaySessionState.h"
 #include "wired/WiredDeviceManager.h"
 #include "wired/WiredControlClient.h"
@@ -24,11 +25,17 @@ enum class NavTab {
 };
 
 enum class SettingsSubTab {
-    General,
-    Output,
-    Network,
-    Privacy,
-    Advanced
+    VideoDisplay = 0,
+    Audio = 1,
+    Color = 2,
+    Appearance = 3,
+    Advanced = 4,
+
+    // Legacy aliases
+    General = Appearance,
+    Output = VideoDisplay,
+    Network = Advanced,
+    Privacy = Advanced
 };
 
 enum class ConnectionStatus {
@@ -154,12 +161,19 @@ enum class AudioOutputUiStatus {
 struct UiState {
     // Navigation
     NavTab active_tab{NavTab::Mirror};
-    SettingsSubTab active_settings_sub_tab{SettingsSubTab::General};
+    SettingsSubTab active_settings_sub_tab{SettingsSubTab::VideoDisplay};
     int connection_mode{0}; // 0 wireless AirPlay, 1 wired USB
     bool remember_selected_mode{true};
     int default_connection_mode{0};
     wired::WiredSnapshot wired{};
     bool wired_needs_mirroring_reconnect{false};
+
+    // Appearance & Design System
+    ThemeMode theme_mode{ThemeMode::System};
+    uint32_t accent_color{0x3B82F6};
+    float ui_scale{1.0f};
+    bool animations_enabled{true};
+    int keyboard_focused_control{0}; // ControlId with active accessibility focus ring
 
     // Wired USB Device Control (CoreDevice HID)
     wired::WiredControlState control_state{wired::WiredControlState::Disabled};
@@ -412,13 +426,18 @@ enum ControlId : int {
     Control_Set_VideoFreshness,
     Control_Set_VideoQueueFrames,
 
-    // Settings sub-tabs
-    Control_SubTab_General = 200,
-    Control_SubTab_Output,
-    Control_SubTab_Network,
-    Control_SubTab_Privacy,
-    Control_SubTab_Advanced,
-    Control_SubTab_Audio,
+    // Settings sub-tabs (5 canonical groups)
+    Control_SubTab_VideoDisplay = 200,
+    Control_SubTab_Audio        = 201,
+    Control_SubTab_Color        = 202,
+    Control_SubTab_Appearance   = 203,
+    Control_SubTab_Advanced     = 204,
+
+    // Legacy aliases
+    Control_SubTab_General      = Control_SubTab_Appearance,
+    Control_SubTab_Output       = Control_SubTab_VideoDisplay,
+    Control_SubTab_Network      = Control_SubTab_Advanced,
+    Control_SubTab_Privacy      = Control_SubTab_Advanced,
 
     // General settings (210..229)
     Control_Set_Language = 210,
@@ -456,6 +475,11 @@ enum ControlId : int {
     Control_Btn_CopyDiagnostics = 283,
     Control_Btn_OpenNotices = 284,
     Control_Btn_OpenGitHub = 285,
+
+    // Appearance settings (286..295)
+    Control_Set_ThemeMode = 286,
+    Control_Toggle_Animations = 287,
+    Control_Set_UiScale = 288,
 
     // Dropdown item IDs: base + (dropdown_type * 16) + item_index
     Control_Dropdown_Item_Base = 300

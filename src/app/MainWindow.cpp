@@ -506,7 +506,20 @@ LRESULT MainWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) noe
 
     case WM_TIMER:
         if (wp == kTimerId) {
-            ::InvalidateRect(hwnd, nullptr, FALSE);
+            bool needs_repaint = false;
+            {
+                std::lock_guard lock{m_state_mutex};
+                if (m_state.session_state == airplay::AirPlaySessionState::Streaming ||
+                    m_state.session_state == airplay::AirPlaySessionState::Connecting ||
+                    m_state.status == ui::ConnectionStatus::Reconnecting ||
+                    (m_state.connection_mode == 1 &&
+                     m_state.control_state == wired::WiredControlState::Active)) {
+                    needs_repaint = true;
+                }
+            }
+            if (needs_repaint) {
+                ::InvalidateRect(hwnd, nullptr, FALSE);
+            }
             return 0;
         }
         break;
