@@ -112,11 +112,14 @@ Duwn Mirror cung cấp 2 phương thức kết nối chuyên nghiệp để đư
 
 ### Cách 2: Bắt cửa sổ hiển thị (Window Capture)
 
-1. Trong OBS Studio, bấm `+` tại bảng Sources -> chọn **Window Capture** *(Quay cửa sổ)*.
-2. Tại mục Window, chọn: `[duwn-mirror.exe]: Duwn Mirror Output`.
-3. Phương thức quay: Chọn **Windows 10 (1903 trở lên)** để bắt hình tăng tốc phần cứng mượt mà.
+1. Mở cửa sổ hiển thị: **Duwn Mirror Output**.
+2. Trong OBS Studio, bấm `+` tại bảng Sources -> chọn **Window Capture** *(Quay cửa sổ)*.
+3. Tại mục Window, chọn: `[duwn-mirror.exe]: Duwn Mirror Output`.
+4. Phương thức quay (Capture Method): Chọn **Windows 10 (1903 trở lên)** (Windows Graphics Capture / WGC) nếu **Automatic** hiển thị màn hình đen (swapchain DXGI flip-discard hiện đại không qua redirection surface của GDI BitBlt).
+5. Đảm bảo cửa sổ Output luôn mở và không bị thu nhỏ (minimize).
+6. Nếu kết nối lại stream hoặc pipeline tái tạo mà OBS chưa cập nhật đúng kích thước khung hình, mở lại thuộc tính nguồn và chọn lại cửa sổ.
 
-Nếu **Automatic** hoặc **BitBlt** cho hình đen, chọn rõ **Windows 10 (1903 trở lên)** (Windows Graphics Capture / WGC). OBS 32.0.4 chọn BitBlt cho lớp cửa sổ của Duwn khi dùng Automatic. Giữ cửa sổ phát mở và không thu nhỏ. Nếu WGC vẫn đen, chọn lại cửa sổ hiện tại sau reconnect và kiểm tra dòng `method chosen` trong log OBS trước khi đổi thiết lập renderer. Xem [cách OBS 32.0.4 chọn phương thức capture](https://github.com/obsproject/obs-studio/blob/32.0.4/plugins/win-capture/window-capture.c).
+*Lưu ý: Tính năng WGC yêu cầu Windows 10 (version 1903) hoặc Windows 11 trở lên. Khả năng hỗ trợ phụ thuộc vào hệ điều hành và driver GPU.*
 
 ### Thiết lập âm thanh
 

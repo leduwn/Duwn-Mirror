@@ -93,6 +93,7 @@ target_link_libraries(duwn-capture-persistence-test
             dxgi
             mfplat
             mfuuid
+            windowsapp
 )
 target_compile_features(duwn-capture-persistence-test PRIVATE cxx_std_20)
 add_test(NAME duwn-capture-persistence-test COMMAND duwn-capture-persistence-test)

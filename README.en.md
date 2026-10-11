@@ -112,11 +112,14 @@ Duwn Mirror supports two integration workflows for streaming software:
 
 ### Method 2: Window Capture
 
-1. In OBS Studio, click `+` under Sources -> select **Window Capture**.
-2. Select Window: `[duwn-mirror.exe]: Duwn Mirror Output`.
-3. Capture Method: Select **Windows 10 (1903 and up)** for smooth hardware-accelerated capture.
+1. Open the projection window: **Duwn Mirror Output**.
+2. In OBS Studio, click `+` under Sources -> select **Window Capture**.
+3. Select Window: `[duwn-mirror.exe]: Duwn Mirror Output`.
+4. Capture Method: Select **Windows 10 (1903 and up)** (Windows Graphics Capture / WGC) if **Automatic** displays a black screen (modern DXGI flip-discard swapchains bypass GDI BitBlt redirection surfaces).
+5. Ensure the Output Window is open and restored (not minimized).
+6. If the stream reconnects or the media pipeline is reinitialized and OBS does not immediately refresh the frame dimensions, reopen the source properties and reselect the window.
 
-If the source is black with **Automatic** or **BitBlt**, explicitly select **Windows 10 (1903 and up)** (Windows Graphics Capture / WGC). OBS 32.0.4 Automatic selects BitBlt for Duwn's window class. Keep the Output Window open and restored. If explicit WGC is also black, reselect the current window after reconnect and check the OBS log's `method chosen` entry before changing renderer settings. See [OBS 32.0.4 capture-method selection](https://github.com/obsproject/obs-studio/blob/32.0.4/plugins/win-capture/window-capture.c).
+*Note: WGC requires Windows 10 (version 1903) or Windows 11+. Actual capture capability depends on the OS build and GPU display driver.*
 
 ### Audio Routing
 
