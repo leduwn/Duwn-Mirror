@@ -809,8 +809,16 @@ bool MainWindowView::OnKeyDown(WPARAM vk, UiState& state) noexcept {
 void MainWindowView::Render(const UiState& state) noexcept {
     if (!m_renderer.BeginDraw()) return;
 
+    const bool current_sys_dark = DetectWindowsSystemDarkMode();
+    if (m_applied_theme_mode != state.theme_mode ||
+        (state.theme_mode == ThemeMode::System && m_applied_system_dark != current_sys_dark)) {
+        m_applied_theme_mode = state.theme_mode;
+        m_applied_system_dark = current_sys_dark;
+        m_renderer.ApplyPalette(ResolvePalette(state.theme_mode));
+    }
+
     m_clickables.clear();
-    m_renderer.Clear(colors::Background);
+    m_renderer.Clear(m_renderer.Palette().bg_base);
 
     m_renderer.GetDpi(&m_dpi_x, &m_dpi_y);
     float total_w = m_renderer.WidthDip();
@@ -1129,11 +1137,7 @@ void MainWindowView::RenderSidebar(const UiState& state, float top, float height
     m_renderer.PushClip(sidebar_rc);
 
     // Darker sidebar background
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> side_brush;
-    m_renderer.Target()->CreateSolidColorBrush(colors::SidebarBg, side_brush.GetAddressOf());
-    if (side_brush) {
-        m_renderer.FillRect(sidebar_rc, side_brush.Get());
-    }
+    m_renderer.FillRect(sidebar_rc, m_renderer.BrushSidebarBg());
 
     // Right border
     m_renderer.DrawLine(
@@ -1170,21 +1174,13 @@ void MainWindowView::RenderSidebar(const UiState& state, float top, float height
             RegisterClickable(item_rc, item.ctrl_id, item.label);
 
             if (is_active) {
-                Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> active_brush;
-                m_renderer.Target()->CreateSolidColorBrush(colors::NavActiveBg, active_brush.GetAddressOf());
-                if (active_brush) {
-                    m_renderer.FillRoundedRect(item_rc, metrics::ButtonRadius, active_brush.Get());
-                    m_renderer.DrawRoundedRect(item_rc, metrics::ButtonRadius, m_renderer.BrushBrandBlue(), 1.2f);
-                }
+                m_renderer.FillRoundedRect(item_rc, metrics::ButtonRadius, m_renderer.BrushNavActiveBg());
+                m_renderer.DrawRoundedRect(item_rc, metrics::ButtonRadius, m_renderer.BrushBrandBlue(), 1.2f);
 
                 D2D1_RECT_F indicator = D2D1::RectF(item_margin + 2.0f, cur_y + 8.0f, item_margin + 5.0f, cur_y + item_h - 8.0f);
                 m_renderer.FillRoundedRect(indicator, 1.5f, m_renderer.BrushBrandBlue());
             } else if (is_hovered) {
-                Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover_brush;
-                m_renderer.Target()->CreateSolidColorBrush(colors::NavHoverBg, hover_brush.GetAddressOf());
-                if (hover_brush) {
-                    m_renderer.FillRoundedRect(item_rc, metrics::ButtonRadius, hover_brush.Get());
-                }
+                m_renderer.FillRoundedRect(item_rc, metrics::ButtonRadius, m_renderer.BrushNavHoverBg());
             }
 
             D2D1_RECT_F icon_rc = D2D1::RectF(item_margin + 12.0f, cur_y + 11.0f, item_margin + 30.0f, cur_y + item_h - 11.0f);
@@ -1205,21 +1201,13 @@ void MainWindowView::RenderSidebar(const UiState& state, float top, float height
             RegisterClickable(item_rc, item.ctrl_id, item.label);
 
             if (is_active) {
-                Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> active_brush;
-                m_renderer.Target()->CreateSolidColorBrush(colors::NavActiveBg, active_brush.GetAddressOf());
-                if (active_brush) {
-                    m_renderer.FillRoundedRect(item_rc, metrics::ButtonRadius, active_brush.Get());
-                    m_renderer.DrawRoundedRect(item_rc, metrics::ButtonRadius, m_renderer.BrushBrandBlue(), 1.2f);
-                }
+                m_renderer.FillRoundedRect(item_rc, metrics::ButtonRadius, m_renderer.BrushNavActiveBg());
+                m_renderer.DrawRoundedRect(item_rc, metrics::ButtonRadius, m_renderer.BrushBrandBlue(), 1.2f);
 
                 D2D1_RECT_F indicator = D2D1::RectF(2.0f, cur_y + 8.0f, 5.0f, cur_y + item_sz - 8.0f);
                 m_renderer.FillRoundedRect(indicator, 1.5f, m_renderer.BrushBrandBlue());
             } else if (is_hovered) {
-                Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hover_brush;
-                m_renderer.Target()->CreateSolidColorBrush(colors::NavHoverBg, hover_brush.GetAddressOf());
-                if (hover_brush) {
-                    m_renderer.FillRoundedRect(item_rc, metrics::ButtonRadius, hover_brush.Get());
-                }
+                m_renderer.FillRoundedRect(item_rc, metrics::ButtonRadius, m_renderer.BrushNavHoverBg());
             }
 
             D2D1_RECT_F icon_rc = D2D1::RectF(item_x + 9.0f, cur_y + 9.0f, item_x + 29.0f, cur_y + 29.0f);
@@ -3446,9 +3434,7 @@ void MainWindowView::RenderDropdownOverlay(const UiState& state) noexcept {
 
     // Draw elevated popup card
     m_renderer.FillRoundedRect(popup_rc, 8.0f, m_renderer.BrushCardBorder());
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> pop_bg;
-    m_renderer.Target()->CreateSolidColorBrush(colors::CardSurfaceHover, pop_bg.GetAddressOf());
-    if (pop_bg) m_renderer.FillRoundedRect(popup_rc, 8.0f, pop_bg.Get());
+    m_renderer.FillRoundedRect(popup_rc, 8.0f, m_renderer.BrushCardHover());
     m_renderer.DrawRoundedRect(popup_rc, 8.0f, m_renderer.BrushBrandBlue(), 1.4f);
 
     // 3. Render items
@@ -3462,14 +3448,10 @@ void MainWindowView::RenderDropdownOverlay(const UiState& state) noexcept {
         bool is_selected = (static_cast<int>(i) == selected_idx);
 
         if (is_selected) {
-            Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> sel_bg;
-            m_renderer.Target()->CreateSolidColorBrush(colors::NavActiveBg, sel_bg.GetAddressOf());
-            if (sel_bg) m_renderer.FillRoundedRect(item_rc, 6.0f, sel_bg.Get());
+            m_renderer.FillRoundedRect(item_rc, 6.0f, m_renderer.BrushNavActiveBg());
             m_renderer.DrawRoundedRect(item_rc, 6.0f, m_renderer.BrushBrandBlue(), 1.0f);
         } else if (is_hovered) {
-            Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> hov_bg;
-            m_renderer.Target()->CreateSolidColorBrush(colors::NavHoverBg, hov_bg.GetAddressOf());
-            if (hov_bg) m_renderer.FillRoundedRect(item_rc, 6.0f, hov_bg.Get());
+            m_renderer.FillRoundedRect(item_rc, 6.0f, m_renderer.BrushNavHoverBg());
         }
 
         if (is_selected) {

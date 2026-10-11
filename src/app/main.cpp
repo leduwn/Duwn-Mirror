@@ -80,6 +80,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                 ::LocalFree(argv);
                 return ret;
             }
+            if (_wcsicmp(argv[i], L"--qa-capture") == 0 || _wcsicmp(argv[i], L"-qa-capture") == 0) {
+                std::wstring out_dir = (i + 1 < argc) ? argv[i + 1] : L"qa-screenshots";
+                ::LocalFree(argv);
+                ::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+                WSADATA wsa_data{};
+                int wsa_res = ::WSAStartup(MAKEWORD(2, 2), &wsa_data);
+                int ret = 0;
+                {
+                    duwn::app::App app;
+                    ret = app.RunVisualQa(out_dir);
+                }
+                if (wsa_res == 0) ::WSACleanup();
+                ::ExitProcess(static_cast<UINT>(ret));
+            }
             if (_wcsicmp(argv[i], L"--test-motion") == 0 || _wcsicmp(argv[i], L"-test-motion") == 0) {
                 test_motion = true;
             }

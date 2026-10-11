@@ -75,6 +75,9 @@ static std::string WideToUtf8(std::wstring_view w) noexcept {
 
 
 
+#pragma comment(lib, "gdiplus.lib")
+#include <gdiplus.h>
+
 namespace duwn::app {
 
 
@@ -3362,6 +3365,30 @@ void App::ApplySettingChange(int id, int value) noexcept {
 
         break;
 
+    case Control_Set_ThemeMode:
+        m_settings.theme_mode = static_cast<ui::ThemeMode>(std::clamp(value, 0, 2));
+        if (m_window) {
+            m_window->State().theme_mode = m_settings.theme_mode;
+            ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+        }
+        break;
+
+    case Control_Toggle_Animations:
+        m_settings.animations_enabled = (value != 0);
+        if (m_window) {
+            m_window->State().animations_enabled = m_settings.animations_enabled;
+            ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+        }
+        break;
+
+    case Control_Set_UiScale:
+        m_settings.ui_scale = std::clamp(static_cast<float>(value) / 100.0f, 0.5f, 2.0f);
+        if (m_window) {
+            m_window->State().ui_scale = m_settings.ui_scale;
+            ::InvalidateRect(m_window->Hwnd(), nullptr, FALSE);
+        }
+        break;
+
     default:
 
         if (id >= Control_Set_Brightness && id <= Control_Set_Sharpness) {
@@ -6010,6 +6037,283 @@ void App::LogCapabilityReport() const noexcept {
 
 }
 
+namespace {
+static int GetEncoderClsid(const WCHAR* format, CLSID* pClsid) {
+    UINT num = 0, size = 0;
+    Gdiplus::GetImageEncodersSize(&num, &size);
+    if (size == 0) return -1;
+    std::vector<uint8_t> buffer(size);
+    auto* pImageCodecInfo = reinterpret_cast<Gdiplus::ImageCodecInfo*>(buffer.data());
+    Gdiplus::GetImageEncoders(num, size, pImageCodecInfo);
+    for (UINT j = 0; j < num; ++j) {
+        if (wcscmp(pImageCodecInfo[j].MimeType, format) == 0) {
+            *pClsid = pImageCodecInfo[j].Clsid;
+            return j;
+        }
+    }
+    return -1;
+}
 
+static bool SaveHwndToPng(HWND hwnd, const std::wstring& out_path) {
+    if (!hwnd || !::IsWindow(hwnd)) return false;
+    RECT rc{};
+    ::GetClientRect(hwnd, &rc);
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0) return false;
+
+    HDC hdc_win = ::GetDC(hwnd);
+    if (!hdc_win) return false;
+    HDC hdc_mem = ::CreateCompatibleDC(hdc_win);
+    HBITMAP hbm = ::CreateCompatibleBitmap(hdc_win, w, h);
+    HGDIOBJ old_bm = ::SelectObject(hdc_mem, hbm);
+
+    ::PrintWindow(hwnd, hdc_mem, PW_CLIENTONLY | 0x00000002 /* PW_RENDERFULLCONTENT */);
+
+    CLSID pngClsid{};
+    bool ok = false;
+    if (GetEncoderClsid(L"image/png", &pngClsid) >= 0) {
+        Gdiplus::Bitmap bmp(hbm, nullptr);
+        ok = (bmp.Save(out_path.c_str(), &pngClsid, nullptr) == Gdiplus::Ok);
+    }
+
+    ::SelectObject(hdc_mem, old_bm);
+    ::DeleteObject(hbm);
+    ::DeleteDC(hdc_mem);
+    ::ReleaseDC(hwnd, hdc_win);
+    return ok;
+}
+
+static void ProcessWin32Events(int ms = 50) {
+    auto start = std::chrono::steady_clock::now();
+    MSG msg{};
+    while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() < ms) {
+        while (::PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            ::TranslateMessage(&msg);
+            ::DispatchMessageW(&msg);
+        }
+        ::Sleep(5);
+    }
+}
+} // namespace
+
+int App::RunVisualQa(const std::wstring& output_dir) noexcept {
+    DUWN_LOG_INFO("VisualQA", "Starting Phase 5 automated visual QA screenshot capture");
+    std::error_code ec;
+    std::filesystem::create_directories(output_dir, ec);
+
+    ULONG_PTR gdiplus_token{};
+    Gdiplus::GdiplusStartupInput gdi_in{};
+    if (Gdiplus::GdiplusStartup(&gdiplus_token, &gdi_in, nullptr) != Gdiplus::Ok) {
+        DUWN_LOG_ERROR("VisualQA", "GDI+ Startup failed");
+        return 1;
+    }
+
+    m_running.store(true, std::memory_order_release);
+    m_settings = Settings::Load();
+    m_window = std::make_unique<MainWindow>([this] {
+        m_running.store(false, std::memory_order_release);
+    });
+    if (!m_window->Create(m_settings)) {
+        Gdiplus::GdiplusShutdown(gdiplus_token);
+        return 1;
+    }
+    m_main_hwnd.store(m_window->Hwnd(), std::memory_order_release);
+
+    HWND hwnd = m_window->Hwnd();
+    ::ShowWindow(hwnd, SW_SHOW);
+    ::UpdateWindow(hwnd);
+    ProcessWin32Events(150);
+
+    auto capture_scenario = [&](const std::wstring& filename, auto setup_fn) {
+        setup_fn();
+        ::InvalidateRect(hwnd, nullptr, FALSE);
+        ::UpdateWindow(hwnd);
+        ProcessWin32Events(100);
+        std::wstring target = (std::filesystem::path(output_dir) / filename).wstring();
+        bool ok = SaveHwndToPng(hwnd, target);
+        DUWN_LOG_INFOF("VisualQA", "Captured scenario {} -> {} (success={})", WideToUtf8(filename), WideToUtf8(target), ok);
+    };
+
+    // Scenario 1: Mirror — Dark theme
+    capture_scenario(L"01_mirror_dark.png", [&] {
+        ::SetWindowPos(hwnd, nullptr, 100, 100, 1280, 720, SWP_NOZORDER);
+        auto& s = m_window->State();
+        s.active_tab = ui::NavTab::Mirror;
+        s.theme_mode = ui::ThemeMode::Dark;
+        s.status = ui::ConnectionStatus::Ready;
+        s.device_name = L"—";
+        s.status_message = L"Ready to connect";
+        s.open_dropdown = 0;
+    });
+
+    // Scenario 2: Mirror — Light theme
+    capture_scenario(L"02_mirror_light.png", [&] {
+        auto& s = m_window->State();
+        s.active_tab = ui::NavTab::Mirror;
+        s.theme_mode = ui::ThemeMode::Light;
+        s.status = ui::ConnectionStatus::Ready;
+        s.open_dropdown = 0;
+    });
+
+    // Scenario 3: Settings — All 5 groups (Dark theme)
+    auto& s = m_window->State();
+    s.theme_mode = ui::ThemeMode::Dark;
+    s.active_tab = ui::NavTab::Settings;
+    s.open_dropdown = 0;
+
+    // 3A: Video & Display
+    capture_scenario(L"03_settings_01_video_display.png", [&] {
+        m_window->State().active_settings_sub_tab = ui::SettingsSubTab::VideoDisplay;
+    });
+
+    // 3B: Audio
+    capture_scenario(L"03_settings_02_audio.png", [&] {
+        m_window->State().active_settings_sub_tab = ui::SettingsSubTab::Audio;
+    });
+
+    // 3C: Color
+    capture_scenario(L"03_settings_03_color.png", [&] {
+        m_window->State().active_settings_sub_tab = ui::SettingsSubTab::Color;
+    });
+
+    // 3D: Appearance
+    capture_scenario(L"03_settings_04_appearance.png", [&] {
+        m_window->State().active_settings_sub_tab = ui::SettingsSubTab::Appearance;
+    });
+
+    // 3E: Advanced
+    capture_scenario(L"03_settings_05_advanced.png", [&] {
+        m_window->State().active_settings_sub_tab = ui::SettingsSubTab::Advanced;
+    });
+
+    // Scenario 4: Diagnostics
+    capture_scenario(L"04_diagnostics.png", [&] {
+        auto& st = m_window->State();
+        st.active_tab = ui::NavTab::Diagnostics;
+        st.open_dropdown = 0;
+        st.gpu_name = L"NVIDIA GeForce RTX 4060 Laptop GPU";
+        st.renderer_name = L"Hardware D3D11";
+        st.scaler_name = L"Bicubic";
+        st.output_width = 1920;
+        st.output_height = 1080;
+        st.capture_width = 1920;
+        st.capture_height = 1080;
+        st.total_frames_presented = 3600;
+        st.render_fps = 60.0;
+        st.pipeline_latency_ms = 14.2;
+    });
+
+    // Scenario 5A: Connection Idle
+    capture_scenario(L"05_connection_idle.png", [&] {
+        auto& st = m_window->State();
+        st.active_tab = ui::NavTab::Mirror;
+        st.status = ui::ConnectionStatus::Ready;
+        st.session_state = airplay::AirPlaySessionState::Idle;
+        st.device_name = L"—";
+        st.status_message = L"Ready to connect";
+    });
+
+    // Scenario 5B: Connection Error & Stall
+    capture_scenario(L"05_connection_error.png", [&] {
+        auto& st = m_window->State();
+        st.active_tab = ui::NavTab::Mirror;
+        st.status = ui::ConnectionStatus::Error;
+        st.session_state = airplay::AirPlaySessionState::Error;
+        st.status_message = L"Error: AirPlay UDP 7010 blocked by Windows Firewall";
+    });
+
+    // Scenario 6: Connected state (active stream with live telemetry)
+    capture_scenario(L"06_connected_streaming.png", [&] {
+        auto& st = m_window->State();
+        st.active_tab = ui::NavTab::Mirror;
+        st.status = ui::ConnectionStatus::Streaming;
+        st.session_state = airplay::AirPlaySessionState::Streaming;
+        st.device_name = L"iPhone 15 Pro Max (Dương)";
+        st.model_name = L"iPhone16,2";
+        st.product_type = L"iPhone";
+        st.os_version = L"iOS 18.1";
+        st.client_ip = L"192.168.1.155";
+        st.width = 1179;
+        st.height = 2556;
+        st.coded_width = 1184;
+        st.coded_height = 2560;
+        st.render_fps = 60.0;
+        st.actual_source_fps = 60.0;
+        st.pipeline_latency_ms = 15.6;
+        st.total_frames_presented = 7200;
+        st.dropped_frames = 0;
+        st.media_bitrate_mbps = 18.5;
+        st.decoder_name = L"Intel/NVIDIA D3D11 NV12 Hardware";
+        st.status_message = L"Streaming active";
+    });
+
+    // Scenario 7: Navigation rail layout tiers
+    // 7A: Large (>= 1180 DIP, width = 1280)
+    capture_scenario(L"07_nav_rail_large.png", [&] {
+        ::SetWindowPos(hwnd, nullptr, 50, 50, 1280, 720, SWP_NOZORDER);
+        m_window->State().active_tab = ui::NavTab::Mirror;
+    });
+
+    // 7B: Medium (900-1179 DIP, width = 1000)
+    capture_scenario(L"07_nav_rail_medium.png", [&] {
+        ::SetWindowPos(hwnd, nullptr, 50, 50, 1000, 700, SWP_NOZORDER);
+    });
+
+    // 7C: Small (< 900 DIP, width = 760)
+    capture_scenario(L"07_nav_rail_small.png", [&] {
+        ::SetWindowPos(hwnd, nullptr, 50, 50, 760, 600, SWP_NOZORDER);
+    });
+
+    // Scenario 8: Main Window minimum supported dimensions (640x480)
+    capture_scenario(L"08_main_window_min_dimensions.png", [&] {
+        ::SetWindowPos(hwnd, nullptr, 50, 50, 640, 480, SWP_NOZORDER);
+        m_window->State().active_tab = ui::NavTab::Mirror;
+    });
+
+    // Scenario 9: Output Window and Toolbar
+    {
+        ::SetWindowPos(hwnd, nullptr, 50, 50, 1280, 720, SWP_NOZORDER);
+        OutputWindow out_win;
+        if (out_win.Create(540, 1168)) {
+            out_win.Show();
+            out_win.SetToolbarVisible(true);
+            out_win.UpdateToolbarPosition();
+            ProcessWin32Events(100);
+
+            std::wstring out_file = (std::filesystem::path(output_dir) / L"09_output_window_toolbar.png").wstring();
+            bool ok1 = SaveHwndToPng(out_win.Hwnd(), out_file);
+            DUWN_LOG_INFOF("VisualQA", "Captured OutputWindow -> {} (success={})", WideToUtf8(out_file), ok1);
+
+            if (out_win.ToolbarHwnd()) {
+                std::wstring tb_file = (std::filesystem::path(output_dir) / L"09_output_floating_toolbar.png").wstring();
+                bool ok2 = SaveHwndToPng(out_win.ToolbarHwnd(), tb_file);
+                DUWN_LOG_INFOF("VisualQA", "Captured Floating Toolbar -> {} (success={})", WideToUtf8(tb_file), ok2);
+            }
+            out_win.Hide();
+        }
+    }
+
+    // Scenario 10: Dropdowns displaying Vietnamese labels and long device names
+    capture_scenario(L"10_dropdown_vietnamese_labels.png", [&] {
+        ::SetWindowPos(hwnd, nullptr, 50, 50, 1280, 720, SWP_NOZORDER);
+        auto& st = m_window->State();
+        st.language = L"vi-VN";
+        ui::loc::SetLang(ui::loc::Lang::Vi);
+        st.active_tab = ui::NavTab::Settings;
+        st.active_settings_sub_tab = ui::SettingsSubTab::Audio;
+        st.available_audio_devices = {
+            { L"{0.0.0.00000000}.{default}", L"Loa mặc định hệ thống (Realtek High Definition Audio Endpoint)", true },
+            { L"{0.0.0.00000001}.{headset}", L"Tai nghe Bluetooth chống ồn Sony WH-1000XM5 Stereo Hands-Free", true },
+            { L"{0.0.0.00000002}.{capture}", L"Thiết bị truyền phát Elgato Cam Link 4K HDMI Digital Audio Stream", true }
+        };
+        st.open_dropdown = ui::Control_Set_AudioDevice;
+    });
+
+    ::ShowWindow(hwnd, SW_HIDE);
+    Gdiplus::GdiplusShutdown(gdiplus_token);
+    DUWN_LOG_INFO("VisualQA", "Completed Phase 5 automated visual QA screenshot capture");
+    return 0;
+}
 
 } // namespace duwn::app

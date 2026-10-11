@@ -73,7 +73,15 @@ struct StreamingStatusEvaluation {
     StallStage stall_stage{StallStage::None};
     const char* stall_stage_name{"NONE"};
     std::wstring stall_message;
+    std::wstring observed_condition;
+    std::wstring possible_cause;
+    std::wstring suggested_action;
 };
+
+// Threshold rationale: AirPlay RTSP handshake completes in ~0.5-1.0s. RTP video packets
+// flow within 1.5-2.0s after RECORD. If 3 full seconds elapse with 0 frames presented,
+// the stream is stalled. This gives immediate feedback within < 4 seconds of connecting.
+inline constexpr int64_t kPipelineStallThresholdSec = 3;
 
 inline StreamingStatusEvaluation EvaluateStreamingStatus(
     airplay::AirPlaySessionState session_state,
@@ -93,32 +101,47 @@ inline StreamingStatusEvaluation EvaluateStreamingStatus(
             eval.stall_stage = StallStage::None;
             eval.stall_stage_name = "NONE";
             eval.stall_message = L"Đang phát";
+            eval.observed_condition = L"Khung hình đang hiển thị bình thường";
         } else {
             eval.status = ConnectionStatus::Connected;
-            if (uptime_sec >= 3) {
+            if (uptime_sec >= kPipelineStallThresholdSec) {
                 if (rtp_packets == 0) {
                     eval.stall_stage = StallStage::WaitingVideoPacket;
                     eval.stall_stage_name = "WAITING_VIDEO_PACKET";
-                    eval.stall_message = L"Chờ hình ảnh... (Chờ gói video RTP / Firewall UDP 7010)";
+                    eval.stall_message = L"Chờ hình ảnh... (Chưa nhận gói video RTP)";
+                    eval.observed_condition = L"0 gói video RTP sau 3s kết nối";
+                    eval.possible_cause = L"Tường lửa chặn cổng UDP 7010 hoặc thiết bị chưa truyền luồng video";
+                    eval.suggested_action = L"Kiểm tra quyền tường lửa UDP 7010 hoặc thử phản chiếu lại từ Trung tâm điều khiển";
                 } else if (decoded_frames == 0) {
                     eval.stall_stage = StallStage::WaitingDecoder;
                     eval.stall_stage_name = "WAITING_DECODER";
-                    eval.stall_message = L"Chờ hình ảnh... (Đang giải mã H.264/HEVC)";
+                    eval.stall_message = L"Chờ hình ảnh... (Đang chờ giải mã H.264/HEVC)";
+                    eval.observed_condition = L"Đã nhận gói video RTP nhưng chưa có khung hình giải mã (0 decoded frames)";
+                    eval.possible_cause = L"Đang chờ keyframe SPS/PPS hoặc bộ giải mã D3D11 đang khởi tạo";
+                    eval.suggested_action = L"Chờ thiết bị gửi keyframe hoặc chuyển sang bộ giải mã tương thích";
                 } else if (queue_depth == 0 && rendered_frames == 0) {
                     eval.stall_stage = StallStage::WaitingRenderer;
                     eval.stall_stage_name = "WAITING_RENDERER";
-                    eval.stall_message = L"Chờ hình ảnh... (Chờ bộ dựng hình)";
+                    eval.stall_message = L"Chờ hình ảnh... (Đang chờ hàng đợi dựng hình)";
+                    eval.observed_condition = L"Đã giải mã nhưng chưa đưa vào hàng đợi dựng hình (queue depth 0)";
+                    eval.possible_cause = L"Render thread chưa sẵn sàng hoặc thiết bị tạm dừng khung hình";
+                    eval.suggested_action = L"Kiểm tra driver GPU hoặc thử bật lại cửa sổ hiển thị";
                 } else {
                     eval.stall_stage = StallStage::WaitingPresent;
                     eval.stall_stage_name = "WAITING_PRESENT";
                     eval.stall_message = L"Chờ hình ảnh... (Đang hoàn tất hiển thị)";
+                    eval.observed_condition = L"Đã dựng hình nhưng chưa hoàn tất Present lên SwapChain (0 presented frames)";
+                    eval.possible_cause = L"Direct3D 11 SwapChain đang chờ VSync hoặc cửa sổ hiển thị bị che khuất";
+                    eval.suggested_action = L"Kiểm tra cấu hình VSync hoặc bật lại cửa sổ trình chiếu";
                 }
             } else {
                 eval.stall_message = L"Chờ video...";
+                eval.observed_condition = L"Đang thiết lập luồng video (<3s)";
             }
         }
     } else {
         eval.status = ConnectionStatus::Idle;
+        eval.observed_condition = L"Chưa kết nối";
     }
     return eval;
 }

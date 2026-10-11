@@ -140,6 +140,8 @@ private:
     float                           m_dpi_x{96.0f};
     float                           m_dpi_y{96.0f};
     LayoutTier                      m_tier{LayoutTier::Large};
+    ThemeMode                       m_applied_theme_mode{static_cast<ThemeMode>(-1)};
+    bool                            m_applied_system_dark{false};
     std::vector<ClickableRegion>    m_clickables;
     D2D1_RECT_F                     m_dropdown_anchor_rc{};
     D2D1_RECT_F                     m_wired_preview_rect{};

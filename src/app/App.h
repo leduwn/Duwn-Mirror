@@ -60,6 +60,7 @@ public:
     App& operator=(const App&) = delete;
 
     int Run(bool test_motion = false, bool verify_capture = false, bool test_rotate = false) noexcept;
+    int RunVisualQa(const std::wstring& output_dir) noexcept;
 
     bool WaitForMediaReadiness(uint32_t timeout_ms = 2500) const noexcept;
     bool IsVideoMinReady() const noexcept {
