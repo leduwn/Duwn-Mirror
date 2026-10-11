@@ -284,6 +284,7 @@ bool VideoRenderer::RebuildVideoProcessor(uint32_t coded_src_w, uint32_t coded_s
     m_src_coded_width  = coded_src_w;
     m_src_coded_height = coded_src_h;
     m_src_format       = source_format;
+    m_bt2020_legacy_warned = false;
 
     m_color_space_dirty.store(true, std::memory_order_release);
     ApplyColorSpace(coded_src_h);
@@ -350,6 +351,11 @@ void VideoRenderer::ApplyColorSpace(uint32_t source_height) noexcept {
     if (!m_vc1_warned) {
         DUWN_LOG_WARN("VideoRenderer", "ColorSpace1 conversion unavailable; using legacy D3D11 colour controls");
         m_vc1_warned = true;
+    }
+    if (color.is_bt2020 && !m_bt2020_legacy_warned) {
+        DUWN_LOG_WARN("VideoRenderer",
+            "BT.2020 legacy fallback active: driver lacks ColorSpace1 conversion for source format; using approximate BT.709 matrix under SDR G22 assumption");
+        m_bt2020_legacy_warned = true;
     }
     m_video_context->VideoProcessorSetStreamColorSpace(m_video_processor.Get(), 0, &color.legacy_input);
     m_video_context->VideoProcessorSetOutputColorSpace(m_video_processor.Get(), &color.legacy_output);

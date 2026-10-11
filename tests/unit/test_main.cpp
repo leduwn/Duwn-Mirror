@@ -93,6 +93,7 @@ void AssertTrue(bool cond, const char* expr, const char* file, int line);
 #include "test_metadata_concurrency.cpp"
 #include "test_video_pipeline_recovery.cpp"
 #include "test_workspace_and_capture.cpp"
+#include "test_video_color_space.cpp"
 
 
 #include <objbase.h>

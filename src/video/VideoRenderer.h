@@ -254,6 +254,7 @@ private:
     int64_t             m_last_render_stats_time_ns{0};
 
     bool m_vc1_warned{false}; // one-shot: log ID3D11VideoContext1 QI failure once
+    bool m_bt2020_legacy_warned{false}; // one-shot: log BT.2020 legacy fallback limitation once
 };
 
 } // namespace duwn::video
