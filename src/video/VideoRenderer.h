@@ -76,6 +76,15 @@ enum class ResizeResult {
     Failed,     // other resize failure
 };
 
+// RuntimeColorPath indicates the color conversion path actively selected and applied
+// by the video processor at runtime (determined after driver capability validation).
+enum class RuntimeColorPath : uint8_t {
+    Unconfigured,
+    ColorSpace1,        // Modern ColorSpace1 path advertised as supported by driver
+    LegacyStandard,     // Legacy D3D11 controls with exact BT.601/BT.709 matrix
+    LegacyApproximation // Legacy D3D11 controls with BT.709 approximation fallback for BT.2020
+};
+
 class VideoRenderer : public IVideoRenderer {
 public:
     VideoRenderer(D3D11Device& device, HWND hwnd) noexcept;
@@ -128,6 +137,9 @@ public:
         m_color_range.store(range, std::memory_order_relaxed);
         m_color_matrix.store(matrix, std::memory_order_relaxed);
         m_color_space_dirty.store(true, std::memory_order_release);
+    }
+    RuntimeColorPath ActiveColorPath() const noexcept {
+        return m_active_color_path.load(std::memory_order_relaxed);
     }
     AspectRatioMode GetAspectRatioMode() const noexcept {
         return m_ar_mode.load(std::memory_order_relaxed);
@@ -213,6 +225,7 @@ private:
     std::atomic<int> m_source_color_range{0};
     std::atomic<int> m_source_color_matrix{0};
     std::atomic<bool> m_color_space_dirty{true};
+    std::atomic<RuntimeColorPath> m_active_color_path{RuntimeColorPath::Unconfigured};
 
     // Pending resize — UI thread writes, render thread reads+clears.
     // Packed: high32 = width, low32 = height. 0 = no pending resize.

@@ -6,9 +6,13 @@
 
 namespace duwn::video {
 
-enum class ColorFidelityStatus : uint8_t {
-    Exact,
-    LegacyApproximation
+// LegacyMatrixAccuracy describes the mathematical representability of the color matrix
+// in legacy D3D11 video processor controls (which only provide BT.601 and BT.709 bits).
+// This reflects source metadata capability under legacy mapping, NOT the runtime selected path
+// (which may use modern ColorSpace1) nor measured pixel accuracy.
+enum class LegacyMatrixAccuracy : uint8_t {
+    Exact,       // BT.601 and BT.709 can be represented exactly in legacy D3D11 controls
+    Approximate  // BT.2020 has no legacy representation; legacy fallback uses BT.709 approximation
 };
 
 struct VideoColorSpace {
@@ -18,7 +22,7 @@ struct VideoColorSpace {
     D3D11_VIDEO_PROCESSOR_COLOR_SPACE legacy_output{};
     bool is_bt2020{false};
     bool legacy_matrix_exact{true};
-    ColorFidelityStatus fidelity_status{ColorFidelityStatus::Exact};
+    LegacyMatrixAccuracy legacy_matrix_accuracy{LegacyMatrixAccuracy::Exact};
 };
 
 inline VideoColorSpace ResolveVideoColorSpace(int matrix, int range, uint32_t source_height) noexcept {
@@ -27,7 +31,7 @@ inline VideoColorSpace ResolveVideoColorSpace(int matrix, int range, uint32_t so
     DXGI_COLOR_SPACE_TYPE input = DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709;
     bool is_bt2020 = false;
     bool legacy_matrix_exact = true;
-    ColorFidelityStatus fidelity = ColorFidelityStatus::Exact;
+    LegacyMatrixAccuracy matrix_accuracy = LegacyMatrixAccuracy::Exact;
 
     if (matrix == 1) {
         input = full ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P601
@@ -42,7 +46,7 @@ inline VideoColorSpace ResolveVideoColorSpace(int matrix, int range, uint32_t so
                      : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020;
         is_bt2020 = true;
         legacy_matrix_exact = false;
-        fidelity = ColorFidelityStatus::LegacyApproximation;
+        matrix_accuracy = LegacyMatrixAccuracy::Approximate;
     }
 
     VideoColorSpace result{};
@@ -50,7 +54,7 @@ inline VideoColorSpace ResolveVideoColorSpace(int matrix, int range, uint32_t so
     result.output = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
     result.is_bt2020 = is_bt2020;
     result.legacy_matrix_exact = legacy_matrix_exact;
-    result.fidelity_status = fidelity;
+    result.legacy_matrix_accuracy = matrix_accuracy;
 
     result.legacy_input.Usage = 0;
     result.legacy_input.RGB_Range = 0;

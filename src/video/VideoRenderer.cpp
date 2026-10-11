@@ -262,6 +262,10 @@ bool VideoRenderer::RebuildVideoProcessor(uint32_t coded_src_w, uint32_t coded_s
         return false;
     }
 
+    // Explicitly disable driver auto-processing (dynamic contrast, flesh tone enhancements)
+    // to preserve pure source color reproduction and prevent driver temporal color drift.
+    m_video_context->VideoProcessorSetStreamAutoProcessingMode(m_video_processor.Get(), 0, FALSE);
+
     D3D11_VIDEO_PROCESSOR_CAPS caps{};
     uint32_t supported = 0;
     if (SUCCEEDED(m_vp_enum->GetVideoProcessorCaps(&caps)))
@@ -339,12 +343,19 @@ void VideoRenderer::ApplyColorSpace(uint32_t source_height) noexcept {
     ComPtr<ID3D11VideoContext1> vc1;
     ComPtr<ID3D11VideoProcessorEnumerator1> enum1;
     BOOL supported = FALSE;
+
+    // Always keep legacy color controls aligned with the active color space as the hardware baseline
+    // (ensures driver hardware nominal range registers 0-255 vs 16-235 match across all paths).
+    m_video_context->VideoProcessorSetStreamColorSpace(m_video_processor.Get(), 0, &color.legacy_input);
+    m_video_context->VideoProcessorSetOutputColorSpace(m_video_processor.Get(), &color.legacy_output);
+
     if (SUCCEEDED(m_video_context->QueryInterface(IID_PPV_ARGS(&vc1))) &&
         SUCCEEDED(m_vp_enum.As(&enum1)) &&
         SUCCEEDED(enum1->CheckVideoProcessorFormatConversion(
             m_src_format, color.input, DXGI_FORMAT_B8G8R8A8_UNORM, color.output, &supported)) && supported) {
         vc1->VideoProcessorSetStreamColorSpace1(m_video_processor.Get(), 0, color.input);
         vc1->VideoProcessorSetOutputColorSpace1(m_video_processor.Get(), color.output);
+        m_active_color_path.store(RuntimeColorPath::ColorSpace1, std::memory_order_relaxed);
         return;
     }
 
@@ -357,8 +368,17 @@ void VideoRenderer::ApplyColorSpace(uint32_t source_height) noexcept {
             "BT.2020 legacy fallback active: driver lacks ColorSpace1 conversion for source format; using approximate BT.709 matrix under SDR G22 assumption");
         m_bt2020_legacy_warned = true;
     }
-    m_video_context->VideoProcessorSetStreamColorSpace(m_video_processor.Get(), 0, &color.legacy_input);
-    m_video_context->VideoProcessorSetOutputColorSpace(m_video_processor.Get(), &color.legacy_output);
+    // On Intel and other D3D11.1 drivers, if ColorSpace1 was previously set on this processor,
+    // setting legacy VideoProcessorSetStreamColorSpace does not override the driver's internal
+    // ColorSpace1 state unless DXGI_COLOR_SPACE_CUSTOM is explicitly dispatched to release it.
+    if (vc1) {
+        vc1->VideoProcessorSetStreamColorSpace1(m_video_processor.Get(), 0, DXGI_COLOR_SPACE_CUSTOM);
+        vc1->VideoProcessorSetOutputColorSpace1(m_video_processor.Get(), DXGI_COLOR_SPACE_CUSTOM);
+    }
+    const auto active_path = color.legacy_matrix_exact
+        ? RuntimeColorPath::LegacyStandard
+        : RuntimeColorPath::LegacyApproximation;
+    m_active_color_path.store(active_path, std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -865,6 +885,7 @@ bool VideoRenderer::HandleDeviceRemoved() noexcept {
     m_src_coded_height         = 0;
     m_src_format               = DXGI_FORMAT_UNKNOWN;
     m_active_source_generation = 0;
+    m_active_color_path.store(RuntimeColorPath::Unconfigured, std::memory_order_relaxed);
 
     // Return false — caller must treat this as fatal for Milestone 0.
     return false;
