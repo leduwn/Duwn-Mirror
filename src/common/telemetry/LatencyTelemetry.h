@@ -17,8 +17,32 @@
 #include <atomic>
 #include <mutex>
 #include <vector>
+#include <array>
 
 namespace duwn::telemetry {
+
+enum class FrameTimingMetric : size_t {
+    RtpIngest, AuComplete, DecoderOutput, Enqueue, Dequeue, PresentBegin, SocketRead,
+    Assembly, AuToOutput, OutputToQueue, QueueDwell, SelectToReturn,
+    ReceiveToReturn, PresentCall, ReceiverCallback, DecoderMutexWait,
+    DecoderMutexHold, ProcessInput, ProcessOutput, Count
+};
+
+inline constexpr std::array<const char*, static_cast<size_t>(FrameTimingMetric::Count)> kFrameTimingNames{
+    "rtp_arrival_interval", "au_interval", "decoder_interval", "enqueue_interval",
+    "dequeue_interval", "present_begin_interval", "socket_read_interval",
+    "rtp_to_au", "au_to_output",
+    "output_to_enqueue", "queue_dwell", "dequeue_to_present_return",
+    "rtp_to_present_return", "present_call", "receiver_callback",
+    "decoder_mutex_wait", "decoder_mutex_hold", "process_input", "process_output"
+};
+
+struct FrameTimingStats {
+    uint64_t count{0};
+    size_t retained{0};
+    double mean{0}, p50{0}, p95{0}, p99{0}, max{0};
+    uint64_t over1{0}, gaps25{0}, gaps33{0}, gaps50{0};
+};
 
 struct FrameAgePercentiles {
     double p50{0.0};
@@ -102,8 +126,28 @@ public:
     // Reset session metrics
     void Reset() noexcept;
 
+    // Opt-in diagnostic windows; no allocation/logging/sorting on media threads.
+    void SetFrameTimingEnabled(bool enabled) noexcept;
+    bool FrameTimingEnabled() const noexcept { return m_frame_timing_enabled.load(std::memory_order_relaxed); }
+    void RecordFrameInterval(FrameTimingMetric metric, int64_t qpc) noexcept;
+    void RecordFrameDuration(FrameTimingMetric metric, int64_t start, int64_t end) noexcept;
+    std::array<FrameTimingStats, kFrameTimingNames.size()> CollectFrameTiming() noexcept;
+
 private:
     LatencyTelemetry() = default;
+
+    struct TimingSamples {
+        std::array<double, 256> values{};
+        uint64_t count{0};
+        double sum{0}, max{0};
+        uint64_t over1{0}, gaps25{0}, gaps33{0}, gaps50{0};
+        void Add(double ms) noexcept;
+    };
+    std::atomic<bool> m_frame_timing_enabled{false};
+    std::mutex m_timing_mutex;
+    int64_t m_timing_reset_qpc{0};
+    std::array<TimingSamples, kFrameTimingNames.size()> m_timing_samples{};
+    std::array<int64_t, 7> m_previous_frame_qpc{};
 
     mutable std::mutex m_mutex;
 

@@ -29,7 +29,7 @@ public:
     // Feed one RTP packet payload.
     void FeedRtp(const uint8_t* payload, size_t size,
                  uint32_t rtp_ts, int64_t pts_ns,
-                 bool marker, uint16_t seq) noexcept;
+                 bool marker, uint16_t seq, int64_t arrival_qpc = 0) noexcept;
 
     void Flush() noexcept;
     void Reset(uint32_t generation = 0) noexcept;

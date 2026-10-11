@@ -9,6 +9,26 @@
 
 namespace duwn::audio {
 
+namespace {
+
+std::wstring ReadDeviceFriendlyName(IMMDevice* device, const std::wstring& fallback_id) noexcept {
+    if (!device) return fallback_id;
+    std::wstring friendly;
+    ComPtr<IPropertyStore> props;
+    if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, props.GetAddressOf()))) {
+        PROPVARIANT pv;
+        ::PropVariantInit(&pv);
+        if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &pv)) &&
+            pv.vt == VT_LPWSTR && pv.pwszVal) {
+            friendly = pv.pwszVal;
+        }
+        ::PropVariantClear(&pv);
+    }
+    return friendly.empty() ? fallback_id : friendly;
+}
+
+} // namespace
+
 AudioDeviceManager::~AudioDeviceManager() {
     Shutdown();
 }
@@ -67,20 +87,7 @@ std::vector<AudioEndpointInfo> AudioDeviceManager::Enumerate() noexcept {
         std::wstring id = pwstr_id;
         ::CoTaskMemFree(pwstr_id);
 
-        // Friendly name via property store
-        std::wstring friendly;
-        ComPtr<IPropertyStore> props;
-        if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &props))) {
-            PROPVARIANT pv;
-            ::PropVariantInit(&pv);
-            if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &pv)) &&
-                pv.vt == VT_LPWSTR && pv.pwszVal) {
-                friendly = pv.pwszVal;
-            }
-            ::PropVariantClear(&pv);
-        }
-        if (friendly.empty()) friendly = id;
-
+        std::wstring friendly = ReadDeviceFriendlyName(device.Get(), id);
         result.push_back({ std::move(id), std::move(friendly) });
     }
 
@@ -118,17 +125,7 @@ AudioEndpointInfo AudioDeviceManager::GetDeviceInfo(const std::wstring& id) noex
 
     DWORD state = 0;
     info.available = SUCCEEDED(device->GetState(&state)) && state == DEVICE_STATE_ACTIVE;
-    ComPtr<IPropertyStore> props;
-    if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, props.GetAddressOf()))) {
-        PROPVARIANT pv;
-        ::PropVariantInit(&pv);
-        if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &pv)) &&
-            pv.vt == VT_LPWSTR && pv.pwszVal) {
-            info.friendly_name = pv.pwszVal;
-        }
-        ::PropVariantClear(&pv);
-    }
-    if (info.friendly_name.empty()) info.friendly_name = id;
+    info.friendly_name = ReadDeviceFriendlyName(device.Get(), id);
     return info;
 }
 

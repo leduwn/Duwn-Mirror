@@ -113,8 +113,10 @@ Duwn Mirror supports two integration workflows for streaming software:
 ### Method 2: Window Capture
 
 1. In OBS Studio, click `+` under Sources -> select **Window Capture**.
-2. Select Window: `[duwn-mirror.exe]: Output Window` (or `Cửa sổ phát`).
+2. Select Window: `[duwn-mirror.exe]: Duwn Mirror Output`.
 3. Capture Method: Select **Windows 10 (1903 and up)** for smooth hardware-accelerated capture.
+
+If the source is black with **Automatic** or **BitBlt**, explicitly select **Windows 10 (1903 and up)** (Windows Graphics Capture / WGC). OBS 32.0.4 Automatic selects BitBlt for Duwn's window class. Keep the Output Window open and restored. If explicit WGC is also black, reselect the current window after reconnect and check the OBS log's `method chosen` entry before changing renderer settings. See [OBS 32.0.4 capture-method selection](https://github.com/obsproject/obs-studio/blob/32.0.4/plugins/win-capture/window-capture.c).
 
 ### Audio Routing
 

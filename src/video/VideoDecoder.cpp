@@ -2,6 +2,7 @@
 #include "common/logging/Logger.h"
 #include "common/metrics/Metrics.h"
 #include "common/clock/MonotonicClock.h"
+#include "common/telemetry/LatencyTelemetry.h"
 #include <cstring>
 #include <format>
 #include <chrono>
@@ -147,9 +148,8 @@ void VideoDecoder::FeedAccessUnit(EncodedAccessUnit au) noexcept {
     if (au.au_received_qpc == 0) {
         au.au_received_qpc = duwn::clock::MonotonicClock::NowQpcTicks();
     }
-    if (au.rtp_arrival_qpc == 0) {
-        au.rtp_arrival_qpc = au.au_received_qpc;
-    }
+    telemetry::LatencyTelemetry::Get().RecordFrameInterval(
+        telemetry::FrameTimingMetric::AuComplete, au.au_received_qpc);
 
     auto decode_start = std::chrono::steady_clock::now();
     m_mf_decoder.Feed(au.data.data(), au.data.size(), au.pts_ns, static_cast<uint16_t>(au.sequence_number & 0xFFFF),
@@ -189,7 +189,7 @@ void VideoDecoder::EmitAccessUnit(int64_t pts_ns, uint16_t seq) noexcept {
     au.sequence_number = ++m_au_sequence;
     au.codec = (m_active_codec != VideoCodecType::Unknown) ? m_active_codec : VideoCodecType::H264;
     au.au_received_qpc = duwn::clock::MonotonicClock::NowQpcTicks();
-    au.rtp_arrival_qpc = m_first_packet_qpc > 0 ? m_first_packet_qpc : au.au_received_qpc;
+    au.rtp_arrival_qpc = m_first_packet_qpc;
     m_first_packet_qpc = 0;
     FeedAccessUnit(std::move(au));
 
@@ -198,23 +198,25 @@ void VideoDecoder::EmitAccessUnit(int64_t pts_ns, uint16_t seq) noexcept {
 }
 
 void VideoDecoder::FeedRtp(const uint8_t* payload, size_t size,
-                            uint32_t rtp_ts, int64_t pts_ns,
-                            bool marker, uint16_t seq) noexcept {
+                            uint32_t rtp_ts, int64_t arrival_ns,
+                            bool marker, uint16_t seq, int64_t arrival_qpc) noexcept {
     if (size == 0) return;
     if (m_active_codec == VideoCodecType::Unknown) {
         return;
     }
 
+    const int64_t pts_ns = m_rtp_timeline.Map(rtp_ts, arrival_ns);
+
     if (m_active_codec == VideoCodecType::H265) {
         if (m_hevc_assembler) {
-            m_hevc_assembler->FeedRtp(payload, size, rtp_ts, pts_ns, marker, seq);
+            m_hevc_assembler->FeedRtp(payload, size, rtp_ts, pts_ns, marker, seq, arrival_qpc);
         }
         return;
     }
 
-    if (m_first_packet_qpc == 0) {
-        m_first_packet_qpc = duwn::clock::MonotonicClock::NowQpcTicks();
-    }
+    const bool new_timestamp = !m_has_last_rtp_ts || rtp_ts != m_last_rtp_ts;
+    const int64_t first_packet_qpc = (m_first_packet_qpc == 0 || new_timestamp)
+        ? (arrival_qpc > 0 ? arrival_qpc : clock::MonotonicClock::NowQpcTicks()) : 0;
 
     // Detect timestamp boundary: if RTP timestamp changed and buffer is non-empty,
     // emit prior access unit before beginning new one (RFC 6184 §5.1)
@@ -223,6 +225,13 @@ void VideoDecoder::FeedRtp(const uint8_t* payload, size_t size,
             EmitAccessUnit(m_last_pts_ns, m_last_seq);
         }
         m_fu_a_started = false;
+    }
+    if (m_first_packet_qpc == 0 || new_timestamp) {
+        m_first_packet_qpc = first_packet_qpc;
+    }
+    if (new_timestamp) {
+        telemetry::LatencyTelemetry::Get().RecordFrameInterval(
+            telemetry::FrameTimingMetric::RtpIngest, m_first_packet_qpc);
     }
     m_last_rtp_ts     = rtp_ts;
     m_last_pts_ns     = pts_ns;
@@ -316,11 +325,13 @@ void VideoDecoder::FeedRtp(const uint8_t* payload, size_t size,
 }
 
 void VideoDecoder::Flush() noexcept {
+    m_first_packet_qpc = 0;
     m_au_buf.clear();
     m_fu_a_started    = false;
     m_fu_a_nal_start  = 0;
     m_has_last_rtp_ts = false;
     m_last_rtp_ts     = 0;
+    m_rtp_timeline.Reset();
     m_decode_samples.clear();
     m_last_decode_stats_time_ns = 0;
     if (m_hevc_assembler) {

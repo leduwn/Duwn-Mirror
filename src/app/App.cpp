@@ -282,6 +282,9 @@ int App::Run(bool test_motion, bool verify_capture, bool test_rotate) noexcept {
 
 
     DUWN_LOG_INFO("App", "Duwn Mirror starting");
+    wchar_t frame_timing_env[2]{};
+    telemetry::LatencyTelemetry::Get().SetFrameTimingEnabled(
+        ::GetEnvironmentVariableW(L"DUWN_FRAME_TIMING", frame_timing_env, 2) == 1 && frame_timing_env[0] == L'1');
 
     common::CpuCapabilities::Get().LogCapabilities();
 
@@ -991,8 +994,8 @@ bool App::Init() noexcept {
     m_airplay = std::make_unique<airplay::AirPlayEngine>(std::move(ap_cfg));
     m_airplay->SetVideoCallback([this](const uint8_t* d, size_t s,
                                         uint32_t ts, int64_t arr,
-                                        bool marker, uint16_t seq){
-        OnVideoData(d, s, ts, arr, marker, seq);
+                                        bool marker, uint16_t seq, int64_t arrival_qpc){
+        OnVideoData(d, s, ts, arr, marker, seq, arrival_qpc);
     });
     m_airplay->SetAudioCallback([this](const uint8_t* d, size_t s,
                                         uint32_t ts, int64_t arr){
@@ -3656,6 +3659,7 @@ bool App::WaitForMediaReadiness(uint32_t timeout_ms) const noexcept {
 }
 
 void App::ResetSessionFirstEvents() noexcept {
+    telemetry::LatencyTelemetry::Get().Reset();
     m_session_generation.fetch_add(1, std::memory_order_acq_rel);
     m_session_frames_presented.store(0, std::memory_order_release);
     m_session_first_frame_handled.store(false, std::memory_order_release);
@@ -3733,7 +3737,7 @@ void App::OnVideoData(const uint8_t* data, size_t size,
 
                        uint32_t rtp_ts, int64_t arrival_ns,
 
-                       bool marker, uint16_t seq) noexcept {
+                       bool marker, uint16_t seq, int64_t arrival_qpc) noexcept {
 
     GlobalMetrics().video_rtp_packets.fetch_add(1, std::memory_order_relaxed);
     if (marker) GlobalMetrics().video_rtp_frame_boundaries.fetch_add(1, std::memory_order_relaxed);
@@ -3803,24 +3807,37 @@ void App::OnVideoData(const uint8_t* data, size_t size,
                 : (m_settings.receiver_height > 0 ? m_settings.receiver_height : 1080);
 
             m_decoder_ready.store(false, std::memory_order_release);
-            std::lock_guard<std::mutex> lock(m_decoder_mutex);
-            if (m_video_decoder) {
-                m_video_decoder->Flush();
-                m_video_decoder->ResetCodecState();
-                if (m_video_decoder->Init(init_w, init_h, codec_type)) {
-                    m_stream_width.store(init_w, std::memory_order_relaxed);
-                    m_stream_height.store(init_h, std::memory_order_relaxed);
-                    m_decoder_ready.store(true, std::memory_order_release);
-                    DUWN_LOG_INFOF("App", "Video decoder configured for {}x{} ({}) via {}",
-                        init_w, init_h, codec_type == video::VideoCodecType::H265 ? "HEVC" : "H.264",
-                        classification.evidence);
-                } else {
-                    m_decoder_ready.store(false, std::memory_order_release);
-                    DUWN_LOG_ERRORF("App", "Failed to configure video decoder for {}x{} ({}) via {}",
-                        init_w, init_h, codec_type == video::VideoCodecType::H265 ? "HEVC" : "H.264",
-                        classification.evidence);
+            auto& timing = telemetry::LatencyTelemetry::Get();
+            const bool diagnostics = timing.FrameTimingEnabled();
+            const int64_t wait_begin = diagnostics ? clock::MonotonicClock::NowQpcTicks() : 0;
+            int64_t acquired = 0;
+            int64_t hold_end = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_decoder_mutex);
+                acquired = diagnostics ? clock::MonotonicClock::NowQpcTicks() : 0;
+                if (m_video_decoder) {
+                    m_video_decoder->Flush();
+                    m_video_decoder->ResetCodecState();
+                    if (m_video_decoder->Init(init_w, init_h, codec_type)) {
+                        m_stream_width.store(init_w, std::memory_order_relaxed);
+                        m_stream_height.store(init_h, std::memory_order_relaxed);
+                        m_decoder_ready.store(true, std::memory_order_release);
+                        DUWN_LOG_INFOF("App", "Video decoder configured for {}x{} ({}) via {}",
+                            init_w, init_h, codec_type == video::VideoCodecType::H265 ? "HEVC" : "H.264",
+                            classification.evidence);
+                    } else {
+                        m_decoder_ready.store(false, std::memory_order_release);
+                        DUWN_LOG_ERRORF("App", "Failed to configure video decoder for {}x{} ({}) via {}",
+                            init_w, init_h, codec_type == video::VideoCodecType::H265 ? "HEVC" : "H.264",
+                            classification.evidence);
+                    }
                 }
+                hold_end = diagnostics ? clock::MonotonicClock::NowQpcTicks() : 0;
             }
+            timing.RecordFrameDuration(telemetry::FrameTimingMetric::DecoderMutexWait,
+                                       wait_begin, acquired);
+            timing.RecordFrameDuration(telemetry::FrameTimingMetric::DecoderMutexHold,
+                                       acquired, hold_end);
         }
     }
 
@@ -3832,14 +3849,23 @@ void App::OnVideoData(const uint8_t* data, size_t size,
 
 
     {
-
-        std::lock_guard<std::mutex> lock(m_decoder_mutex);
-
-        if (m_video_decoder) {
-
-            m_video_decoder->FeedRtp(data, size, rtp_ts, arrival_ns, marker, seq);
-
+        auto& timing = telemetry::LatencyTelemetry::Get();
+        const bool diagnostics = timing.FrameTimingEnabled();
+        const int64_t wait_begin = diagnostics ? clock::MonotonicClock::NowQpcTicks() : 0;
+        int64_t acquired = 0;
+        int64_t hold_end = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_decoder_mutex);
+            acquired = diagnostics ? clock::MonotonicClock::NowQpcTicks() : 0;
+            if (m_video_decoder) {
+                m_video_decoder->FeedRtp(data, size, rtp_ts, arrival_ns, marker, seq, arrival_qpc);
+            }
+            hold_end = diagnostics ? clock::MonotonicClock::NowQpcTicks() : 0;
         }
+        timing.RecordFrameDuration(telemetry::FrameTimingMetric::DecoderMutexHold,
+                                   acquired, hold_end);
+        timing.RecordFrameDuration(telemetry::FrameTimingMetric::DecoderMutexWait,
+                                   wait_begin, acquired);
 
     }
 
@@ -4303,6 +4329,15 @@ void App::OnFramePresent(video::VideoFrame& frame) noexcept {
     const video::PresentResult result = m_renderer->Present(frame, skip_wait);
 
     if (result == video::PresentResult::Ok) {
+        auto& timing = telemetry::LatencyTelemetry::Get();
+        using Metric = telemetry::FrameTimingMetric;
+        timing.RecordFrameDuration(Metric::Assembly, frame.rtp_arrival_qpc, frame.au_received_qpc);
+        timing.RecordFrameDuration(Metric::AuToOutput, frame.au_received_qpc, frame.process_output_qpc);
+        timing.RecordFrameDuration(Metric::OutputToQueue, frame.process_output_qpc, frame.queue_push_qpc);
+        timing.RecordFrameDuration(Metric::QueueDwell, frame.queue_push_qpc, frame.queue_pop_qpc);
+        timing.RecordFrameDuration(Metric::SelectToReturn, frame.queue_pop_qpc, frame.present_end_qpc);
+        timing.RecordFrameDuration(Metric::ReceiveToReturn, frame.rtp_arrival_qpc, frame.present_end_qpc);
+        timing.RecordFrameDuration(Metric::PresentCall, frame.present_begin_qpc, frame.present_end_qpc);
         m_session_frames_presented.fetch_add(1, std::memory_order_relaxed);
         if (!m_first_output_present_recorded.exchange(true, std::memory_order_relaxed)) {
             duwn::telemetry::ConnectionTimeline::Get().Record(
@@ -4745,6 +4780,11 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
     uint64_t prev_po_fail     = 0;
 
+    uint64_t prev_not_accepting = 0;
+    uint64_t prev_sw_fallbacks  = 0;
+    uint64_t prev_drain_samples = 0;
+    uint64_t prev_drain_outputs = 0;
+
 
 
     while (!stop.stop_requested()) {
@@ -4936,6 +4976,11 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
         uint64_t cur_po_fail   = m.decoder_output_failed.load(std::memory_order_relaxed);
 
+        uint64_t cur_not_accepting = m.decoder_not_accepting.load(std::memory_order_relaxed);
+        uint64_t cur_sw_fallbacks  = m.decoder_software_fallbacks.load(std::memory_order_relaxed);
+        uint64_t cur_drain_samples = m.decoder_drain_input_samples.load(std::memory_order_relaxed);
+        uint64_t cur_drain_outputs = m.decoder_drain_outputs.load(std::memory_order_relaxed);
+
 
 
         uint64_t au_sub_rate   = rate_delta(cur_au_sub, prev_au_sub);
@@ -4955,6 +5000,12 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
         uint64_t po_sc_rate    = rate_delta(cur_po_sc, prev_po_sc);
 
         uint64_t po_fail_rate  = rate_delta(cur_po_fail, prev_po_fail);
+        uint64_t not_accepting_rate = rate_delta(cur_not_accepting, prev_not_accepting);
+        uint64_t sw_fallback_rate   = rate_delta(cur_sw_fallbacks, prev_sw_fallbacks);
+        uint64_t drain_sample_rate  = rate_delta(cur_drain_samples, prev_drain_samples);
+        uint64_t drain_output_rate  = rate_delta(cur_drain_outputs, prev_drain_outputs);
+        const double outputs_per_input = drain_sample_rate > 0
+            ? static_cast<double>(drain_output_rate) / static_cast<double>(drain_sample_rate) : 0.0;
 
 
 
@@ -4975,6 +5026,10 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
         prev_po_sc    = cur_po_sc;
 
         prev_po_fail  = cur_po_fail;
+        prev_not_accepting = cur_not_accepting;
+        prev_sw_fallbacks  = cur_sw_fallbacks;
+        prev_drain_samples = cur_drain_samples;
+        prev_drain_outputs = cur_drain_outputs;
 
 
 
@@ -5502,9 +5557,11 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
 
         DUWN_LOG_INFOF("Diagnostics",
 
-            "[STATS] DECODER: au_sub={}/s | in_calls={}/s (ok={}, fail={}) | out_calls={}/s (ok={}, need_input={}, sc={}, fail={})",
+            "[STATS] DECODER: au_sub={}/s | in_calls={}/s (ok={}, fail={}, not_accepting={}) | out_calls={}/s (ok={}, need_input={}, sc={}, fail={}) | outputs_per_input={:.3f} (samples={}) | sw_fallback={}",
 
-            au_sub_rate, pi_calls_rate, pi_succ_rate, pi_fail_rate, po_calls_rate, po_succ_rate, po_nmi_rate, po_sc_rate, po_fail_rate);
+            au_sub_rate, pi_calls_rate, pi_succ_rate, pi_fail_rate, not_accepting_rate,
+            po_calls_rate, po_succ_rate, po_nmi_rate, po_sc_rate, po_fail_rate,
+            outputs_per_input, drain_sample_rate, sw_fallback_rate);
 
 
 
@@ -5571,6 +5628,17 @@ void App::MetricsLoop(std::stop_token stop) noexcept {
         telemetry::LatencyTelemetry::Get().UpdateAudioBuffering(ring_buf_ms, wasapi_ms);
 
         auto lat_snap = telemetry::LatencyTelemetry::Get().Snapshot();
+        if (telemetry::LatencyTelemetry::Get().FrameTimingEnabled()) {
+            const auto timings = telemetry::LatencyTelemetry::Get().CollectFrameTiming();
+            for (size_t i = 0; i < timings.size(); ++i) {
+                const auto& t = timings[i];
+                DUWN_LOG_INFOF("Diagnostics",
+                    "[FRAME TIMING] session={} metric={} count={} retained={} mean={:.3f}ms p50={:.3f}ms p95={:.3f}ms p99={:.3f}ms max={:.3f}ms over_1ms={} gaps_gt25={} gaps_gt33={} gaps_gt50={} available={}",
+                    m_session_generation.load(std::memory_order_acquire), telemetry::kFrameTimingNames[i],
+                    t.count, t.retained, t.mean, t.p50, t.p95, t.p99, t.max, t.over1, t.gaps25, t.gaps33, t.gaps50,
+                    t.count != 0);
+            }
+        }
 
 
 

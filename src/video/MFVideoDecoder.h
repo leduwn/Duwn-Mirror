@@ -11,6 +11,7 @@
 #include "VideoGeometry.h"
 #include "D3D11Device.h"
 #include "EncodedAccessUnit.h"
+#include "DecoderInputTiming.h"
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mftransform.h>
@@ -80,7 +81,7 @@ public:
     bool Reset(const DecoderConfig& cfg) noexcept;
 
 private:
-    bool DrainOutput() noexcept;
+    uint32_t DrainOutput() noexcept;
     bool HandleStreamChange() noexcept;
     bool SetInputType(const DecoderConfig& cfg) noexcept;
     bool SetOutputType() noexcept;
@@ -133,9 +134,7 @@ private:
     uint32_t           m_last_desc_height{0};
 
     // End-to-end QPC and decode burst instrumentation (Phases 11 & 12)
-    int64_t             m_cur_rtp_arrival_qpc{0};
-    int64_t             m_cur_au_received_qpc{0};
-    int64_t             m_cur_process_input_qpc{0};
+    DecoderTimingTracker m_input_timing;
     int64_t             m_last_decode_output_qpc{0};
     uint64_t            m_current_burst_run{0};
     std::vector<double> m_gap_samples;

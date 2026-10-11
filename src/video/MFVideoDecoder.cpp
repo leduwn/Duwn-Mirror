@@ -5,6 +5,7 @@
 #include "common/clock/MonotonicClock.h"
 #include "common/telemetry/ConnectionTelemetry.h"
 #include "common/telemetry/ConnectionTimeline.h"
+#include "common/telemetry/LatencyTelemetry.h"
 #include <mfapi.h>
 #include <mferror.h>
 #include <strmif.h>
@@ -82,6 +83,7 @@ bool MFVideoDecoder::Init(const DecoderConfig& cfg) noexcept {
 }
 
 bool MFVideoDecoder::InitInternal(const DecoderConfig& cfg, bool force_software) noexcept {
+    m_input_timing.Reset();
     m_config = cfg;
     m_width  = cfg.width;
     m_height = cfg.height;
@@ -551,9 +553,9 @@ bool MFVideoDecoder::Feed(const uint8_t* data, size_t size,
         }
     }
 
-    m_cur_au_received_qpc = au_received_qpc > 0 ? au_received_qpc : clock::MonotonicClock::NowQpcTicks();
-    m_cur_rtp_arrival_qpc = rtp_arrival_qpc > 0 ? rtp_arrival_qpc : m_cur_au_received_qpc;
-    m_cur_process_input_qpc = clock::MonotonicClock::NowQpcTicks();
+    DecoderInputTiming timing{};
+    timing.au_received_qpc = au_received_qpc;
+    timing.rtp_arrival_qpc = rtp_arrival_qpc;
 
     // Wrap data in an IMFSample
     ComPtr<IMFSample>       sample;
@@ -589,11 +591,24 @@ bool MFVideoDecoder::Feed(const uint8_t* data, size_t size,
 
     m_last_input_time = mf_pts + NsToMF(1'000'000'000LL / 60);
 
+    timing.sample_time = mf_pts;
+    timing.process_input_qpc = clock::MonotonicClock::NowQpcTicks();
     hr = m_transform->ProcessInput(0, sample.Get(), 0);
+    auto& latency = telemetry::LatencyTelemetry::Get();
+    if (latency.FrameTimingEnabled())
+        latency.RecordFrameDuration(telemetry::FrameTimingMetric::ProcessInput,
+                                    timing.process_input_qpc, clock::MonotonicClock::NowQpcTicks());
+    uint32_t drained_outputs = 0;
     if (hr == MF_E_NOTACCEPTING) {
+        if (latency.FrameTimingEnabled())
+            GlobalMetrics().decoder_not_accepting.fetch_add(1, std::memory_order_relaxed);
         // Output not drained yet — pull output first
-        DrainOutput();
+        drained_outputs += DrainOutput();
+        timing.process_input_qpc = clock::MonotonicClock::NowQpcTicks();
         hr = m_transform->ProcessInput(0, sample.Get(), 0);
+        if (latency.FrameTimingEnabled())
+            latency.RecordFrameDuration(telemetry::FrameTimingMetric::ProcessInput,
+                                        timing.process_input_qpc, clock::MonotonicClock::NowQpcTicks());
     }
 
     if (FAILED(hr)) {
@@ -618,12 +633,23 @@ bool MFVideoDecoder::Feed(const uint8_t* data, size_t size,
             DUWN_LOG_WARNF("MFVideoDecoder",
                 "ProcessInput failed on hardware MFT {:#010x}; triggering fallback to software MFT (Tier 2 Compatibility)",
                 static_cast<unsigned>(hr));
+            if (latency.FrameTimingEnabled())
+                GlobalMetrics().decoder_software_fallbacks.fetch_add(1, std::memory_order_relaxed);
             if (InitInternal(m_config, /*force_software=*/true)) {
                 // Retry ProcessInput once on software MFT
+                timing.process_input_qpc = clock::MonotonicClock::NowQpcTicks();
                 hr = m_transform->ProcessInput(0, sample.Get(), 0);
+                if (latency.FrameTimingEnabled())
+                    latency.RecordFrameDuration(telemetry::FrameTimingMetric::ProcessInput,
+                                                timing.process_input_qpc, clock::MonotonicClock::NowQpcTicks());
                 if (SUCCEEDED(hr)) {
+                    m_input_timing.Push(timing);
                     GlobalMetrics().decoder_process_input_success.fetch_add(1, std::memory_order_relaxed);
-                    DrainOutput();
+                    drained_outputs += DrainOutput();
+                    if (latency.FrameTimingEnabled()) {
+                        GlobalMetrics().decoder_drain_input_samples.fetch_add(1, std::memory_order_relaxed);
+                        GlobalMetrics().decoder_drain_outputs.fetch_add(drained_outputs, std::memory_order_relaxed);
+                    }
                     return true;
                 }
             }
@@ -632,7 +658,12 @@ bool MFVideoDecoder::Feed(const uint8_t* data, size_t size,
     }
 
     GlobalMetrics().decoder_process_input_success.fetch_add(1, std::memory_order_relaxed);
-    DrainOutput();
+    m_input_timing.Push(timing);
+    drained_outputs += DrainOutput();
+    if (latency.FrameTimingEnabled()) {
+        GlobalMetrics().decoder_drain_input_samples.fetch_add(1, std::memory_order_relaxed);
+        GlobalMetrics().decoder_drain_outputs.fetch_add(drained_outputs, std::memory_order_relaxed);
+    }
     return true;
 }
 
@@ -725,12 +756,14 @@ bool MFVideoDecoder::HandleStreamChange() noexcept {
     return true;
 }
 
-bool MFVideoDecoder::DrainOutput() noexcept {
-    if (!m_transform) return false;
+uint32_t MFVideoDecoder::DrainOutput() noexcept {
+    if (!m_transform) return 0;
 
     MFT_OUTPUT_STREAM_INFO stream_info{};
     HRESULT hr = m_transform->GetOutputStreamInfo(0, &stream_info);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) return 0;
+
+    uint32_t drained_outputs = 0;
 
     bool provides_samples = (stream_info.dwFlags &
         (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES)) != 0;
@@ -759,7 +792,13 @@ bool MFVideoDecoder::DrainOutput() noexcept {
             }
         }
 
+        auto& latency = telemetry::LatencyTelemetry::Get();
+        const bool diagnostics = latency.FrameTimingEnabled();
+        const int64_t process_output_begin = diagnostics ? clock::MonotonicClock::NowQpcTicks() : 0;
         hr = m_transform->ProcessOutput(0, 1, &output_buf, &status);
+        if (diagnostics)
+            latency.RecordFrameDuration(telemetry::FrameTimingMetric::ProcessOutput,
+                                        process_output_begin, clock::MonotonicClock::NowQpcTicks());
 
         if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
             GlobalMetrics().decoder_need_more_input.fetch_add(1, std::memory_order_relaxed);
@@ -792,10 +831,13 @@ bool MFVideoDecoder::DrainOutput() noexcept {
         }
 
         GlobalMetrics().decoder_process_output_success.fetch_add(1, std::memory_order_relaxed);
+        ++drained_outputs;
 
         if (output_buf.pEvents) output_buf.pEvents->Release();
 
         int64_t process_output_qpc = clock::MonotonicClock::NowQpcTicks();
+        telemetry::LatencyTelemetry::Get().RecordFrameInterval(
+            telemetry::FrameTimingMetric::DecoderOutput, process_output_qpc);
 
         // Phase 11: Decode burst instrumentation & output gap bucketing
         if (m_last_decode_output_qpc > 0) {
@@ -854,6 +896,10 @@ bool MFVideoDecoder::DrainOutput() noexcept {
             out_sample = custom_sample;
             if (!out_sample) continue;
         }
+
+        LONGLONG correlated_sample_time = 0;
+        const DecoderInputTiming timing = SUCCEEDED(out_sample->GetSampleTime(&correlated_sample_time))
+            ? m_input_timing.Take(correlated_sample_time) : DecoderInputTiming{};
 
         // Extract buffer from sample
         ComPtr<IMFMediaBuffer> buf;
@@ -916,9 +962,9 @@ bool MFVideoDecoder::DrainOutput() noexcept {
             frame.sequence_number   = ++s_seq_counter;
             frame.arrival_ns        = duwn::clock::MonotonicClock::Now().time_since_epoch().count();
             frame.pts_ns            = sample_time * 100LL;
-            frame.rtp_arrival_qpc   = m_cur_rtp_arrival_qpc;
-            frame.au_received_qpc   = m_cur_au_received_qpc;
-            frame.process_input_qpc = m_cur_process_input_qpc;
+            frame.rtp_arrival_qpc   = timing.rtp_arrival_qpc;
+            frame.au_received_qpc   = timing.au_received_qpc;
+            frame.process_input_qpc = timing.process_input_qpc;
             frame.process_output_qpc= process_output_qpc;
 
             GlobalMetrics().video_decoded_frames.fetch_add(1, std::memory_order_relaxed);
@@ -989,8 +1035,9 @@ bool MFVideoDecoder::DrainOutput() noexcept {
                     frame.sequence_number   = ++s_seq_counter;
                     frame.arrival_ns        = duwn::clock::MonotonicClock::Now().time_since_epoch().count();
                     frame.pts_ns            = sample_time * 100LL;
-                    frame.au_received_qpc   = m_cur_au_received_qpc;
-                    frame.process_input_qpc = m_cur_process_input_qpc;
+                    frame.rtp_arrival_qpc   = timing.rtp_arrival_qpc;
+                    frame.au_received_qpc   = timing.au_received_qpc;
+                    frame.process_input_qpc = timing.process_input_qpc;
                     frame.process_output_qpc= process_output_qpc;
 
                     GlobalMetrics().video_decoded_frames.fetch_add(1, std::memory_order_relaxed);
@@ -1019,10 +1066,14 @@ bool MFVideoDecoder::DrainOutput() noexcept {
             }
         }
     }
-    return true;
+    return drained_outputs;
 }
 
 void MFVideoDecoder::Flush() noexcept {
+    m_input_timing.Reset();
+    m_last_decode_output_qpc = 0;
+    m_gap_samples.clear();
+    m_current_burst_run = 0;
     if (!m_transform) return;
     m_transform->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
 }

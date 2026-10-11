@@ -3133,8 +3133,8 @@ void MainWindowView::RenderDropdownOverlay(const UiState& state) noexcept {
     }
 
     struct DropdownItem {
-        std::wstring_view label;
-        std::wstring_view desc;
+        std::wstring label;
+        std::wstring desc;
     };
 
     std::vector<DropdownItem> items;

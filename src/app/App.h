@@ -106,7 +106,7 @@ private:
     // AirPlay callbacks (called on AirPlay engine threads)
     void OnVideoData(const uint8_t* data, size_t size,
                      uint32_t rtp_ts, int64_t arrival_ns,
-                     bool marker, uint16_t seq) noexcept;
+                     bool marker, uint16_t seq, int64_t arrival_qpc) noexcept;
     void OnAudioData(const uint8_t* data, size_t size,
                      uint32_t rtp_ts, int64_t arrival_ns) noexcept;
     void OnPhase(airplay::SessionPhase prev, airplay::SessionPhase next) noexcept;

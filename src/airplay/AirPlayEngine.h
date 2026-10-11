@@ -19,7 +19,7 @@ namespace duwn::airplay {
 // Called on the video RTP recv thread. MUST NOT block.
 using VideoDataCallback = std::function<void(
     const uint8_t* data, size_t size, uint32_t rtp_ts, int64_t arrival_ns,
-    bool marker, uint16_t seq)>;
+    bool marker, uint16_t seq, int64_t arrival_qpc)>;
 
 // Callback: raw compressed audio data + RTP timestamp.
 using AudioDataCallback = std::function<void(

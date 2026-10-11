@@ -1,4 +1,5 @@
 #include "FrameScheduler.h"
+#include "common/telemetry/LatencyTelemetry.h"
 
 #include "common/logging/Logger.h"
 
@@ -480,6 +481,9 @@ void FrameScheduler::PushFrame(VideoFrame frame) noexcept {
         }
 
 
+
+        telemetry::LatencyTelemetry::Get().RecordFrameInterval(
+            telemetry::FrameTimingMetric::Enqueue, frame.queue_push_qpc);
 
         const StreamingPolicy policy = m_streaming_policy.load(std::memory_order_acquire);
         const size_t capacity = std::clamp<size_t>(policy.max_decoded_frames, 1, 3);
@@ -1174,6 +1178,8 @@ void FrameScheduler::SchedulerLoopGameLowLatency(std::stop_token stop) noexcept 
 
 
             m_last_presented_sequence.store(frame.sequence_number, std::memory_order_release);
+            telemetry::LatencyTelemetry::Get().RecordFrameInterval(
+                telemetry::FrameTimingMetric::Dequeue, frame.queue_pop_qpc);
 
 
 

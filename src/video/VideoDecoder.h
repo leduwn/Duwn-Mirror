@@ -10,6 +10,7 @@
 #include "D3D11Device.h"
 #include "EncodedAccessUnit.h"
 #include "HevcRtpAssembler.h"
+#include "RtpTimestampMapper.h"
 #include <vector>
 #include <memory>
 #include <cstdint>
@@ -33,10 +34,10 @@ public:
     void FeedAccessUnit(EncodedAccessUnit au) noexcept;
 
     // Called for each RTP packet payload (after jitter buffer ordering).
-    // rtp_ts: RTP timestamp; pts_ns: MonotonicClock PTS (0 if not yet anchored).
+    // RTP deltas provide cadence; arrival_ns only anchors that relative timeline locally.
     void FeedRtp(const uint8_t* payload, size_t size,
-                 uint32_t rtp_ts, int64_t pts_ns,
-                 bool marker, uint16_t seq) noexcept;
+                 uint32_t rtp_ts, int64_t arrival_ns,
+                 bool marker, uint16_t seq, int64_t arrival_qpc = 0) noexcept;
 
     void Flush() noexcept;
     void ResetCodecState() noexcept;
@@ -71,6 +72,7 @@ private:
     uint16_t                m_last_seq{0};
     int64_t                 m_first_packet_qpc{0};
     uint64_t                m_au_sequence{0};
+    RtpTimestampMapper      m_rtp_timeline{90'000};
 
     // Decode-thread-only windowed decode time samples for 1s percentiles
     std::vector<double>     m_decode_samples;

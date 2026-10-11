@@ -22,8 +22,9 @@ struct RtpPacket {
     // Payload (points into receive buffer — zero-copy)
     std::span<const uint8_t> payload{};
 
-    // Wall-clock arrival time (nanoseconds, MonotonicClock)
+    // Local monotonic arrival time; QPC ticks are forwarded for frame diagnostics.
     int64_t arrival_ns{};
+    int64_t arrival_qpc{};
 
     // Parse raw UDP datagram. Returns false if malformed.
     static bool Parse(std::span<const uint8_t> datagram,

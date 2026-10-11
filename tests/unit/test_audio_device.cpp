@@ -6,6 +6,8 @@
 #include "audio/AudioRingBuffer.h"
 #include "app/Settings.h"
 #include "ui/UiState.h"
+#include "ui/Loc.h"
+#include <format>
 #include <string>
 #include <vector>
 
@@ -960,5 +962,78 @@ DUWN_TEST(AudioDevice_HardwareEndpoints_RealtekAndVbAudio) {
     }
 
     mgr.Shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// 25. AudioDevice: Unicode Friendly Name Preservation and Formatting Lifetime
+// ---------------------------------------------------------------------------
+DUWN_TEST(AudioDevice_UnicodeFriendlyName_PreservationAndFormatting) {
+    // 1. AudioEndpointInfo and AudioDeviceItem preserve full Unicode strings
+    const std::wstring vi_name = L"Loa ngoài — Thiết bị âm thanh độ nét cao (Realtek®)";
+    const std::wstring ja_name = L"スピーカー (Realtek High Definition Audio)";
+    const std::wstring zh_name = L"扬声器 (Realtek 高清音频设备)";
+
+    AudioEndpointInfo ep_vi{ L"{id-1}", vi_name, true };
+    AudioEndpointInfo ep_ja{ L"{id-2}", ja_name, true };
+    AudioEndpointInfo ep_zh{ L"{id-3}", zh_name, true };
+
+    DUWN_ASSERT(ep_vi.friendly_name == vi_name);
+    DUWN_ASSERT(ep_ja.friendly_name == ja_name);
+    DUWN_ASSERT(ep_zh.friendly_name == zh_name);
+
+    std::vector<AudioDeviceItem> dev_items = {
+        { L"{id-1}", vi_name, true },
+        { L"{id-2}", ja_name, false },
+        { L"{id-3}", zh_name, true }
+    };
+
+    // 2. Formatting unavailable endpoint preserves Unicode characters
+    namespace loc = duwn::ui::loc;
+    loc::SetLang(loc::Lang::En);
+    std::wstring unavail_en = std::vformat(
+        loc::Get(loc::S::Audio_EndpointUnavailableFormat),
+        std::make_wformat_args(dev_items[1].name)
+    );
+    DUWN_ASSERT(unavail_en.find(ja_name) != std::wstring::npos);
+    DUWN_ASSERT(unavail_en.find(L"Unavailable") != std::wstring::npos);
+
+    loc::SetLang(loc::Lang::Vi);
+    std::wstring unavail_vi = std::vformat(
+        loc::Get(loc::S::Audio_EndpointUnavailableFormat),
+        std::make_wformat_args(dev_items[1].name)
+    );
+    DUWN_ASSERT(unavail_vi.find(ja_name) != std::wstring::npos);
+    DUWN_ASSERT(unavail_vi.find(L"Không khả dụng") != std::wstring::npos);
+
+    // 3. Dropdown item vector lifetime: owned std::wstring survives temporary creation
+    struct TestDropdownItem {
+        std::wstring label;
+        std::wstring desc;
+    };
+    std::vector<TestDropdownItem> dropdown_items;
+
+    dropdown_items.push_back({
+        loc::Get(loc::S::Opt_Audio_SystemDefault),
+        loc::Get(loc::S::Opt_Audio_SystemDefault_Desc)
+    });
+
+    for (const auto& dev : dev_items) {
+        dropdown_items.push_back({
+            dev.available
+                ? dev.name
+                : std::vformat(
+                    loc::Get(loc::S::Audio_EndpointUnavailableFormat),
+                    std::make_wformat_args(dev.name)),
+            dev.available ? loc::Get(loc::S::Opt_Audio_DirectEndpoint_Desc)
+                          : loc::Get(loc::S::Audio_EndpointDisconnectedDesc)
+        });
+    }
+
+    DUWN_ASSERT(dropdown_items.size() == 4);
+    DUWN_ASSERT(dropdown_items[1].label == vi_name);
+    DUWN_ASSERT(dropdown_items[2].label == unavail_vi);
+    DUWN_ASSERT(dropdown_items[3].label == zh_name);
+
+    loc::SetLang(loc::Lang::En);
 }
 

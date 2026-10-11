@@ -2,6 +2,7 @@
 #include "common/logging/Logger.h"
 #include "common/metrics/Metrics.h"
 #include "common/clock/MonotonicClock.h"
+#include "common/telemetry/LatencyTelemetry.h"
 #include <span>
 
 namespace duwn::video {
@@ -44,7 +45,7 @@ void HevcRtpAssembler::Flush() noexcept {
 
 void HevcRtpAssembler::FeedRtp(const uint8_t* payload, size_t size,
                                uint32_t rtp_ts, int64_t pts_ns,
-                               bool marker, uint16_t seq) noexcept {
+                               bool marker, uint16_t seq, int64_t arrival_qpc) noexcept {
     if (size == 0 || !payload) return;
 
     // Check RFC 7798 forbidden_zero_bit (bit 7 of first byte must be 0)
@@ -53,14 +54,21 @@ void HevcRtpAssembler::FeedRtp(const uint8_t* payload, size_t size,
         return;
     }
 
-    if (m_first_packet_qpc == 0) {
-        m_first_packet_qpc = clock::MonotonicClock::NowQpcTicks();
-    }
+    const bool new_timestamp = !m_has_last_rtp_ts || rtp_ts != m_last_rtp_ts;
+    const int64_t first_packet_qpc = (m_first_packet_qpc == 0 || new_timestamp)
+        ? (arrival_qpc > 0 ? arrival_qpc : clock::MonotonicClock::NowQpcTicks()) : 0;
 
     // Detect timestamp boundary: if RTP timestamp changed and buffer is non-empty,
     // emit prior access unit before beginning new one (RFC 7798 §4.4)
     if (m_has_last_rtp_ts && rtp_ts != m_last_rtp_ts && !m_au_buf.empty()) {
         EmitAccessUnit(m_last_pts_ns, m_last_seq);
+    }
+    if (m_first_packet_qpc == 0 || new_timestamp) {
+        m_first_packet_qpc = first_packet_qpc;
+    }
+    if (new_timestamp) {
+        telemetry::LatencyTelemetry::Get().RecordFrameInterval(
+            telemetry::FrameTimingMetric::RtpIngest, m_first_packet_qpc);
     }
     m_last_rtp_ts     = rtp_ts;
     m_last_pts_ns     = pts_ns;

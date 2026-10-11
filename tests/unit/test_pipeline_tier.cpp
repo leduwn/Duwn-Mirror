@@ -1,6 +1,7 @@
 #include "video/PipelineTier.h"
 #include "video/D3D11Device.h"
 #include "video/MFVideoDecoder.h"
+#include "video/VideoColorSpace.h"
 #include <string_view>
 #include <cstdio>
 
@@ -33,6 +34,20 @@ DUWN_TEST(D3D11Device_CreateAndProbe) {
     DUWN_ASSERT(!ai.description.empty());
     // Either hardware or WARP
     DUWN_ASSERT(ai.is_hardware || ai.is_warp);
+}
+
+DUWN_TEST(VideoColorSpace_MapsSdrRangeAndMatrixWithoutGuessingFullRange) {
+    using namespace duwn::video;
+    const auto b601_full = ResolveVideoColorSpace(1, 2, 480);
+    DUWN_ASSERT(b601_full.input == DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P601);
+    DUWN_ASSERT(b601_full.legacy_input.Nominal_Range == D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255);
+    const auto b709_limited = ResolveVideoColorSpace(2, 1, 1080);
+    DUWN_ASSERT(b709_limited.input == DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
+    DUWN_ASSERT(b709_limited.legacy_input.Nominal_Range == D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235);
+    const auto b2020_full = ResolveVideoColorSpace(3, 2, 2160);
+    DUWN_ASSERT(b2020_full.input == DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020);
+    const auto unknown = ResolveVideoColorSpace(0, 0, 1080);
+    DUWN_ASSERT(unknown.input == DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
 }
 
 DUWN_TEST(MFVideoDecoder_ThreeTierFallbackValidation) {
@@ -187,5 +202,4 @@ DUWN_TEST(D3D11VideoDevice_HEVCProfileAudit) {
     printf("  NV12 decode target supported: %s\n", nv12_supported ? "YES" : "NO");
     printf("  P010 decode target supported: %s\n", p010_supported ? "YES" : "NO");
 }
-
 

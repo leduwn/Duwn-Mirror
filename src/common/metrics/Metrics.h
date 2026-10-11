@@ -39,6 +39,10 @@ struct alignas(64) Metrics {
     std::atomic<uint64_t> decoder_need_more_input{0};
     std::atomic<uint64_t> decoder_stream_change{0};
     std::atomic<uint64_t> decoder_output_failed{0};
+    std::atomic<uint64_t> decoder_not_accepting{0};
+    std::atomic<uint64_t> decoder_software_fallbacks{0};
+    std::atomic<uint64_t> decoder_drain_input_samples{0};
+    std::atomic<uint64_t> decoder_drain_outputs{0};
 
     std::atomic<uint64_t> video_decoded_frames{0};
     std::atomic<int>      video_decoder_kind{0}; // 0 unknown, 1 hardware, 2 software

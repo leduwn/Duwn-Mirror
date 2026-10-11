@@ -9,6 +9,76 @@ LatencyTelemetry& LatencyTelemetry::Get() noexcept {
     return s_instance;
 }
 
+void LatencyTelemetry::TimingSamples::Add(double ms) noexcept {
+    values[count % values.size()] = ms;
+    ++count;
+    sum += ms;
+    max = std::max(max, ms);
+    over1 += ms > 1.0;
+    gaps25 += ms > 25.0;
+    gaps33 += ms > 33.0;
+    gaps50 += ms > 50.0;
+}
+
+void LatencyTelemetry::SetFrameTimingEnabled(bool enabled) noexcept {
+    m_frame_timing_enabled.store(false, std::memory_order_relaxed);
+    std::lock_guard lock(m_timing_mutex);
+    m_timing_samples = {};
+    m_previous_frame_qpc = {};
+    m_timing_reset_qpc = clock::MonotonicClock::NowQpcTicks();
+    m_frame_timing_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+void LatencyTelemetry::RecordFrameInterval(FrameTimingMetric metric, int64_t qpc) noexcept {
+    if (!FrameTimingEnabled() || qpc <= 0) return;
+    const auto index = static_cast<size_t>(metric);
+    if (index >= m_previous_frame_qpc.size()) return;
+    std::lock_guard lock(m_timing_mutex);
+    if (qpc < m_timing_reset_qpc) return;
+    auto& previous = m_previous_frame_qpc[index];
+    if (previous > 0 && qpc >= previous)
+        m_timing_samples[index].Add(clock::MonotonicClock::QpcDeltaMs(previous, qpc));
+    previous = qpc; // Re-anchor after a discontinuity without inventing an interval.
+}
+
+void LatencyTelemetry::RecordFrameDuration(FrameTimingMetric metric, int64_t start, int64_t end) noexcept {
+    if (!FrameTimingEnabled() || start <= 0 || end < start) return;
+    const auto index = static_cast<size_t>(metric);
+    if (index < m_previous_frame_qpc.size() || index >= m_timing_samples.size()) return;
+    const double ms = clock::MonotonicClock::QpcDeltaMs(start, end);
+    std::lock_guard lock(m_timing_mutex);
+    if (start < m_timing_reset_qpc) return;
+    m_timing_samples[index].Add(ms);
+}
+
+std::array<FrameTimingStats, kFrameTimingNames.size()> LatencyTelemetry::CollectFrameTiming() noexcept {
+    std::array<TimingSamples, kFrameTimingNames.size()> samples;
+    {
+        std::lock_guard lock(m_timing_mutex);
+        samples = m_timing_samples;
+        m_timing_samples = {};
+    }
+    std::array<FrameTimingStats, kFrameTimingNames.size()> result{};
+    for (size_t i = 0; i < samples.size(); ++i) {
+        auto& sample = samples[i];
+        auto& stats = result[i];
+        if (!sample.count) continue;
+        stats.count = sample.count;
+        stats.retained = static_cast<size_t>(std::min<uint64_t>(sample.count, sample.values.size()));
+        std::sort(sample.values.begin(), sample.values.begin() + stats.retained);
+        stats.mean = sample.sum / static_cast<double>(sample.count);
+        stats.p50 = sample.values[stats.retained * 50 / 100];
+        stats.p95 = sample.values[stats.retained * 95 / 100];
+        stats.p99 = sample.values[stats.retained * 99 / 100];
+        stats.max = sample.max;
+        stats.over1 = sample.over1;
+        stats.gaps25 = sample.gaps25;
+        stats.gaps33 = sample.gaps33;
+        stats.gaps50 = sample.gaps50;
+    }
+    return result;
+}
+
 static inline double SafeDeltaMs(int64_t start, int64_t end) noexcept {
     if (start <= 0 || end <= 0 || end < start) {
         return 0.0;
@@ -89,6 +159,12 @@ LatencyMetricsSnapshot LatencyTelemetry::Snapshot() const noexcept {
 }
 
 void LatencyTelemetry::Reset() noexcept {
+    {
+        std::lock_guard timing_lock(m_timing_mutex);
+        m_timing_samples = {};
+        m_previous_frame_qpc = {};
+        m_timing_reset_qpc = clock::MonotonicClock::NowQpcTicks();
+    }
     std::lock_guard lock(m_mutex);
     m_t0_to_t1_ms = 0.0;
     m_t1_to_t2_ms = 0.0;

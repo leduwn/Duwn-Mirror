@@ -108,7 +108,7 @@ void AirPlayEngine::OnVideoRtp(const network::RtpPacket& pkt) noexcept {
     if (m_video_cb) {
         m_video_cb(pkt.payload.data(), pkt.payload.size(),
                    pkt.timestamp, pkt.arrival_ns,
-                   pkt.marker, pkt.sequence);
+                   pkt.marker, pkt.sequence, pkt.arrival_qpc);
     }
 }
 

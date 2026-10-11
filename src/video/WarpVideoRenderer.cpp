@@ -1,4 +1,5 @@
 #include "WarpVideoRenderer.h"
+#include "common/telemetry/LatencyTelemetry.h"
 #include "VideoGeometry.h"
 #include "common/logging/Logger.h"
 #include "common/metrics/Metrics.h"
@@ -340,6 +341,8 @@ PresentResult WarpVideoRenderer::Present(VideoFrame& frame, bool skip_wait) noex
     }
     frame.vp_end_qpc = clock::MonotonicClock::NowQpcTicks();
     frame.present_begin_qpc = frame.vp_end_qpc;
+    telemetry::LatencyTelemetry::Get().RecordFrameInterval(
+        telemetry::FrameTimingMetric::PresentBegin, frame.present_begin_qpc);
     HRESULT hr = m_swap_chain->Present(0, 0);
     frame.present_end_qpc = clock::MonotonicClock::NowQpcTicks();
     if (SUCCEEDED(hr)) {

@@ -3,6 +3,7 @@
 #include "common/clock/MonotonicClock.h"
 #include "common/logging/Logger.h"
 #include "common/metrics/Metrics.h"
+#include "common/telemetry/LatencyTelemetry.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -70,6 +71,7 @@ bool RtpPacket::Parse(std::span<const uint8_t> data,
 
     out.payload     = data.subspan(offset, payload_end - offset);
     out.arrival_ns  = arrival_ns;
+    out.arrival_qpc = 0;
     return true;
 }
 
@@ -208,7 +210,8 @@ void RtpReceiver::RecvLoop() noexcept {
         m_stats.raw_udp.fetch_add(1, std::memory_order_relaxed);
         GlobalMetrics().network_raw_udp_packets.fetch_add(1, std::memory_order_relaxed);
 
-        int64_t now_ns = clock::Now().time_since_epoch().count();
+        const int64_t arrival_qpc = clock::NowQpcTicks();
+        int64_t now_ns = clock::FromQpcTicks(arrival_qpc).time_since_epoch().count();
 
         RtpPacket pkt;
         if (!RtpPacket::Parse(std::span{buf.data(), static_cast<size_t>(n)},
@@ -221,9 +224,20 @@ void RtpReceiver::RecvLoop() noexcept {
         }
 
         m_stats.received.fetch_add(1, std::memory_order_relaxed);
+        pkt.arrival_qpc = arrival_qpc;
         GlobalMetrics().network_received_packets.fetch_add(1, std::memory_order_relaxed);
 
+        auto& timing = telemetry::LatencyTelemetry::Get();
+        const bool diagnostics = m_stream_kind == RtpStreamKind::Video && timing.FrameTimingEnabled();
+        if (diagnostics) {
+            timing.RecordFrameInterval(telemetry::FrameTimingMetric::SocketRead, arrival_qpc);
+        }
+        const int64_t callback_begin = diagnostics ? clock::NowQpcTicks() : 0;
         m_callback(pkt);
+        if (diagnostics) {
+            timing.RecordFrameDuration(telemetry::FrameTimingMetric::ReceiverCallback,
+                                       callback_begin, clock::NowQpcTicks());
+        }
     }
 
     if (mmcss) {

@@ -1,5 +1,6 @@
 #include "VideoRenderer.h"
 #include "VideoGeometry.h"
+#include "VideoColorSpace.h"
 #include "common/logging/Logger.h"
 #include "common/metrics/Metrics.h"
 #include "common/clock/MonotonicClock.h"
@@ -280,12 +281,12 @@ bool VideoRenderer::RebuildVideoProcessor(uint32_t coded_src_w, uint32_t coded_s
     m_filter_caps.store(supported, std::memory_order_relaxed);
     m_filters_dirty.store(true, std::memory_order_release);
 
-    m_color_space_dirty.store(true, std::memory_order_release);
-    ApplyColorSpace(coded_src_h);
-
     m_src_coded_width  = coded_src_w;
     m_src_coded_height = coded_src_h;
     m_src_format       = source_format;
+
+    m_color_space_dirty.store(true, std::memory_order_release);
+    ApplyColorSpace(coded_src_h);
 
     // Create OutputView once — back buffer texture unchanged by VP rebuild.
     if (!CreateOutputView()) {
@@ -328,30 +329,30 @@ void VideoRenderer::ApplyVideoFilters(bool upscaling) noexcept {
 
 void VideoRenderer::ApplyColorSpace(uint32_t source_height) noexcept {
     if (!m_color_space_dirty.exchange(false, std::memory_order_acq_rel)) return;
-    ComPtr<ID3D11VideoContext1> vc1;
-    if (FAILED(m_video_context->QueryInterface(IID_PPV_ARGS(&vc1)))) {
-        if (!m_vc1_warned) {
-            DUWN_LOG_WARN("VideoRenderer", "ID3D11VideoContext1 unavailable — colour space not set explicitly");
-            m_vc1_warned = true;
-        }
-        return;
-    }
     int matrix = m_color_matrix.load(std::memory_order_relaxed);
     int range = m_color_range.load(std::memory_order_relaxed);
     if (matrix == 0) matrix = m_source_color_matrix.load(std::memory_order_relaxed);
     if (matrix == 0) matrix = source_height >= 720 ? 2 : 1;
     if (range == 0) range = m_source_color_range.load(std::memory_order_relaxed);
-    const bool full = range == 2;
-    DXGI_COLOR_SPACE_TYPE input = DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709;
-    if (matrix == 1) input = full ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P601
-                                  : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601;
-    else if (matrix == 2) input = full ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709
-                                       : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709;
-    else if (matrix == 3) input = full ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020
-                                       : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020;
-    vc1->VideoProcessorSetStreamColorSpace1(m_video_processor.Get(), 0, input);
-    vc1->VideoProcessorSetOutputColorSpace1(m_video_processor.Get(),
-        DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+    const VideoColorSpace color = ResolveVideoColorSpace(matrix, range, source_height);
+    ComPtr<ID3D11VideoContext1> vc1;
+    ComPtr<ID3D11VideoProcessorEnumerator1> enum1;
+    BOOL supported = FALSE;
+    if (SUCCEEDED(m_video_context->QueryInterface(IID_PPV_ARGS(&vc1))) &&
+        SUCCEEDED(m_vp_enum.As(&enum1)) &&
+        SUCCEEDED(enum1->CheckVideoProcessorFormatConversion(
+            m_src_format, color.input, DXGI_FORMAT_B8G8R8A8_UNORM, color.output, &supported)) && supported) {
+        vc1->VideoProcessorSetStreamColorSpace1(m_video_processor.Get(), 0, color.input);
+        vc1->VideoProcessorSetOutputColorSpace1(m_video_processor.Get(), color.output);
+        return;
+    }
+
+    if (!m_vc1_warned) {
+        DUWN_LOG_WARN("VideoRenderer", "ColorSpace1 conversion unavailable; using legacy D3D11 colour controls");
+        m_vc1_warned = true;
+    }
+    m_video_context->VideoProcessorSetStreamColorSpace(m_video_processor.Get(), 0, &color.legacy_input);
+    m_video_context->VideoProcessorSetOutputColorSpace(m_video_processor.Get(), &color.legacy_output);
 }
 
 // ---------------------------------------------------------------------------
@@ -716,6 +717,9 @@ PresentResult VideoRenderer::Present(VideoFrame& frame, bool skip_wait) noexcept
     // --- 7. Present ---
     const int64_t present_begin_qpc = vp_end_qpc;
     const UINT present_flags = is_non_blocking ? DXGI_PRESENT_DO_NOT_WAIT : 0;
+    if (!is_non_blocking)
+        telemetry::LatencyTelemetry::Get().RecordFrameInterval(
+            telemetry::FrameTimingMetric::PresentBegin, present_begin_qpc);
     hr = m_swap_chain->Present(0, present_flags);
     const int64_t present_end_qpc = clock::MonotonicClock::NowQpcTicks();
 
