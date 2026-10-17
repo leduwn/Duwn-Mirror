@@ -68,3 +68,19 @@ __pycache__/
 venv/
 env/
 *.egg-info/
+
+# CMake & IDE caches
+CMakeCache.txt
+CMakeFiles/
+cmake-build-*/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+
+# MSVC intermediate & debug artifacts
+*.obj
+*.pdb
+*.idb
+*.ilk
+*.exp
