@@ -51,7 +51,7 @@ Visit the [Official GitHub Releases](https://github.com/leduwn/Duwn-Mirror/relea
 
 | Package | Size | Intended Audience & Details |
 | :--- | :--- | :--- |
-| **`Duwn-Mirror-Setup-1.1.3-x64.exe`** (Official) | ~79 MB | **Single Inno Setup Installer:** Modern Windows 11 light design, bilingual (English & Vietnamese). Automatically verifies and installs VC++ Redistributable (x64), registers DirectShow VirtualCam, configures Windows Firewall, and performs seamless upgrades from legacy WiX/Inno installations preserving user configuration. |
+| **`Duwn-Mirror-Setup-1.1.5-x64.exe`** (Official) | ~79 MB | **Single Inno Setup Installer:** Modern Windows 11 light design, bilingual (English & Vietnamese). Automatically verifies and installs VC++ Redistributable (x64), registers DirectShow VirtualCam, configures Windows Firewall, and performs seamless upgrades from legacy WiX/Inno installations preserving user configuration. |
 | **`SHA256SUMS.txt`** | < 1 KB | Cryptographic SHA-256 hashes for verifying package and binary integrity. |
 
 ### 🔄 Installation & Upgrade Scenarios

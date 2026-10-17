@@ -4,7 +4,7 @@
 .DESCRIPTION
     Compiles duwn-mirror, duwn-virtualcam and tests in Release mode, executes test suites,
     verifies VC++ Redistributable staging, and compiles Duwn-Mirror.iss using Inno Setup 6
-    to produce Duwn-Mirror-Setup-1.1.3-x64.exe.
+    to produce Duwn-Mirror-Setup-1.1.5-x64.exe.
     Updates release.json and SHA256SUMS.txt.
 #>
 [CmdletBinding()]

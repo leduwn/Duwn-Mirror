@@ -51,7 +51,7 @@ Truy cập [Trang phát hành chính thức (GitHub Releases)](https://github.co
 
 | Gói cài đặt | Dung lượng | Đối tượng & Mục đích sử dụng |
 | :--- | :--- | :--- |
-| **`Duwn-Mirror-Setup-1.1.3-x64.exe`** (Chính thức) | ~79 MB | **Trọn gói Inno Setup:** Giao diện sáng Windows 11 hiện đại, song ngữ Việt - Anh. Tự động kiểm tra và cài đặt VC++ Redistributable (x64), đăng ký DirectShow VirtualCam, cấu hình Windows Firewall và tự động nâng cấp từ các bản WiX/Inno cũ mà không làm mất cấu hình. |
+| **`Duwn-Mirror-Setup-1.1.5-x64.exe`** (Chính thức) | ~79 MB | **Trọn gói Inno Setup:** Giao diện sáng Windows 11 hiện đại, song ngữ Việt - Anh. Tự động kiểm tra và cài đặt VC++ Redistributable (x64), đăng ký DirectShow VirtualCam, cấu hình Windows Firewall và tự động nâng cấp từ các bản WiX/Inno cũ mà không làm mất cấu hình. |
 | **`SHA256SUMS.txt`** | < 1 KB | Bảng mã băm SHA-256 đối chiếu tính toàn vẹn của tệp cài đặt và tệp nhị phân phát hành. |
 
 ### 🔄 Các tình huống cài đặt và nâng cấp
